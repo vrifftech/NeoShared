@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: '47 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux (GCC)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out neoshared
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            build-essential \
+            cmake \
+            ninja-build
+
+      - name: Configure and build
+        run: |
+          ./scripts/build.sh \
+            --build-dir build \
+            --build-type Release \
+            --tests ON \
+            --minimal-release OFF \
+            --generator Ninja \
+            --jobs 2 \
+            --clean
+
+      - name: Run tests
+        run: ctest --test-dir build -C Release --output-on-failure
+
+  windows:
+    name: Windows (Visual Studio 2026)
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out neoshared
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Configure and build
+        shell: pwsh
+        run: |
+          .\scripts\build.ps1 `
+            -BuildDir build `
+            -BuildType Release `
+            -Tests ON `
+            -MinimalRelease OFF `
+            -Generator 'Visual Studio 18 2026' `
+            -Platform x64 `
+            -Parallel 2 `
+            -Clean
+
+      - name: Run tests
+        shell: pwsh
+        run: ctest --test-dir build -C Release --output-on-failure
