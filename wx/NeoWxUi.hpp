@@ -82,7 +82,7 @@ inline ThemePalette themePalette(bool darkMode) {
         face,
         wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT),
         wxSystemSettings::GetColour(wxSYS_COLOUR_GRAYTEXT),
-        wxSystemSettings::GetColour(wxSYS_COLOUR_3DLIGHT),
+        wxSystemSettings::GetColour(wxSYS_COLOUR_3DSHADOW),
         wxSystemSettings::GetColour(wxSYS_COLOUR_HIGHLIGHT),
         wxSystemSettings::GetColour(wxSYS_COLOUR_HIGHLIGHTTEXT)
     };
@@ -283,22 +283,32 @@ inline void applyTreeTheme(wxTreeCtrl& tree, bool darkMode) {
 
 inline void applyGridTheme(wxGrid& grid, bool darkMode) {
     const ThemePalette palette = themePalette(darkMode);
-    grid.SetBackgroundColour(palette.field);
-    grid.SetForegroundColour(palette.text);
-    grid.SetDefaultCellBackgroundColour(palette.field);
-    grid.SetDefaultCellTextColour(palette.text);
-    grid.SetLabelBackgroundColour(darkMode ? palette.panel : wxSystemSettings::GetColour(wxSYS_COLOUR_BTNFACE));
-    grid.SetLabelTextColour(palette.text);
-    grid.SetGridLineColour(palette.gridLine);
-    grid.SetSelectionBackground(palette.selection);
-    grid.SetSelectionForeground(palette.selectionText);
-    for (int row = 0; row < grid.GetNumberRows(); ++row) {
-        for (int col = 0; col < grid.GetNumberCols(); ++col) {
-            grid.SetCellBackgroundColour(row, col, darkMode && (row % 2) ? palette.fieldAlt : palette.field);
-            grid.SetCellTextColour(row, col, palette.text);
+    {
+        // wxGrid owns multiple internal paint windows. Batch the attribute
+        // changes and let wxGrid invalidate those windows itself instead of
+        // synchronously repainting each child during the recursive theme pass.
+        wxGridUpdateLocker lock(&grid);
+        grid.SetBackgroundColour(palette.field);
+        grid.SetForegroundColour(palette.text);
+        grid.SetDefaultCellBackgroundColour(palette.field);
+        grid.SetDefaultCellTextColour(palette.text);
+        grid.SetLabelBackgroundColour(darkMode ? palette.panel : wxSystemSettings::GetColour(wxSYS_COLOUR_BTNFACE));
+        grid.SetLabelTextColour(palette.text);
+        grid.EnableGridLines(true);
+        grid.SetGridLineColour(palette.gridLine);
+        grid.SetSelectionBackground(palette.selection);
+        grid.SetSelectionForeground(palette.selectionText);
+        for (int row = 0; row < grid.GetNumberRows(); ++row) {
+            for (int col = 0; col < grid.GetNumberCols(); ++col) {
+                grid.SetCellBackgroundColour(row, col, darkMode && (row % 2) ? palette.fieldAlt : palette.field);
+                grid.SetCellTextColour(row, col, palette.text);
+            }
         }
     }
     grid.ForceRefresh();
+    if (wxWindow* cells = grid.GetGridWindow()) {
+        cells->Refresh(false);
+    }
 }
 
 inline void applyTheme(wxWindow* window, bool darkMode) {
@@ -352,8 +362,13 @@ inline void applyTheme(wxWindow* window, bool darkMode) {
         }
     }
 
-    for (wxWindowList::compatibility_iterator node = window->GetChildren().GetFirst(); node; node = node->GetNext()) {
-        applyTheme(node->GetData(), darkMode);
+    // wxGrid child windows are implementation details with their own paint
+    // pipeline. Recursively assigning colours to them can leave one-pixel
+    // separators invalidated until the next mouse event on wxMSW.
+    if (dynamic_cast<wxGrid*>(window) == nullptr) {
+        for (wxWindowList::compatibility_iterator node = window->GetChildren().GetFirst(); node; node = node->GetNext()) {
+            applyTheme(node->GetData(), darkMode);
+        }
     }
 
     window->Refresh();
@@ -384,19 +399,23 @@ inline std::optional<std::string> promptText(wxWindow* parent,
     return toStd(dialog.GetValue());
 }
 
-inline std::optional<std::filesystem::path> chooseOpenFile(wxWindow* parent,
-                                                           const std::string& title,
-                                                           const std::string& wildcard) {
-    wxFileDialog dialog(parent, toWx(title), wxEmptyString, wxEmptyString, toWx(wildcard),
+inline std::optional<std::filesystem::path> chooseOpenFile(
+    wxWindow* parent,
+    const std::string& title,
+    const std::string& wildcard,
+    const std::filesystem::path& initialDirectory = {}) {
+    wxFileDialog dialog(parent, toWx(title), toWx(initialDirectory.u8string()), wxEmptyString, toWx(wildcard),
                         wxFD_OPEN | wxFD_FILE_MUST_EXIST);
     if (dialog.ShowModal() != wxID_OK) return std::nullopt;
     return std::filesystem::path(toStd(dialog.GetPath()));
 }
 
-inline std::vector<std::filesystem::path> chooseOpenFiles(wxWindow* parent,
-                                                          const std::string& title,
-                                                          const std::string& wildcard) {
-    wxFileDialog dialog(parent, toWx(title), wxEmptyString, wxEmptyString, toWx(wildcard),
+inline std::vector<std::filesystem::path> chooseOpenFiles(
+    wxWindow* parent,
+    const std::string& title,
+    const std::string& wildcard,
+    const std::filesystem::path& initialDirectory = {}) {
+    wxFileDialog dialog(parent, toWx(title), toWx(initialDirectory.u8string()), wxEmptyString, toWx(wildcard),
                         wxFD_OPEN | wxFD_FILE_MUST_EXIST | wxFD_MULTIPLE);
     if (dialog.ShowModal() != wxID_OK) return {};
     wxArrayString paths;

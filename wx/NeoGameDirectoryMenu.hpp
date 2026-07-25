@@ -11,13 +11,17 @@
 #include <wx/window.h>
 
 #include <algorithm>
+#include <exception>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
 namespace neogames {
+
+using OpenGameFileDialog = std::function<void(const std::filesystem::path&)>;
 
 struct SavedGameDirectory {
     std::string gameId;
@@ -64,8 +68,8 @@ inline std::vector<SavedGameDirectory> savedGameDirectories() {
 
 class OpenGameDirectoryMenu final {
 public:
-    OpenGameDirectoryMenu(wxWindow& owner, wxMenu& menu)
-        : owner_(owner), menu_(menu) {
+    OpenGameDirectoryMenu(wxWindow& owner, wxMenu& menu, OpenGameFileDialog openFileDialog)
+        : owner_(owner), menu_(menu), openFileDialog_(std::move(openFileDialog)) {
         owner_.Bind(wxEVT_MENU_OPEN, &OpenGameDirectoryMenu::onMenuOpen, this);
         refresh();
     }
@@ -163,11 +167,21 @@ private:
             return;
         }
 
-        if (!wxLaunchDefaultApplication(neosettings::toWx(it->path.u8string()))) {
-            wxString message = "The system file manager could not open:\n\n";
-            message += neosettings::toWx(it->path.u8string());
+        if (!openFileDialog_) {
+            wxMessageBox("This application did not configure a file picker for saved game directories.",
+                         "Unable to Open from Game Directory",
+                         wxOK | wxICON_ERROR,
+                         &owner_);
+            return;
+        }
+
+        try {
+            openFileDialog_(it->path);
+        } catch (const std::exception& ex) {
+            wxString message = "The application could not open its file dialog:\n\n";
+            message += neosettings::toWx(ex.what());
             wxMessageBox(message,
-                         "Unable to Open Game Directory",
+                         "Unable to Open from Game Directory",
                          wxOK | wxICON_ERROR,
                          &owner_);
         }
@@ -181,17 +195,43 @@ private:
     wxWindow& owner_;
     wxMenu& menu_;
     std::vector<BoundEntry> entries_;
+    OpenGameFileDialog openFileDialog_;
     int manageId_ = wxID_NONE;
 };
 
 inline std::unique_ptr<OpenGameDirectoryMenu> appendOpenGameDirectoryMenu(
     wxWindow& owner,
     wxMenu& parent,
+    OpenGameFileDialog openFileDialog,
     const wxString& label = "Open Game &Directory") {
     auto* submenu = new wxMenu();
     parent.AppendSubMenu(submenu, label,
-                         "Open a saved game install folder in the system file manager");
-    return std::make_unique<OpenGameDirectoryMenu>(owner, *submenu);
+                         "Open a supported file from a saved game installation");
+    return std::make_unique<OpenGameDirectoryMenu>(owner, *submenu, std::move(openFileDialog));
+}
+
+// Compatibility overload for independently versioned tool repositories.
+// Updated tools pass an application-specific file-dialog callback above; this
+// preserves the previous behavior only for an older consumer checked out
+// against a newer neoshared revision during a staggered repository rollout.
+inline std::unique_ptr<OpenGameDirectoryMenu> appendOpenGameDirectoryMenu(
+    wxWindow& owner,
+    wxMenu& parent,
+    const wxString& label = "Open Game &Directory") {
+    return appendOpenGameDirectoryMenu(
+        owner,
+        parent,
+        [&owner](const std::filesystem::path& directory) {
+            if (wxLaunchDefaultApplication(neosettings::toWx(directory.u8string()))) return;
+
+            wxString message = "The system file manager could not open:\n\n";
+            message += neosettings::toWx(directory.u8string());
+            wxMessageBox(message,
+                         "Unable to Open Game Directory",
+                         wxOK | wxICON_ERROR,
+                         &owner);
+        },
+        label);
 }
 
 } // namespace neogames
