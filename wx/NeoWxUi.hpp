@@ -18,6 +18,10 @@
 #include <wx/spinctrl.h>
 #include <wx/treectrl.h>
 
+#if defined(__WXMSW__) && !wxCHECK_VERSION(3, 3, 3)
+#error "Neo Tools Windows GUIs require wxWidgets 3.3.3 or newer. Use the neoshared vcpkg overlay."
+#endif
+
 #include <algorithm>
 #include <filesystem>
 #include <optional>
@@ -86,6 +90,55 @@ inline ThemePalette themePalette(bool darkMode) {
         wxSystemSettings::GetColour(wxSYS_COLOUR_HIGHLIGHT),
         wxSystemSettings::GetColour(wxSYS_COLOUR_HIGHLIGHTTEXT)
     };
+}
+
+// wxGrid normally paints cell contents first and grid lines in a separate
+// pass. On some wxMSW/Windows 10 configurations, a small invalidation around
+// the mouse cursor can repaint the cell without reliably restoring that later
+// line pass. Paint each separator as part of its owning cell instead so any
+// cell repaint restores the same right and bottom edges deterministically.
+class PersistentGridCellRenderer final : public wxGridCellStringRenderer {
+public:
+    wxGridCellRenderer* Clone() const override {
+        return new PersistentGridCellRenderer();
+    }
+
+    void Draw(wxGrid& grid,
+              wxGridCellAttr& attr,
+              wxDC& dc,
+              const wxRect& rect,
+              int row,
+              int col,
+              bool isSelected) override {
+        wxGridCellStringRenderer::Draw(grid, attr, dc, rect, row, col, isSelected);
+
+        if (rect.GetWidth() <= 0 || rect.GetHeight() <= 0) {
+            return;
+        }
+
+        const wxPen previousPen = dc.GetPen();
+        const int right = rect.GetRight();
+        const int bottom = rect.GetBottom();
+
+        dc.SetPen(grid.GetColGridLinePen(col));
+        dc.DrawLine(right, rect.GetTop(), right, bottom + 1);
+
+        dc.SetPen(grid.GetRowGridLinePen(row));
+        dc.DrawLine(rect.GetLeft(), bottom, right + 1, bottom);
+
+        dc.SetPen(previousPen);
+    }
+};
+
+inline void configureStableGridRendering(wxGrid& grid) {
+    // Native grid lines are a second paint pass. The renderer above owns the
+    // separators instead, keeping them inside the cell's invalidated rectangle.
+    grid.EnableGridLines(false);
+    grid.SetDefaultRenderer(new PersistentGridCellRenderer());
+
+    // Keep resizing available from the row/column labels, but do not switch to
+    // resize cursors while traversing the one-pixel separators in the cell area.
+    grid.DisableDragGridSize();
 }
 
 
@@ -294,7 +347,9 @@ inline void applyGridTheme(wxGrid& grid, bool darkMode) {
         grid.SetDefaultCellTextColour(palette.text);
         grid.SetLabelBackgroundColour(darkMode ? palette.panel : wxSystemSettings::GetColour(wxSYS_COLOUR_BTNFACE));
         grid.SetLabelTextColour(palette.text);
-        grid.EnableGridLines(true);
+        // Separators are painted by PersistentGridCellRenderer as part of
+        // each cell, not by wxGrid's separate native grid-line pass.
+        grid.EnableGridLines(false);
         grid.SetGridLineColour(palette.gridLine);
         grid.SetSelectionBackground(palette.selection);
         grid.SetSelectionForeground(palette.selectionText);

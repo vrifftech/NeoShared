@@ -1,0 +1,66 @@
+{
+  "name": "wxwidgets",
+  "version": "3.3.3",
+  "description": [
+    "Widget toolkit and tools library for creating graphical user interfaces (GUIs) for cross-platform applications.",
+    "Neo Tools Windows builds pin this overlay to wxWidgets 3.3.3."
+  ],
+  "homepage": "https://github.com/wxWidgets/wxWidgets",
+  "license": "LGPL-2.0-or-later WITH WxWindows-exception-3.1",
+  "supports": "windows & !uwp & !xbox",
+  "dependencies": [
+    "expat",
+    "libjpeg-turbo",
+    "libpng",
+    "libwebp",
+    "nanosvg",
+    "opengl",
+    {
+      "name": "pcre2",
+      "default-features": false
+    },
+    {
+      "name": "tiff",
+      "default-features": false
+    },
+    {
+      "name": "vcpkg-cmake",
+      "host": true
+    },
+    {
+      "name": "vcpkg-cmake-config",
+      "host": true
+    },
+    "zlib"
+  ],
+  "default-features": [
+    "debug-support",
+    "sound"
+  ],
+  "features": {
+    "debug-support": {
+      "description": "Enable wxWidgets debugging support hooks even for release builds (wxDEBUG_LEVEL 1)"
+    },
+    "fonts": {
+      "description": "Enable private-font support"
+    },
+    "media": {
+      "description": "Build wxMediaCtrl support"
+    },
+    "secretstore": {
+      "description": "Build wxSecretStore support"
+    },
+    "sound": {
+      "description": "Build wxSound support"
+    },
+    "webview": {
+      "description": "Build the Edge WebView2 backend",
+      "dependencies": [
+        {
+          "name": "webview2",
+          "platform": "windows"
+        }
+      ]
+    }
+  }
+}
