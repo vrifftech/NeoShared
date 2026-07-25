@@ -36,7 +36,7 @@ jobs:
 
       - name: Configure and build
         run: |
-          ./scripts/build.sh \
+          bash ./scripts/build.sh \
             --build-dir build \
             --build-type Release \
             --tests ON \
