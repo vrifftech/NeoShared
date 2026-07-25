@@ -3,13 +3,32 @@
   "version": "3.3.3",
   "description": [
     "Widget toolkit and tools library for creating graphical user interfaces (GUIs) for cross-platform applications.",
-    "Neo Tools Windows builds pin this overlay to wxWidgets 3.3.3."
+    "Set WXWIDGETS_USE_STL in a custom triplet to build with the wxUSE_STL build option.",
+    "Set WXWIDGETS_USE_STD_CONTAINERS in a custom triplet to build with the wxUSE_STD_CONTAINERS build option."
   ],
   "homepage": "https://github.com/wxWidgets/wxWidgets",
   "license": "LGPL-2.0-or-later WITH WxWindows-exception-3.1",
-  "supports": "windows & !uwp & !xbox",
+  "supports": "!uwp & !xbox",
   "dependencies": [
+    {
+      "name": "cairo",
+      "default-features": false,
+      "platform": "!windows & !osx & !ios"
+    },
+    {
+      "name": "curl",
+      "default-features": false,
+      "platform": "!windows & !osx"
+    },
     "expat",
+    {
+      "name": "gtk3",
+      "platform": "!windows & !osx & !ios"
+    },
+    {
+      "name": "libiconv",
+      "platform": "!windows"
+    },
     "libjpeg-turbo",
     "libpng",
     "libwebp",
@@ -41,20 +60,47 @@
     "debug-support": {
       "description": "Enable wxWidgets debugging support hooks even for release builds (wxDEBUG_LEVEL 1)"
     },
+    "example": {
+      "description": "Example source code and CMake project"
+    },
     "fonts": {
-      "description": "Enable private-font support"
+      "description": "Enable to use the font functionality of wxWidgets",
+      "dependencies": [
+        {
+          "name": "fontconfig",
+          "platform": "!windows & !osx"
+        },
+        {
+          "name": "pango",
+          "platform": "!windows & !osx"
+        }
+      ]
     },
     "media": {
-      "description": "Build wxMediaCtrl support"
+      "description": "Build wxMediaCtrl support",
+      "dependencies": [
+        {
+          "name": "gstreamer",
+          "default-features": false,
+          "platform": "!windows & !osx & !ios"
+        }
+      ]
     },
     "secretstore": {
-      "description": "Build wxSecretStore support"
+      "description": "Use wxSecretStore class"
     },
     "sound": {
-      "description": "Build wxSound support"
+      "description": "Build wxSound support",
+      "dependencies": [
+        {
+          "name": "sdl2",
+          "default-features": false,
+          "platform": "!windows & !osx & !ios"
+        }
+      ]
     },
     "webview": {
-      "description": "Build the Edge WebView2 backend",
+      "description": "The Edge backend uses Microsoft's Edge WebView2",
       "dependencies": [
         {
           "name": "webview2",

@@ -1,29 +1,33 @@
-vcpkg_from_git(
+vcpkg_from_github(
     OUT_SOURCE_PATH SOURCE_PATH
-    URL https://github.com/wxWidgets/wxWidgets.git
-    REF 670835aec7e54b9e9d5a50d6a1aea1e8ba0bcdb2
+    REPO wxWidgets/wxWidgets
+    REF "v${VERSION}"
+    SHA512 c497d6642d6f9fb7f190ab725e3c5ee0e67e96c883eebbe2d7fa7e0b3dec9847871010e53e23c5d46b9158b8a045f162592d0c25f524daedeaca8c1caa555a5a
     HEAD_REF master
     PATCHES
         install-layout.patch
+        relocatable-wx-config.patch
         nanosvg-ext-depend.patch
         fix-libs-export.patch
         fix-pcre2.patch
+        gtk3-link-libraries.patch
+        sdl2.patch
 )
 
-# wxWidgets release archives do not contain the STC submodule contents, so
-# pin and stage the exact revisions recorded by wxWidgets 3.3.3.
-vcpkg_from_git(
+# Submodule dependencies
+vcpkg_from_github(
     OUT_SOURCE_PATH lexilla_SOURCE_PATH
-    URL https://github.com/wxWidgets/lexilla.git
-    REF bf6ad20062b98808ffa21419263942a427c150a9
+    REPO wxWidgets/lexilla
+    REF "bf6ad20062b98808ffa21419263942a427c150a9"
+    SHA512 08360fcd29e6c021857928375509ea48b9c8a02407bcb3c01865f57734c449fc6ff24afbe011f218b7145116e1805f8c9b4a2e3ec26f4a6298dca9453f610887
     HEAD_REF wx
 )
 file(COPY "${lexilla_SOURCE_PATH}/" DESTINATION "${SOURCE_PATH}/src/stc/lexilla")
-
-vcpkg_from_git(
+vcpkg_from_github(
     OUT_SOURCE_PATH scintilla_SOURCE_PATH
-    URL https://github.com/wxWidgets/scintilla.git
-    REF 0b90f31ced23241054e8088abb50babe9a44ae67
+    REPO wxWidgets/scintilla
+    REF "0b90f31ced23241054e8088abb50babe9a44ae67"
+    SHA512 db1f3007f4bd8860fad0817b6cf87980a4b713777025128cf5caea8d6d17b6fafe23fd22ff6886d7d5a420f241d85b7502b85d7e52b4ddb0774edc4b0a0203e7
     HEAD_REF wx
 )
 file(COPY "${scintilla_SOURCE_PATH}/" DESTINATION "${SOURCE_PATH}/src/stc/scintilla")
@@ -93,6 +97,7 @@ vcpkg_cmake_configure(
     SOURCE_PATH "${SOURCE_PATH}"
     OPTIONS
         ${FEATURE_OPTIONS}
+        -DwxBUILD_INSTALL_USE_SYMLINK=OFF
         -DwxUSE_REGEX=sys
         -DwxUSE_ZLIB=sys
         -DwxUSE_EXPAT=sys
@@ -123,8 +128,7 @@ vcpkg_cmake_configure(
 )
 
 vcpkg_cmake_install()
-string(REGEX MATCH "^[0-9]+\\.[0-9]+" VERSION_MAJOR_MINOR "${VERSION}")
-vcpkg_cmake_config_fixup(CONFIG_PATH lib/cmake/wxWidgets-${VERSION_MAJOR_MINOR})
+vcpkg_cmake_config_fixup(CONFIG_PATH lib/cmake/wxWidgets-3.3)
 
 # The CMake export is not ready for use: It lacks a config file.
 file(REMOVE_RECURSE
@@ -217,7 +221,15 @@ if(NOT "debug-support" IN_LIST FEATURES)
     endif()
 endif()
 
-
+if("example" IN_LIST FEATURES)
+    file(INSTALL
+        "${CMAKE_CURRENT_LIST_DIR}/example/CMakeLists.txt"
+        "${SOURCE_PATH}/samples/popup/popup.cpp"
+        "${SOURCE_PATH}/samples/sample.xpm"
+        DESTINATION "${CURRENT_PACKAGES_DIR}/share/${PORT}/example"
+    )
+    vcpkg_replace_string("${CURRENT_PACKAGES_DIR}/share/${PORT}/example/popup.cpp" "../sample.xpm" "sample.xpm")
+endif()
 
 configure_file("${CMAKE_CURRENT_LIST_DIR}/vcpkg-cmake-wrapper.cmake" "${CURRENT_PACKAGES_DIR}/share/${PORT}/vcpkg-cmake-wrapper.cmake" @ONLY)
 

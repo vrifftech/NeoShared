@@ -1,17 +1,15 @@
 diff --git a/build/cmake/init.cmake b/build/cmake/init.cmake
+index f044d22d4d..a78b9aa1e9 100644
 --- a/build/cmake/init.cmake
 +++ b/build/cmake/init.cmake
-@@ -182,13 +182,7 @@ if(WIN32)
-     endif()
- endif()
- wx_get_install_dir(include)
- if(WIN32_MSVC_NAMING)
--    if(wxBUILD_SHARED)
+@@ -203,7 +203,7 @@
+     if(wxBUILD_SHARED)
 -        set(lib_suffix "_dll")
--    else()
++        # set(lib_suffix "_dll")
+     else()
 -        set(lib_suffix "_lib")
--    endif()
++        # set(lib_suffix "_lib")
+     endif()
 -    set(wxPLATFORM_LIB_DIR "${wxCOMPILER_PREFIX}${wxARCH_SUFFIX}${lib_suffix}")
++    # set(wxPLATFORM_LIB_DIR "${wxCOMPILER_PREFIX}${wxARCH_SUFFIX}${lib_suffix}")
      set(wxINSTALL_INCLUDE_DIR "${include_dir}")
- else()
-     wx_get_flavour(lib_flavour "-")

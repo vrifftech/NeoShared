@@ -76,6 +76,15 @@ jobs:
             -Triplet x64-windows-static `
             -CleanAfterBuild
 
+      - name: Upload wxWidgets vcpkg logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: neoshared-wxwidgets-vcpkg-logs-${{ github.run_id }}
+          path: .ci-logs/vcpkg-wxwidgets/
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: Configure and build
         shell: pwsh
         run: |
