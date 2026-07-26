@@ -150,9 +150,11 @@ private:
             list_->SetItem(item, 1, neosettings::toWx(hasInstall ? row.displayName : std::string("(not configured)")));
             list_->SetItem(item, 2, isActive ? "Yes" : "");
             list_->SetItem(item, 3, neosettings::toWx(row.status.empty() ? "not found" : row.status));
-            list_->SetItem(item, 4, neosettings::toWx(row.installPath.u8string()));
-            list_->SetItem(item, 5, neosettings::toWx(row.tlkPath.u8string()));
-            const std::string root = !row.overridePath.empty() ? row.overridePath.u8string() : row.dataRootPath.u8string();
+            list_->SetItem(item, 4, neosettings::pathToWx(row.installPath));
+            list_->SetItem(item, 5, neosettings::pathToWx(row.tlkPath));
+            const std::string root = !row.overridePath.empty()
+                                         ? neosettings::pathToUtf8(row.overridePath)
+                                         : neosettings::pathToUtf8(row.dataRootPath);
             list_->SetItem(item, 6, neosettings::toWx(root));
             if (selectRow < 0 && row.id == selectGameId &&
                 (selectInstallId.empty() || row.installId == selectInstallId)) {

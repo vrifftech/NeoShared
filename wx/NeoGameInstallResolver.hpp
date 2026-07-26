@@ -184,7 +184,7 @@ inline std::string toHex(std::uint64_t value) {
 }
 
 inline std::string storefrontLabel(const std::filesystem::path& root) {
-    const std::string path = root.u8string();
+    const std::string path = neosettings::pathToUtf8(root);
     if (containsCaseInsensitive(path, "steamapps")) return "Steam";
     if (containsCaseInsensitive(path, "gog galaxy") || containsCaseInsensitive(path, "gog games") ||
         containsCaseInsensitive(path, "gog.com")) return "GOG";
@@ -195,7 +195,7 @@ inline std::string storefrontLabel(const std::filesystem::path& root) {
 inline std::string defaultInstallName(const GameDefinition& game, const std::filesystem::path& root = {}) {
     const std::string source = storefrontLabel(root);
     if (!source.empty()) return game.displayName + " (" + source + ")";
-    const std::string leaf = root.empty() ? std::string{} : root.filename().u8string();
+    const std::string leaf = root.empty() ? std::string{} : neosettings::pathToUtf8(root.filename());
     if (!leaf.empty() && leaf != "." && leaf != "..") return game.displayName + " - " + leaf;
     return game.displayName;
 }
@@ -203,8 +203,8 @@ inline std::string defaultInstallName(const GameDefinition& game, const std::fil
 inline std::string makeInstallId(const GameDefinition& game,
                                  const std::filesystem::path& root,
                                  const std::filesystem::path& tlkPath = {}) {
-    const std::string seed = game.id + "|" + neosettings::normalizedPath(root).u8string() + "|" +
-                             neosettings::normalizedPath(tlkPath).u8string();
+    const std::string seed = game.id + "|" + neosettings::pathToUtf8(neosettings::normalizedPath(root)) + "|" +
+                             neosettings::pathToUtf8(neosettings::normalizedPath(tlkPath));
     return std::string("i_") + toHex(fnv1a64(seed));
 }
 
@@ -299,7 +299,7 @@ inline void upsertInstall(std::vector<GameInstall>& installs, const GameDefiniti
 }
 
 inline std::string pathPrefixText(const std::filesystem::path& path) {
-    std::string text = neosettings::normalizedPath(path).u8string();
+    std::string text = neosettings::pathToUtf8(neosettings::normalizedPath(path));
     std::replace(text.begin(), text.end(), '\\', '/');
 #if defined(_WIN32)
     text = lowerAscii(text);
@@ -327,7 +327,7 @@ inline bool installContainsPath(const GameInstall& install, const std::filesyste
 }
 
 inline std::size_t pathTextLength(const std::filesystem::path& path) {
-    return neosettings::normalizedPath(path).u8string().size();
+    return neosettings::pathToUtf8(neosettings::normalizedPath(path)).size();
 }
 
 inline void sortInstalls(std::vector<GameInstall>& installs, const std::string& activeInstallId = {}) {
@@ -964,7 +964,7 @@ public:
             installs.erase(it);
         } else {
             install.id = game->id;
-            const std::string tlkLeaf = lowerAscii(tlkPath.filename().u8string());
+            const std::string tlkLeaf = lowerAscii(neosettings::pathToUtf8(tlkPath.filename()));
             install.installPath = tlkLeaf == "dialog.tlk" ? tlkPath.parent_path() : std::filesystem::path{};
             install.installId = makeInstallId(*game, install.installPath, tlkPath);
             install.displayName = displayName.empty() ? defaultInstallName(*game, install.installPath) : displayName;

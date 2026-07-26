@@ -21,8 +21,6 @@
 
 namespace neogames {
 
-using OpenGameFileDialog = std::function<void(const std::filesystem::path&)>;
-
 struct SavedGameDirectory {
     std::string gameId;
     std::string gameName;
@@ -32,6 +30,12 @@ struct SavedGameDirectory {
     bool active = false;
     bool exists = false;
 };
+
+// Applications that need more than the selected path (for example, NeoERF's
+// resource-name profile) receive the complete saved-game selection. The path-
+// only callback remains available below for tools without game-specific state.
+using OpenGameDirectoryAction = std::function<void(const SavedGameDirectory&)>;
+using OpenGameFileDialog = std::function<void(const std::filesystem::path&)>;
 
 inline std::vector<SavedGameDirectory> savedGameDirectories() {
     std::vector<SavedGameDirectory> directories;
@@ -61,15 +65,15 @@ inline std::vector<SavedGameDirectory> savedGameDirectories() {
         if (lhs.gameName != rhs.gameName) return lowerAscii(lhs.gameName) < lowerAscii(rhs.gameName);
         if (lhs.active != rhs.active) return lhs.active;
         if (lhs.installName != rhs.installName) return lowerAscii(lhs.installName) < lowerAscii(rhs.installName);
-        return lowerAscii(lhs.path.u8string()) < lowerAscii(rhs.path.u8string());
+        return lowerAscii(neosettings::pathToUtf8(lhs.path)) < lowerAscii(neosettings::pathToUtf8(rhs.path));
     });
     return directories;
 }
 
 class OpenGameDirectoryMenu final {
 public:
-    OpenGameDirectoryMenu(wxWindow& owner, wxMenu& menu, OpenGameFileDialog openFileDialog)
-        : owner_(owner), menu_(menu), openFileDialog_(std::move(openFileDialog)) {
+    OpenGameDirectoryMenu(wxWindow& owner, wxMenu& menu, OpenGameDirectoryAction action)
+        : owner_(owner), menu_(menu), action_(std::move(action)) {
         owner_.Bind(wxEVT_MENU_OPEN, &OpenGameDirectoryMenu::onMenuOpen, this);
         refresh();
     }
@@ -99,11 +103,11 @@ public:
             wxMenuItem* item = menu_.Append(
                 wxID_ANY,
                 neosettings::toWx(neosettings::escapeMenuLabel(label)),
-                neosettings::toWx(directory.path.u8string()));
+                neosettings::pathToWx(directory.path));
             item->Enable(directory.exists);
 
             const int id = item->GetId();
-            entries_.push_back({id, directory.path});
+            entries_.push_back({id, directory});
             owner_.Bind(wxEVT_MENU, &OpenGameDirectoryMenu::onOpenDirectory, this, id);
         }
 
@@ -121,7 +125,7 @@ public:
 private:
     struct BoundEntry {
         int id = wxID_NONE;
-        std::filesystem::path path;
+        SavedGameDirectory directory;
     };
 
     void clearMenu() {
@@ -155,9 +159,9 @@ private:
         });
         if (it == entries_.end()) return;
 
-        if (!isDirectoryPath(it->path)) {
+        if (!isDirectoryPath(it->directory.path)) {
             wxString message = "The saved game directory no longer exists:\n\n";
-            message += neosettings::toWx(it->path.u8string());
+            message += neosettings::pathToWx(it->directory.path);
             message += "\n\nUse Manage Game Directories to update it.";
             wxMessageBox(message,
                          "Game Directory Missing",
@@ -167,7 +171,7 @@ private:
             return;
         }
 
-        if (!openFileDialog_) {
+        if (!action_) {
             wxMessageBox("This application did not configure a file picker for saved game directories.",
                          "Unable to Open from Game Directory",
                          wxOK | wxICON_ERROR,
@@ -176,7 +180,7 @@ private:
         }
 
         try {
-            openFileDialog_(it->path);
+            action_(it->directory);
         } catch (const std::exception& ex) {
             wxString message = "The application could not open its file dialog:\n\n";
             message += neosettings::toWx(ex.what());
@@ -195,19 +199,31 @@ private:
     wxWindow& owner_;
     wxMenu& menu_;
     std::vector<BoundEntry> entries_;
-    OpenGameFileDialog openFileDialog_;
+    OpenGameDirectoryAction action_;
     int manageId_ = wxID_NONE;
 };
 
 inline std::unique_ptr<OpenGameDirectoryMenu> appendOpenGameDirectoryMenu(
     wxWindow& owner,
     wxMenu& parent,
-    OpenGameFileDialog openFileDialog,
+    OpenGameDirectoryAction action,
     const wxString& label = "Open Game &Directory") {
     auto* submenu = new wxMenu();
     parent.AppendSubMenu(submenu, label,
                          "Open a supported file from a saved game installation");
-    return std::make_unique<OpenGameDirectoryMenu>(owner, *submenu, std::move(openFileDialog));
+    return std::make_unique<OpenGameDirectoryMenu>(owner, *submenu, std::move(action));
+}
+
+inline std::unique_ptr<OpenGameDirectoryMenu> appendOpenGameDirectoryMenu(
+    wxWindow& owner,
+    wxMenu& parent,
+    OpenGameFileDialog openFileDialog,
+    const wxString& label = "Open Game &Directory") {
+    OpenGameDirectoryAction action = [openFileDialog = std::move(openFileDialog)](
+                                         const SavedGameDirectory& directory) {
+        if (openFileDialog) openFileDialog(directory.path);
+    };
+    return appendOpenGameDirectoryMenu(owner, parent, std::move(action), label);
 }
 
 // Compatibility overload for independently versioned tool repositories.
@@ -221,16 +237,16 @@ inline std::unique_ptr<OpenGameDirectoryMenu> appendOpenGameDirectoryMenu(
     return appendOpenGameDirectoryMenu(
         owner,
         parent,
-        [&owner](const std::filesystem::path& directory) {
-            if (wxLaunchDefaultApplication(neosettings::toWx(directory.u8string()))) return;
+        OpenGameFileDialog{[&owner](const std::filesystem::path& directory) {
+            if (wxLaunchDefaultApplication(neosettings::pathToWx(directory))) return;
 
             wxString message = "The system file manager could not open:\n\n";
-            message += neosettings::toWx(directory.u8string());
+            message += neosettings::pathToWx(directory);
             wxMessageBox(message,
                          "Unable to Open Game Directory",
                          wxOK | wxICON_ERROR,
                          &owner);
-        },
+        }},
         label);
 }
 

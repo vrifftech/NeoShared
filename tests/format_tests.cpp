@@ -1,3 +1,4 @@
+#include "AppModel.hpp"
 #include "GFFFile.hpp"
 #include "GffJson.hpp"
 #include "GffXml.hpp"
@@ -6,9 +7,12 @@
 #include "neotlk/TlkFile.hpp"
 #include "neotlk/TlkLookup.hpp"
 
+#include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <filesystem>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 #include <string>
 
@@ -26,6 +30,195 @@ void requireThrows(Function&& function, const std::string& message) {
         return;
     }
     throw std::runtime_error(message);
+}
+
+
+void testGffResourceExtensions() {
+    struct Expected {
+        const char* extension;
+        const char* fileType;
+    };
+
+    const Expected jadeResources[] = {
+        {"qst", "QST "},
+        {"qst2", "QST "},
+        {"pla", "PLA "},
+        {"cre", "CRE "},
+        {"trg", "TRG "},
+        {"dlg", "DLG "},
+        {"fsm", "FSM "},
+        {"gff", "GFF "},
+        {"are", "ARE "},
+        {"gui", "GUI "},
+        {"sto", "STO "},
+        {"cwa", "CWA "},
+        {"cwd", "CWD "},
+        {"sav", "SAV "},
+    };
+
+    const Expected otherClassicResources[] = {
+        {"cam", "UTW "},
+        {"uta", "UTA "},
+        {"utx", "UTX "},
+        {"gic", "GIC "},
+    };
+
+    const auto& jadeExtensions = neogff::jadeEmpireGffResourceExtensions();
+    for (const Expected& expected : jadeResources) {
+        require(neogff::isKnownGffResourceExtension(expected.extension),
+                std::string("missing GFF extension: ") + expected.extension);
+        std::string upperExtension = expected.extension;
+        std::transform(upperExtension.begin(), upperExtension.end(), upperExtension.begin(),
+                       [](unsigned char ch) { return static_cast<char>(std::toupper(ch)); });
+        require(neogff::isKnownGffResourceExtension("." + upperExtension),
+                std::string("missing uppercase GFF extension: ") + upperExtension);
+        const std::filesystem::path samplePath =
+            std::string("resource.") + expected.extension;
+        require(neogff::defaultGffTypeForExtension(samplePath) == expected.fileType,
+                std::string("incorrect GFF type for extension: ") + expected.extension);
+        require(std::find(jadeExtensions.begin(), jadeExtensions.end(), expected.extension) !=
+                    jadeExtensions.end(),
+                std::string("missing Jade GFF extension: ") + expected.extension);
+    }
+
+    require(neogff::preferredGffExtensionForType("QST") == "qst",
+            "QST did not prefer the .qst extension");
+    require(neogff::preferredGffExtensionForType("PLA ") == "pla",
+            "PLA did not prefer the .pla extension");
+    require(neogff::preferredGffExtensionForType("CRE") == "cre",
+            "CRE did not prefer the .cre extension");
+    require(neogff::preferredGffExtensionForType("TRG") == "trg",
+            "TRG did not prefer the .trg extension");
+    require(neogff::preferredGffExtensionForType("DLG") == "dlg",
+            "DLG did not prefer the .dlg extension");
+    require(neogff::preferredGffExtensionForType("FSM") == "fsm",
+            "FSM did not prefer the .fsm extension");
+
+    for (const Expected& expected : otherClassicResources) {
+        require(neogff::isKnownGffResourceExtension(expected.extension),
+                std::string("missing GFF extension: ") + expected.extension);
+        std::string upperExtension = expected.extension;
+        std::transform(upperExtension.begin(), upperExtension.end(), upperExtension.begin(),
+                       [](unsigned char ch) { return static_cast<char>(std::toupper(ch)); });
+        require(neogff::isKnownGffResourceExtension("." + upperExtension),
+                std::string("missing uppercase GFF extension: ") + upperExtension);
+        const std::filesystem::path samplePath =
+            std::string("resource.") + expected.extension;
+        require(neogff::defaultGffTypeForExtension(samplePath) == expected.fileType,
+                std::string("incorrect GFF type for extension: ") + expected.extension);
+    }
+
+    for (const char* nonGff : {"art", "lyt", "vis", "bip", "amp", "ndb",
+                               "wfx", "rim", "trx"}) {
+        require(!neogff::isKnownGffResourceExtension(nonGff),
+                std::string("non-GFF Jade resource was misclassified: ") + nonGff);
+    }
+}
+
+
+void testClassicGffV33RoundTrip() {
+    const std::filesystem::path path =
+        std::filesystem::temp_directory_path() / "neoshared-gff-v33-roundtrip.utc";
+    const std::filesystem::path importedPath =
+        std::filesystem::temp_directory_path() / "neoshared-gff-v33-imported.utc";
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+    std::filesystem::remove(importedPath, ec);
+
+    try {
+        neogff::GffFile source;
+        source.NewFile("UTC ", path);
+        source.version("V3.3");
+        neogff::GffStruct* root = source.root();
+        require(root != nullptr, "synthetic GFF V3.3 root is missing");
+        root->AddField(std::make_unique<neogff::GffExoStringField>("Name", "Witcher V3.3"));
+        root->AddField(std::make_unique<neogff::GffIntField>("Value", 33));
+        source.SaveFile(path);
+
+        neogff::GffFile loaded;
+        loaded.LoadFile(path);
+        require(loaded.version() == "V3.3", "GFF V3.3 version was not preserved on load");
+        require(loaded.filetype() == "UTC ", "GFF V3.3 type was not preserved on load");
+        const neogff::GffField* valueField = loaded.root()->GetFieldByLabel("Value");
+        require(valueField != nullptr && valueField->GetString() == "33",
+                "GFF V3.3 field data did not round-trip");
+
+        const std::string xml = neogff::ToGffXml(loaded);
+        require(xml.find("version=\"V3.3\"") != std::string::npos,
+                "GFF XML export did not preserve V3.3");
+        const std::string json = neogff::gffXmlToJson(xml);
+        require(json.find("\"version\": \"V3.3\"") != std::string::npos,
+                "GFF JSON export did not preserve V3.3");
+
+        neogff::GffFile imported;
+        neogff::LoadGffXml(imported, neogff::gffJsonToXml(json));
+        require(imported.version() == "V3.3",
+                "GFF JSON/XML import did not restore V3.3");
+        imported.SaveFile(importedPath);
+
+        neogff::GffFile reopened;
+        reopened.LoadFile(importedPath);
+        require(reopened.version() == "V3.3",
+                "imported GFF V3.3 file did not retain its version after save");
+    } catch (...) {
+        std::filesystem::remove(path, ec);
+        std::filesystem::remove(importedPath, ec);
+        throw;
+    }
+
+    std::filesystem::remove(path, ec);
+    std::filesystem::remove(importedPath, ec);
+}
+
+void testDuplicateGffLabels() {
+    const std::filesystem::path path =
+        std::filesystem::temp_directory_path() / "neoshared-duplicate-labels.sav";
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+
+    try {
+        neogff::GffModel model;
+        model.newFile("SAV ");
+        neogff::GffStruct* root = model.gff().root();
+        require(root != nullptr, "synthetic SAV root is missing");
+        root->AddField(std::make_unique<neogff::GffIntField>("Repeated", 10));
+        root->AddField(std::make_unique<neogff::GffIntField>("Repeated", 20));
+        require(root->GetFieldByLabel("Repeated", 0) != nullptr,
+                "first duplicate field occurrence was not retained");
+        require(root->GetFieldByLabel("Repeated", 1) != nullptr,
+                "second duplicate field occurrence was not retained");
+        model.save(path);
+
+        neogff::GffModel reopened;
+        reopened.load(path);
+        const auto rows = reopened.rows();
+        const auto first = std::find_if(rows.begin(), rows.end(), [](const neogff::GffFieldRow& row) {
+            return row.path == "Repeated[#1]";
+        });
+        const auto second = std::find_if(rows.begin(), rows.end(), [](const neogff::GffFieldRow& row) {
+            return row.path == "Repeated[#2]";
+        });
+        require(first != rows.end() && first->value == "10",
+                "first duplicate field occurrence was not exposed through AppModel");
+        require(second != rows.end() && second->value == "20",
+                "second duplicate field occurrence was not exposed through AppModel");
+
+        reopened.setValue("Repeated[#2]", "25");
+        reopened.save(path);
+        neogff::GffModel edited;
+        edited.load(path);
+        const auto editedRows = edited.rows();
+        const auto editedSecond = std::find_if(editedRows.begin(), editedRows.end(), [](const neogff::GffFieldRow& row) {
+            return row.path == "Repeated[#2]";
+        });
+        require(editedSecond != editedRows.end() && editedSecond->value == "25",
+                "occurrence-aware duplicate edit did not round-trip");
+    } catch (...) {
+        std::filesystem::remove(path, ec);
+        throw;
+    }
+
+    std::filesystem::remove(path, ec);
 }
 
 void testDocumentDepthLimits() {
@@ -187,6 +380,9 @@ void testStrictBase64() {
 
 int main() {
     try {
+        testGffResourceExtensions();
+        testClassicGffV33RoundTrip();
+        testDuplicateGffLabels();
         testDocumentDepthLimits();
         testMissingRootStructId();
         testClassicTlkRoundTrip();

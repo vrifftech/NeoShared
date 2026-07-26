@@ -87,6 +87,8 @@ public:
 
     GffField* GetFieldByLabel(const std::string& label);
     const GffField* GetFieldByLabel(const std::string& label) const;
+    GffField* GetFieldByLabel(const std::string& label, std::size_t occurrence);
+    const GffField* GetFieldByLabel(const std::string& label, std::size_t occurrence) const;
     GffField* GetField(int index);
     const GffField* GetField(int index) const;
     GffField* GetField(std::size_t index);
@@ -99,6 +101,7 @@ public:
     void AddField(std::unique_ptr<GffField> field);
     void AddField(GffField* field);
     void DeleteField(const std::string& label);
+    void DeleteField(const std::string& label, std::size_t occurrence);
 
     std::string GetString() const;
     std::unique_ptr<GffField> Clone() const;

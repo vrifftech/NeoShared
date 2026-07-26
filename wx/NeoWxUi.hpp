@@ -459,10 +459,10 @@ inline std::optional<std::filesystem::path> chooseOpenFile(
     const std::string& title,
     const std::string& wildcard,
     const std::filesystem::path& initialDirectory = {}) {
-    wxFileDialog dialog(parent, toWx(title), toWx(initialDirectory.u8string()), wxEmptyString, toWx(wildcard),
+    wxFileDialog dialog(parent, toWx(title), neosettings::pathToWx(initialDirectory), wxEmptyString, toWx(wildcard),
                         wxFD_OPEN | wxFD_FILE_MUST_EXIST);
     if (dialog.ShowModal() != wxID_OK) return std::nullopt;
-    return std::filesystem::path(toStd(dialog.GetPath()));
+    return neosettings::pathFromWx(dialog.GetPath());
 }
 
 inline std::vector<std::filesystem::path> chooseOpenFiles(
@@ -470,14 +470,14 @@ inline std::vector<std::filesystem::path> chooseOpenFiles(
     const std::string& title,
     const std::string& wildcard,
     const std::filesystem::path& initialDirectory = {}) {
-    wxFileDialog dialog(parent, toWx(title), toWx(initialDirectory.u8string()), wxEmptyString, toWx(wildcard),
+    wxFileDialog dialog(parent, toWx(title), neosettings::pathToWx(initialDirectory), wxEmptyString, toWx(wildcard),
                         wxFD_OPEN | wxFD_FILE_MUST_EXIST | wxFD_MULTIPLE);
     if (dialog.ShowModal() != wxID_OK) return {};
     wxArrayString paths;
     dialog.GetPaths(paths);
     std::vector<std::filesystem::path> result;
     result.reserve(paths.size());
-    for (const auto& path : paths) result.emplace_back(toStd(path));
+    for (const auto& path : paths) result.emplace_back(neosettings::pathFromWx(path));
     return result;
 }
 
@@ -488,14 +488,14 @@ inline std::optional<std::filesystem::path> chooseSaveFile(wxWindow* parent,
     wxFileDialog dialog(parent, toWx(title), wxEmptyString, toWx(defaultFile), toWx(wildcard),
                         wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
     if (dialog.ShowModal() != wxID_OK) return std::nullopt;
-    return std::filesystem::path(toStd(dialog.GetPath()));
+    return neosettings::pathFromWx(dialog.GetPath());
 }
 
 inline std::optional<std::filesystem::path> chooseDirectory(wxWindow* parent,
                                                             const std::string& title) {
     wxDirDialog dialog(parent, toWx(title), wxEmptyString, wxDD_DEFAULT_STYLE | wxDD_DIR_MUST_EXIST);
     if (dialog.ShowModal() != wxID_OK) return std::nullopt;
-    return std::filesystem::path(toStd(dialog.GetPath()));
+    return neosettings::pathFromWx(dialog.GetPath());
 }
 
 inline void setColumns(wxListCtrl& list, const std::vector<std::pair<std::string, int>>& columns) {

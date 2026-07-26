@@ -64,6 +64,16 @@ std::unique_ptr<GffField> createField(const std::string& label,
                                       const std::string& typeName,
                                       const std::string& value,
                                       std::uint32_t structTypeId = 0);
+// File-extension helpers used by NeoGFF's open/save dialogs and CLI. These
+// describe GFF-backed resources only; Jade's LYT, VIS, ART, BIP, AMP, and
+// NDB resources and Dragon Age's BNK/VLM/shader/text payloads are different
+// formats and intentionally do not appear in the GFF extension sets.
+const std::vector<std::string>& knownGffResourceExtensions();
+const std::vector<std::string>& jadeEmpireGffResourceExtensions();
+const std::vector<std::string>& dragonAgeGff4ResourceExtensions();
+bool isKnownGffResourceExtension(std::string extension);
+bool isKnownDragonAgeGff4ResourceExtension(std::string extension);
 std::string defaultGffTypeForExtension(const std::filesystem::path& file);
+std::string preferredGffExtensionForType(std::string fileType);
 
 } // namespace neogff

@@ -387,7 +387,14 @@ std::string ToGffXml(const GffFile& gff) {
     }
     std::ostringstream out;
     out << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
-    out << "<gff3 type=\"" << neoxml::escapeAttribute(rtrimSpacesAndNuls(gff.filetype())) << "\">\n";
+    out << "<gff3 type=\"" << neoxml::escapeAttribute(rtrimSpacesAndNuls(gff.filetype())) << "\"";
+    if (!gff.isGff4()) {
+        const std::string version = rtrimSpacesAndNuls(gff.version());
+        if (version == "V3.2" || version == "V3.3") {
+            out << " version=\"" << neoxml::escapeAttribute(version) << "\"";
+        }
+    }
+    out << ">\n";
     writeStructXml(out, *gff.root(), 1, nullptr);
     out << "</gff3>\n";
     return out.str();
@@ -399,6 +406,11 @@ void LoadGffXml(GffFile& gff, const std::string& xmlText) {
         throw std::invalid_argument("XML does not describe a GFF3 file: expected <gff3> root.");
     }
     const std::string type = normalizeGffTypeForImport(root.attribute("type"));
+    std::string version = root.attribute("version");
+    if (version.empty()) version = "V3.2";
+    if (version != "V3.2" && version != "V3.3") {
+        throw std::invalid_argument("GFF XML version must be V3.2 or V3.3.");
+    }
     const neoxml::Node* rootStructNode = nullptr;
     for (const auto& child : root.children) {
         if (child.name != "struct") throw std::invalid_argument("GFF XML root may only contain one <struct> child.");
@@ -410,6 +422,7 @@ void LoadGffXml(GffFile& gff, const std::string& xmlText) {
     auto parsed = parseStructNode(*rootStructNode, false, 0xFFFFFFFFu);
     const std::filesystem::path previousFilename = gff.filename();
     gff.NewFile(type, previousFilename);
+    gff.version(version);
     GffStruct* destination = gff.root();
     destination->typeid_ = parsed->typeid_;
     for (auto& field : parsed->allFields()) {

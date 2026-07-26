@@ -6,9 +6,11 @@
 #include <charconv>
 #include <cctype>
 #include <limits>
+#include <iterator>
 #include <sstream>
 #include <stdexcept>
 #include <type_traits>
+#include <unordered_map>
 
 namespace neogff {
 namespace {
@@ -163,11 +165,15 @@ bool labelSuggestsStrRef(const std::string& label) {
 
 void appendRowsForStruct(std::vector<GffFieldRow>& out, const GffStruct& structure, const std::string& path, const neotlk::TlkLookup* tlk);
 
-void appendRowsForField(std::vector<GffFieldRow>& out, const GffField& field, const std::string& path, const neotlk::TlkLookup* tlk) {
+void appendRowsForField(std::vector<GffFieldRow>& out,
+                        const GffField& field,
+                        const std::string& path,
+                        const neotlk::TlkLookup* tlk,
+                        const std::string& displayOverride = {}) {
     const std::uint32_t type = field.fieldtype;
     GffFieldRow row;
     row.path = path;
-    row.label = displayLabel(field.GetLabel());
+    row.label = displayOverride.empty() ? displayLabel(field.GetLabel()) : displayOverride;
     row.type = fieldTypeName(type);
     row.editable = isEditableFieldType(type);
     row.deletable = !path.empty();
@@ -255,11 +261,25 @@ void appendRowsForField(std::vector<GffFieldRow>& out, const GffField& field, co
 }
 
 void appendRowsForStruct(std::vector<GffFieldRow>& out, const GffStruct& structure, const std::string& path, const neotlk::TlkLookup* tlk) {
+    std::unordered_map<std::string, std::size_t> totals;
+    for (const auto& fieldPtr : structure.allFields()) {
+        if (fieldPtr) ++totals[fieldPtr->GetLabel()];
+    }
+
+    std::unordered_map<std::string, std::size_t> occurrences;
     for (const auto& fieldPtr : structure.allFields()) {
         if (!fieldPtr) continue;
         const std::string label = fieldPtr->GetLabel();
-        const std::string childPath = joinPath(path, label);
-        appendRowsForField(out, *fieldPtr, childPath, tlk);
+        const std::size_t occurrence = ++occurrences[label];
+        const bool duplicate = totals[label] > 1u;
+        const std::string pathLabel = duplicate
+                                          ? label + "[#" + std::to_string(occurrence) + "]"
+                                          : label;
+        const std::string shownLabel = duplicate
+                                           ? displayLabel(label) + " [" + std::to_string(occurrence) + "]"
+                                           : displayLabel(label);
+        const std::string childPath = joinPath(path, pathLabel);
+        appendRowsForField(out, *fieldPtr, childPath, tlk, shownLabel);
     }
 }
 
@@ -328,47 +348,131 @@ std::unique_ptr<GffField> createField(const std::string& label,
     }
 }
 
-std::string defaultGffTypeForExtension(const std::filesystem::path& file) {
-    std::string ext = lowerAsciiLocal(file.extension().string());
-    if (!ext.empty() && ext.front() == '.') ext.erase(ext.begin());
-    if (ext == "gff") return "GFF ";
-    if (ext == "utc") return "UTC ";
-    if (ext == "utd") return "UTD ";
-    if (ext == "ute") return "UTE ";
-    if (ext == "uti") return "UTI ";
-    if (ext == "utm") return "UTM ";
-    if (ext == "utp") return "UTP ";
-    if (ext == "uts") return "UTS ";
-    if (ext == "utt") return "UTT ";
-    if (ext == "utw") return "UTW ";
-    if (ext == "jrl") return "JRL ";
-    if (ext == "dlg") return "DLG ";
-    if (ext == "are") return "ARE ";
-    if (ext == "git") return "GIT ";
-    if (ext == "ifo") return "IFO ";
-    if (ext == "pth") return "PTH ";
-    if (ext == "fac") return "FAC ";
-    if (ext == "gui") return "GUI ";
-    if (ext == "sto") return "STO ";
-    if (ext == "cwa") return "CWA ";
-    if (ext == "fsm") return "FSM ";
-    if (ext == "qst" || ext == "qst2") return "QST ";
-    if (ext == "cre") return "CRE ";
-    if (ext == "pla") return "PLA ";
-    if (ext == "trg") return "TRG ";
-    if (ext == "bic") return "BIC ";
-    if (ext == "btc") return "BTC ";
-    if (ext == "bti") return "BTI ";
-    if (ext == "itp") return "ITP ";
-    if (ext == "btp") return "PLA ";
-    if (ext == "btt") return "TRG ";
-    return "UTC ";
-}
-
-
 namespace {
 
+struct GffExtensionMapping {
+    const char* extension;
+    const char* fileType;
+    bool jadeEmpire;
+};
+
+constexpr GffExtensionMapping kGffExtensionMappings[] = {
+    {"gff", "GFF ", true},
+    {"utc", "UTC ", false},
+    {"utd", "UTD ", false},
+    {"ute", "UTE ", false},
+    {"uti", "UTI ", false},
+    {"utm", "UTM ", false},
+    {"utp", "UTP ", false},
+    {"uts", "UTS ", false},
+    {"utt", "UTT ", false},
+    {"utw", "UTW ", false},
+    {"cam", "UTW ", false},
+    {"uta", "UTA ", false},
+    {"utx", "UTX ", false},
+    {"mmd", "MMD ", false},
+    {"jrl", "JRL ", false},
+    {"dlg", "DLG ", true},
+    {"are", "ARE ", true},
+    {"git", "GIT ", false},
+    {"gic", "GIC ", false},
+    {"ifo", "IFO ", false},
+    {"pth", "PTH ", false},
+    {"fac", "FAC ", false},
+    {"gui", "GUI ", true},
+    {"sto", "STO ", true},
+    {"cwa", "CWA ", true},
+    {"fsm", "FSM ", true},
+    {"qst", "QST ", true},
+    {"qst2", "QST ", true},
+    {"cre", "CRE ", true},
+    {"pla", "PLA ", true},
+    {"trg", "TRG ", true},
+    {"cwd", "CWD ", true},
+    {"sav", "SAV ", true},
+    {"bic", "BIC ", false},
+    {"btc", "BTC ", false},
+    {"bti", "BTI ", false},
+    {"itp", "ITP ", false},
+    {"btp", "PLA ", false},
+    {"btt", "TRG ", false},
+};
+
+constexpr const char* kDragonAgeGff4ResourceExtensions[] = {
+    "dlg", "stg", "cnv", "cut", "plo", "mor", "mop", "ani",
+    "evt", "cl", "gad", "pwk", "plt", "tlk", "mmh", "arl",
+    "rml", "anb", "tnt",
+};
+
+std::string normalizeGffExtension(std::string extension) {
+    extension = lowerAsciiLocal(trim(std::move(extension)));
+    while (!extension.empty() && extension.front() == '.') extension.erase(extension.begin());
+    return extension;
+}
+
 } // namespace
+
+const std::vector<std::string>& knownGffResourceExtensions() {
+    static const std::vector<std::string> extensions = [] {
+        std::vector<std::string> result;
+        result.reserve(sizeof(kGffExtensionMappings) / sizeof(kGffExtensionMappings[0]));
+        for (const auto& mapping : kGffExtensionMappings) result.emplace_back(mapping.extension);
+        return result;
+    }();
+    return extensions;
+}
+
+const std::vector<std::string>& jadeEmpireGffResourceExtensions() {
+    static const std::vector<std::string> extensions = [] {
+        std::vector<std::string> result;
+        for (const auto& mapping : kGffExtensionMappings) {
+            if (mapping.jadeEmpire) result.emplace_back(mapping.extension);
+        }
+        return result;
+    }();
+    return extensions;
+}
+
+const std::vector<std::string>& dragonAgeGff4ResourceExtensions() {
+    static const std::vector<std::string> extensions(
+        std::begin(kDragonAgeGff4ResourceExtensions),
+        std::end(kDragonAgeGff4ResourceExtensions));
+    return extensions;
+}
+
+bool isKnownGffResourceExtension(std::string extension) {
+    extension = normalizeGffExtension(std::move(extension));
+    return std::any_of(std::begin(kGffExtensionMappings), std::end(kGffExtensionMappings),
+                       [&](const GffExtensionMapping& mapping) {
+                           return extension == mapping.extension;
+                       });
+}
+
+bool isKnownDragonAgeGff4ResourceExtension(std::string extension) {
+    extension = normalizeGffExtension(std::move(extension));
+    return std::any_of(std::begin(kDragonAgeGff4ResourceExtensions),
+                       std::end(kDragonAgeGff4ResourceExtensions),
+                       [&](const char* candidate) { return extension == candidate; });
+}
+
+std::string defaultGffTypeForExtension(const std::filesystem::path& file) {
+    const std::string extension = normalizeGffExtension(file.extension().string());
+    const auto it = std::find_if(std::begin(kGffExtensionMappings), std::end(kGffExtensionMappings),
+                                 [&](const GffExtensionMapping& mapping) {
+                                     return extension == mapping.extension;
+                                 });
+    return it == std::end(kGffExtensionMappings) ? std::string("UTC ") : std::string(it->fileType);
+}
+
+std::string preferredGffExtensionForType(std::string fileType) {
+    fileType = normalizeGffFileType(std::move(fileType));
+    const auto it = std::find_if(std::begin(kGffExtensionMappings), std::end(kGffExtensionMappings),
+                                 [&](const GffExtensionMapping& mapping) {
+                                     return fileType == mapping.fileType;
+                                 });
+    return it == std::end(kGffExtensionMappings) ? std::string("gff") : std::string(it->extension);
+}
+
 
 void GffModel::newFile(const std::string& fileType) {
     file_.NewFile(normalizeGffFileType(fileType.empty() ? "UTC" : fileType));

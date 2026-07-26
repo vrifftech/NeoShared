@@ -892,24 +892,36 @@ GffStruct::GffStruct(const std::string& label) : GffField(label) {
 }
 
 GffField* GffStruct::GetFieldByLabel(const std::string& label) {
+    return GetFieldByLabel(label, 0u);
+}
+
+const GffField* GffStruct::GetFieldByLabel(const std::string& label) const {
+    return GetFieldByLabel(label, 0u);
+}
+
+GffField* GffStruct::GetFieldByLabel(const std::string& label, std::size_t occurrence) {
+    std::size_t matched = 0;
     for (auto& field : fields_) {
         if (!field) {
             throw GffError("Invalid null field encountered when searching Struct " + GetLabel() + "!");
         }
         if (field->GetLabel() == label) {
-            return field.get();
+            if (matched == occurrence) return field.get();
+            ++matched;
         }
     }
     return nullptr;
 }
 
-const GffField* GffStruct::GetFieldByLabel(const std::string& label) const {
+const GffField* GffStruct::GetFieldByLabel(const std::string& label, std::size_t occurrence) const {
+    std::size_t matched = 0;
     for (const auto& field : fields_) {
         if (!field) {
             throw GffError("Invalid null field encountered when searching Struct " + GetLabel() + "!");
         }
         if (field->GetLabel() == label) {
-            return field.get();
+            if (matched == occurrence) return field.get();
+            ++matched;
         }
     }
     return nullptr;
@@ -947,14 +959,8 @@ void GffStruct::AddField(std::unique_ptr<GffField> field) {
     if (!field) {
         throw GffError("Invalid null field encountered when adding field to Struct " + GetLabel() + "!");
     }
-    for (const auto& existing : fields_) {
-        if (!existing) {
-            throw GffError("Invalid null field encountered in Struct " + GetLabel() + "!");
-        }
-        if (existing->GetLabel() == field->GetLabel()) {
-            throw GffError("Duplicate GFF field label " + field->GetLabel() + " in Struct " + GetLabel() + "!");
-        }
-    }
+    // Jade Empire SAV resources can contain repeated labels within one
+    // struct. Preserve each occurrence and its original order.
     fields_.push_back(std::move(field));
 }
 
@@ -963,18 +969,24 @@ void GffStruct::AddField(GffField* field) {
 }
 
 void GffStruct::DeleteField(const std::string& label) {
+    DeleteField(label, 0u);
+}
+
+void GffStruct::DeleteField(const std::string& label, std::size_t occurrence) {
+    std::size_t matched = 0;
     auto it = fields_.begin();
     for (; it != fields_.end(); ++it) {
         if (!*it) {
             throw GffError("Invalid null field encountered when deleting field from Struct " + GetLabel() + "!");
         }
         if ((*it)->GetLabel() == label) {
-            break;
+            if (matched == occurrence) break;
+            ++matched;
         }
     }
     if (it == fields_.end()) {
-        throw GffError("Unable to delete field! No field with the label " + label +
-                        " was found in the Struct " + GetLabel() + "!");
+        throw GffError("Unable to delete field occurrence " + std::to_string(occurrence + 1u) +
+                       " with label " + label + " from Struct " + GetLabel() + "!");
     }
     fields_.erase(it);
 }
@@ -1381,8 +1393,9 @@ void GffFile::LoadFile(const std::filesystem::path& filename) {
             return;
         }
 
-        if (fixedToString(header_.fileversion.data(), 4) != "V3.2") {
-            throw GffError("Unsupported or non-GFF resource. the shared GFF core supports classic GFF V3.2 resources and Dragon Age GFF V4.0/V4.1 containers.");
+        const std::string classicVersion = fixedToString(header_.fileversion.data(), 4);
+        if (classicVersion != "V3.2" && classicVersion != "V3.3") {
+            throw GffError("Unsupported or non-GFF resource. The shared GFF core supports classic GFF V3.2/V3.3 resources and Dragon Age GFF V4.0/V4.1 containers.");
         }
 
         filename_ = filename;
@@ -1970,6 +1983,43 @@ std::unique_ptr<GffField> GffFile::LoadGff4Field(const Gff4FieldTemplate& fieldT
 
 namespace {
 
+struct FieldPathSelector {
+    std::string label;
+    std::size_t occurrence = 0;
+};
+
+FieldPathSelector fieldPathSelector(const GffStruct& structure, const std::string& token) {
+    // Preserve backwards compatibility for literal labels, even when a label
+    // happens to end in the occurrence-suffix syntax.
+    if (structure.GetFieldByLabel(token) != nullptr) return FieldPathSelector{token, 0u};
+
+    const std::size_t marker = token.rfind("[#");
+    if (marker == std::string::npos || token.size() < marker + 4u || token.back() != ']') {
+        return FieldPathSelector{token, 0u};
+    }
+    const std::string ordinalText = token.substr(marker + 2u, token.size() - marker - 3u);
+    if (!IsUnsignedDecimal(ordinalText)) return FieldPathSelector{token, 0u};
+
+    UInt32 ordinal = 0;
+    try {
+        ordinal = ParseUInt32Decimal(ordinalText);
+    } catch (const std::exception&) {
+        return FieldPathSelector{token, 0u};
+    }
+    if (ordinal == 0u) return FieldPathSelector{token, 0u};
+    return FieldPathSelector{token.substr(0, marker), static_cast<std::size_t>(ordinal - 1u)};
+}
+
+GffField* fieldForPathToken(GffStruct& structure, const std::string& token) {
+    const FieldPathSelector selector = fieldPathSelector(structure, token);
+    return structure.GetFieldByLabel(selector.label, selector.occurrence);
+}
+
+const GffField* fieldForPathToken(const GffStruct& structure, const std::string& token) {
+    const FieldPathSelector selector = fieldPathSelector(structure, token);
+    return structure.GetFieldByLabel(selector.label, selector.occurrence);
+}
+
 GffField* parseStructPath(GffStruct* structure, const std::vector<std::string>& tokens, std::size_t tokenIndex, const std::string& fieldPath);
 
 GffField* parseListPath(GffList* list, const std::vector<std::string>& tokens, std::size_t tokenIndex, const std::string& fieldPath) {
@@ -2004,25 +2054,16 @@ GffField* parseStructPath(GffStruct* structure, const std::vector<std::string>& 
         throw GffError("Access violation reading null GFF struct while parsing path " + fieldPath + "!");
     }
     const std::string& token = tokens[tokenIndex];
-    for (std::size_t i = 0; i < structure->count(); ++i) {
-        GffField* field = structure->GetField(i);
-        if (field == nullptr) {
-            throw GffError("Access violation reading null GFF field while parsing struct path " + fieldPath + "!");
-        }
-        if (field->GetLabel() == token) {
-            if (tokenIndex + 1 == tokens.size()) {
-                return field;
-            }
-            if (field->fieldtype == FIELD_TYPE_STRUCT) {
-                return parseStructPath(&checkedGffCast<GffStruct>(*field), tokens, tokenIndex + 1, fieldPath);
-            }
-            if (field->fieldtype == FIELD_TYPE_LIST) {
-                return parseListPath(&checkedGffCast<GffList>(*field), tokens, tokenIndex + 1, fieldPath);
-            }
-            throw GffError("Unable to retrieve struct field at path " + fieldPath + ", the field " + field->GetLabel() + " is not a LIST or STRUCT!");
-        }
+    GffField* field = fieldForPathToken(*structure, token);
+    if (field == nullptr) return nullptr;
+    if (tokenIndex + 1 == tokens.size()) return field;
+    if (field->fieldtype == FIELD_TYPE_STRUCT) {
+        return parseStructPath(&checkedGffCast<GffStruct>(*field), tokens, tokenIndex + 1, fieldPath);
     }
-    return nullptr;
+    if (field->fieldtype == FIELD_TYPE_LIST) {
+        return parseListPath(&checkedGffCast<GffList>(*field), tokens, tokenIndex + 1, fieldPath);
+    }
+    throw GffError("Unable to retrieve struct field at path " + fieldPath + ", the field " + field->GetLabel() + " is not a LIST or STRUCT!");
 }
 
 const GffField* parseStructPathConst(const GffStruct* structure, const std::vector<std::string>& tokens, std::size_t tokenIndex, const std::string& fieldPath);
@@ -2059,25 +2100,16 @@ const GffField* parseStructPathConst(const GffStruct* structure, const std::vect
         throw GffError("Access violation reading null GFF struct while parsing path " + fieldPath + "!");
     }
     const std::string& token = tokens[tokenIndex];
-    for (std::size_t i = 0; i < structure->count(); ++i) {
-        const GffField* field = structure->GetField(i);
-        if (field == nullptr) {
-            throw GffError("Access violation reading null GFF field while parsing struct path " + fieldPath + "!");
-        }
-        if (field->GetLabel() == token) {
-            if (tokenIndex + 1 == tokens.size()) {
-                return field;
-            }
-            if (field->fieldtype == FIELD_TYPE_STRUCT) {
-                return parseStructPathConst(&checkedGffCast<GffStruct>(*field), tokens, tokenIndex + 1, fieldPath);
-            }
-            if (field->fieldtype == FIELD_TYPE_LIST) {
-                return parseListPathConst(&checkedGffCast<GffList>(*field), tokens, tokenIndex + 1, fieldPath);
-            }
-            throw GffError("Unable to retrieve struct field at path " + fieldPath + ", the field " + field->GetLabel() + " is not a LIST or STRUCT!");
-        }
+    const GffField* field = fieldForPathToken(*structure, token);
+    if (field == nullptr) return nullptr;
+    if (tokenIndex + 1 == tokens.size()) return field;
+    if (field->fieldtype == FIELD_TYPE_STRUCT) {
+        return parseStructPathConst(&checkedGffCast<GffStruct>(*field), tokens, tokenIndex + 1, fieldPath);
     }
-    return nullptr;
+    if (field->fieldtype == FIELD_TYPE_LIST) {
+        return parseListPathConst(&checkedGffCast<GffList>(*field), tokens, tokenIndex + 1, fieldPath);
+    }
+    throw GffError("Unable to retrieve struct field at path " + fieldPath + ", the field " + field->GetLabel() + " is not a LIST or STRUCT!");
 }
 
 std::vector<std::string> tokenizePath(const std::string& path) {
@@ -2114,23 +2146,10 @@ GffField* GffFile::GetFieldByLabel(const std::string& fieldPath) {
         throw GffError("Invalid field path " + fieldPath + " encountered! Unable to load specified field.");
     }
 
-    GffField* field = GetFirstRootField();
-    while (field != nullptr) {
-        if (field->GetLabel() == tokens[0]) {
-            if (tokens.size() == 1) {
-                return field;
-            }
-            if (field->fieldtype == FIELD_TYPE_STRUCT) {
-                return parseStructPath(&checkedGffCast<GffStruct>(*field), tokens, 1, fieldPath);
-            }
-            if (field->fieldtype == FIELD_TYPE_LIST) {
-                return parseListPath(&checkedGffCast<GffList>(*field), tokens, 1, fieldPath);
-            }
-            throw GffError("Unable to retrieve field at path " + fieldPath + ", the field " + field->GetLabel() + " is not a LIST or STRUCT!");
-        }
-        field = GetNextRootField();
+    if (!rootStruct_) {
+        throw GffError("Access violation reading GFF root struct.");
     }
-    return nullptr;
+    return parseStructPath(rootStruct_.get(), tokens, 0, fieldPath);
 }
 
 const GffField* GffFile::GetFieldByLabel(const std::string& fieldPath) const {
@@ -2206,7 +2225,9 @@ void GffFile::DeleteField(const std::string& fieldPath) {
     }
 
     if (parent->fieldtype == FIELD_TYPE_STRUCT) {
-        checkedGffCast<GffStruct>(*parent).DeleteField(field);
+        GffStruct& parentStruct = checkedGffCast<GffStruct>(*parent);
+        const FieldPathSelector selector = fieldPathSelector(parentStruct, field);
+        parentStruct.DeleteField(selector.label, selector.occurrence);
         isDirty_ = true;
     } else if (parent->fieldtype == FIELD_TYPE_LIST) {
         if (!IsUnsignedDecimal(field)) {

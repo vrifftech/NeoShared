@@ -398,7 +398,7 @@ std::string gffXmlToJson(const std::string& gffXml) {
     out << "{\n"
         << "  \"format\": \"GFF3\",\n"
         << "  \"fileType\": " << neojson::quote(gffTypeForJson(root.attribute("type"))) << ",\n"
-        << "  \"version\": \"V3.2\",\n"
+        << "  \"version\": " << neojson::quote(root.attribute("version", "V3.2")) << ",\n"
         << "  \"root\": ";
     writeGffStructJson(out, *rootStruct, 1, false, "4294967295");
     out << "\n}\n";
@@ -410,9 +410,14 @@ std::string gffJsonToXml(const std::string& jsonText) {
     if (!root.isObject()) throw std::invalid_argument("GFF JSON must be an object.");
     std::string fileType = optionalString(root, "fileType", optionalString(root, "type"));
     if (fileType.empty()) fileType = "GFF";
+    const std::string version = optionalString(root, "version", "V3.2");
+    if (version != "V3.2" && version != "V3.3") {
+        throw std::invalid_argument("GFF JSON version must be V3.2 or V3.3.");
+    }
     std::ostringstream out;
     out << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
-    out << "<gff3 type=\"" << escapeXmlAttr(gffTypeForXml(fileType)) << "\">\n";
+    out << "<gff3 type=\"" << escapeXmlAttr(gffTypeForXml(fileType))
+        << "\" version=\"" << escapeXmlAttr(version) << "\">\n";
     writeGffJsonStructAsXml(out, root.at("root"), 1, false, "4294967295");
     out << "</gff3>\n";
     return out.str();

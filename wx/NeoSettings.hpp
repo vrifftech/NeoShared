@@ -29,6 +29,40 @@ inline std::string toStd(const wxString& text) {
     return buffer ? std::string(buffer.data()) : std::string();
 }
 
+// std::filesystem::path::u8string() returns std::string in C++17 and
+// std::u8string in C++20. Keep all shared path boundaries explicitly UTF-8 so
+// consumers compile correctly regardless of the language mode selected by a
+// newer compiler or a parent project.
+inline std::string pathToUtf8(const std::filesystem::path& path) {
+#if defined(__cpp_lib_char8_t)
+    const auto text = path.u8string();
+    return std::string(reinterpret_cast<const char*>(text.data()), text.size());
+#else
+    return path.u8string();
+#endif
+}
+
+inline std::filesystem::path pathFromUtf8(const std::string& text) {
+    if (text.empty()) return {};
+    return std::filesystem::u8path(text.begin(), text.end());
+}
+
+inline wxString pathToWx(const std::filesystem::path& path) {
+#if defined(_WIN32)
+    return wxString(path.native().c_str());
+#else
+    return toWx(pathToUtf8(path));
+#endif
+}
+
+inline std::filesystem::path pathFromWx(const wxString& text) {
+#if defined(_WIN32)
+    return std::filesystem::path(text.ToStdWstring());
+#else
+    return pathFromUtf8(toStd(text));
+#endif
+}
+
 inline std::string trimSlashes(std::string key) {
     while (!key.empty() && (key.front() == '/' || key.front() == '\\')) key.erase(key.begin());
     while (!key.empty() && (key.back() == '/' || key.back() == '\\')) key.pop_back();
@@ -50,8 +84,8 @@ inline std::filesystem::path normalizedPath(const std::filesystem::path& input) 
 }
 
 inline bool samePathForMru(const std::filesystem::path& lhs, const std::filesystem::path& rhs) {
-    const std::string a = normalizedPath(lhs).u8string();
-    const std::string b = normalizedPath(rhs).u8string();
+    const std::string a = pathToUtf8(normalizedPath(lhs));
+    const std::string b = pathToUtf8(normalizedPath(rhs));
 #if defined(_WIN32)
     if (a.size() != b.size()) return false;
     for (std::size_t i = 0; i < a.size(); ++i) {
@@ -156,11 +190,11 @@ public:
                                                   const std::vector<std::string>& legacyKeys = {}) const {
         const auto value = readString(key, legacyKeys);
         if (!value || value->empty()) return std::nullopt;
-        return std::filesystem::path(*value);
+        return pathFromUtf8(*value);
     }
 
     void writePath(const std::string& key, const std::filesystem::path& path) const {
-        writeString(key, path.empty() ? std::string{} : path.u8string());
+        writeString(key, path.empty() ? std::string{} : pathToUtf8(path));
     }
 
     void deleteEntry(const std::string& key) const {
@@ -247,7 +281,7 @@ public:
         wxString value;
         for (std::size_t i = 0; i < maxItems; ++i) {
             if (config.Read(toWx(group + "/" + std::to_string(i)), &value) && !value.empty()) {
-                addUnique(std::filesystem::path(toStd(value)));
+                addUnique(pathFromWx(value));
             }
         }
 
@@ -261,7 +295,7 @@ public:
                 const std::size_t end = delimited.find('|', begin);
                 const std::string item = delimited.substr(
                     begin, end == std::string::npos ? std::string::npos : end - begin);
-                if (!item.empty()) addUnique(std::filesystem::path(item));
+                if (!item.empty()) addUnique(pathFromUtf8(item));
                 if (end == std::string::npos) break;
                 begin = end + 1;
             }
@@ -289,7 +323,7 @@ public:
                 continue;
             }
             config.Write(toWx(group + "/" + std::to_string(writtenPaths.size())),
-                         toWx(normalized.u8string()));
+                         pathToWx(normalized));
             writtenPaths.push_back(normalized);
             if (writtenPaths.size() >= maxItems) break;
         }
@@ -340,7 +374,7 @@ public:
         bool foundLegacy = false;
         for (std::size_t i = 0; i < maxItems; ++i) {
             const std::string key = "MRU/Files/" + std::to_string(i);
-            if (config.Read(toWx(key), &value) && !value.empty()) addUnique(std::filesystem::path(toStd(value)));
+            if (config.Read(toWx(key), &value) && !value.empty()) addUnique(pathFromWx(value));
         }
 
         // Legacy locations used by older experimental builds and K-GFF-style INI code.
@@ -351,7 +385,7 @@ public:
                                     std::string("MRU/") + index}) {
                 if (config.Read(toWx(key), &value) && !value.empty()) {
                     foundLegacy = true;
-                    addUnique(std::filesystem::path(toStd(value)));
+                    addUnique(pathFromWx(value));
                 }
             }
         }
@@ -368,7 +402,7 @@ public:
         std::size_t written = 0;
         for (const auto& file : files) {
             if (file.empty()) continue;
-            config.Write(toWx("MRU/Files/" + std::to_string(written)), toWx(normalizedPath(file).u8string()));
+            config.Write(toWx("MRU/Files/" + std::to_string(written)), pathToWx(normalizedPath(file)));
             ++written;
             if (written >= maxItems) break;
         }
@@ -478,9 +512,9 @@ inline void populateRecentFilesMenu(wxMenu& menu, const AppSettings& settings,
     } else {
         for (std::size_t i = 0; i < files.size(); ++i) {
             const std::string label = "&" + std::to_string(i + 1) + " " +
-                                      ellipsizeMiddle(files[i].u8string(), 72);
+                                      ellipsizeMiddle(pathToUtf8(files[i]), 72);
             wxMenuItem* item = menu.Append(firstRecentId + static_cast<int>(i), toWx(escapeMenuLabel(label)));
-            item->SetHelp(toWx(files[i].u8string()));
+            item->SetHelp(pathToWx(files[i]));
         }
     }
     menu.AppendSeparator();
