@@ -72,8 +72,14 @@ inline std::vector<SavedGameDirectory> savedGameDirectories() {
 
 class OpenGameDirectoryMenu final {
 public:
-    OpenGameDirectoryMenu(wxWindow& owner, wxMenu& menu, OpenGameDirectoryAction action)
-        : owner_(owner), menu_(menu), action_(std::move(action)) {
+    OpenGameDirectoryMenu(wxWindow& owner,
+                          wxMenu& menu,
+                          OpenGameDirectoryAction action,
+                          GameDirectoryGameIds allowedGameIds = {})
+        : owner_(owner),
+          menu_(menu),
+          action_(std::move(action)),
+          allowedGameIds_(std::move(allowedGameIds)) {
         owner_.Bind(wxEVT_MENU_OPEN, &OpenGameDirectoryMenu::onMenuOpen, this);
         refresh();
     }
@@ -92,6 +98,7 @@ public:
 
         const std::vector<SavedGameDirectory> directories = savedGameDirectories();
         for (const SavedGameDirectory& directory : directories) {
+            if (!isAllowedGameId(allowedGameIds_, directory.gameId)) continue;
             std::string label = directory.active ? "[Active] " : std::string{};
             label += directory.gameName;
             if (!directory.installName.empty() && directory.installName != directory.gameName) {
@@ -112,7 +119,10 @@ public:
         }
 
         if (entries_.empty()) {
-            wxMenuItem* empty = menu_.Append(wxID_ANY, "No saved game directories");
+            const wxString emptyLabel = allowedGameIds_.empty()
+                                            ? "No saved game directories"
+                                            : "No matching saved game directories";
+            wxMenuItem* empty = menu_.Append(wxID_ANY, emptyLabel);
             empty->Enable(false);
         }
 
@@ -192,7 +202,7 @@ private:
     }
 
     void onManageDirectories(wxCommandEvent&) {
-        showGameDirectoriesDialog(&owner_);
+        showGameDirectoriesDialog(&owner_, allowedGameIds_);
         refresh();
     }
 
@@ -200,8 +210,10 @@ private:
     wxMenu& menu_;
     std::vector<BoundEntry> entries_;
     OpenGameDirectoryAction action_;
+    GameDirectoryGameIds allowedGameIds_;
     int manageId_ = wxID_NONE;
 };
+
 
 inline std::unique_ptr<OpenGameDirectoryMenu> appendOpenGameDirectoryMenu(
     wxWindow& owner,
@@ -217,6 +229,19 @@ inline std::unique_ptr<OpenGameDirectoryMenu> appendOpenGameDirectoryMenu(
 inline std::unique_ptr<OpenGameDirectoryMenu> appendOpenGameDirectoryMenu(
     wxWindow& owner,
     wxMenu& parent,
+    OpenGameDirectoryAction action,
+    GameDirectoryGameIds allowedGameIds,
+    const wxString& label = "Open Game &Directory") {
+    auto* submenu = new wxMenu();
+    parent.AppendSubMenu(submenu, label,
+                         "Open a supported file from a saved game installation");
+    return std::make_unique<OpenGameDirectoryMenu>(
+        owner, *submenu, std::move(action), std::move(allowedGameIds));
+}
+
+inline std::unique_ptr<OpenGameDirectoryMenu> appendOpenGameDirectoryMenu(
+    wxWindow& owner,
+    wxMenu& parent,
     OpenGameFileDialog openFileDialog,
     const wxString& label = "Open Game &Directory") {
     OpenGameDirectoryAction action = [openFileDialog = std::move(openFileDialog)](
@@ -224,6 +249,20 @@ inline std::unique_ptr<OpenGameDirectoryMenu> appendOpenGameDirectoryMenu(
         if (openFileDialog) openFileDialog(directory.path);
     };
     return appendOpenGameDirectoryMenu(owner, parent, std::move(action), label);
+}
+
+inline std::unique_ptr<OpenGameDirectoryMenu> appendOpenGameDirectoryMenu(
+    wxWindow& owner,
+    wxMenu& parent,
+    OpenGameFileDialog openFileDialog,
+    GameDirectoryGameIds allowedGameIds,
+    const wxString& label = "Open Game &Directory") {
+    OpenGameDirectoryAction action = [openFileDialog = std::move(openFileDialog)](
+                                         const SavedGameDirectory& directory) {
+        if (openFileDialog) openFileDialog(directory.path);
+    };
+    return appendOpenGameDirectoryMenu(
+        owner, parent, std::move(action), std::move(allowedGameIds), label);
 }
 
 // Compatibility overload for independently versioned tool repositories.

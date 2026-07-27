@@ -14,18 +14,30 @@
 #include <wx/textdlg.h>
 #include <wx/wx.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace neogames {
 
+using GameDirectoryGameIds = std::vector<std::string>;
+
+inline bool isAllowedGameId(const GameDirectoryGameIds& allowedGameIds,
+                            const std::string& gameId) {
+    return allowedGameIds.empty() ||
+           std::find(allowedGameIds.begin(), allowedGameIds.end(), gameId) != allowedGameIds.end();
+}
+
 class GameDirectoryDialog final : public wxDialog {
 public:
-    explicit GameDirectoryDialog(wxWindow* parent)
+    explicit GameDirectoryDialog(wxWindow* parent,
+                                 GameDirectoryGameIds allowedGameIds = {})
         : wxDialog(parent, wxID_ANY, "Game Directories", wxDefaultPosition, wxDefaultSize,
-                   wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER) {
+                   wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER),
+          allowedGameIds_(std::move(allowedGameIds)) {
         buildLayout();
         refreshList();
     }
@@ -33,8 +45,18 @@ public:
 private:
     void buildLayout() {
         auto* root = new wxBoxSizer(wxVERTICAL);
-        auto* intro = new wxStaticText(this, wxID_ANY,
-            "Saved game directories are shared by all Neo tools to resolve TLK files, overrides, and resource roots. Each game can have multiple named installs, such as Steam, GOG, or K2 Test. Manual file opening still works when no game is configured.");
+        wxString introText;
+        if (allowedGameIds_.size() == 1) {
+            const GameDefinition* game = findGame(allowedGameIds_.front());
+            const std::string name = game ? game->displayName : allowedGameIds_.front();
+            introText = neosettings::toWx(
+                "Saved " + name +
+                " installations are shared by the Neo tools. Multiple named installs, such as Steam or GOG, may be configured.");
+        } else {
+            introText =
+                "Saved game directories are shared by all Neo tools to resolve TLK files, overrides, and resource roots. Each game can have multiple named installs, such as Steam, GOG, or K2 Test. Manual file opening still works when no game is configured.";
+        }
+        auto* intro = new wxStaticText(this, wxID_ANY, introText);
         intro->Wrap(FromDIP(760));
         root->Add(intro, 0, wxEXPAND | wxALL, FromDIP(10));
 
@@ -126,6 +148,7 @@ private:
         rows_.clear();
 
         for (const auto& game : knownGames()) {
+            if (!isAllowedGameId(allowedGameIds_, game.id)) continue;
             auto installs = resolver().settings().readAll(game);
             if (installs.empty()) {
                 GameInstall missing;
@@ -245,7 +268,15 @@ private:
     }
 
     void onRescanAll() {
-        resolver().resolveAllInstalls(std::nullopt, true);
+        if (allowedGameIds_.empty()) {
+            resolver().resolveAllInstalls(std::nullopt, true);
+        } else {
+            for (const std::string& gameId : allowedGameIds_) {
+                if (const GameDefinition* game = findGame(gameId)) {
+                    resolver().resolveInstalls(*game, std::nullopt, true);
+                }
+            }
+        }
         refreshList();
     }
 
@@ -258,10 +289,12 @@ private:
 
     wxListCtrl* list_ = nullptr;
     std::vector<GameInstall> rows_;
+    GameDirectoryGameIds allowedGameIds_;
 };
 
-inline void showGameDirectoriesDialog(wxWindow* parent) {
-    GameDirectoryDialog dialog(parent);
+inline void showGameDirectoriesDialog(wxWindow* parent,
+                                      GameDirectoryGameIds allowedGameIds = {}) {
+    GameDirectoryDialog dialog(parent, std::move(allowedGameIds));
     dialog.ShowModal();
 }
 

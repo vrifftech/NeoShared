@@ -44,3 +44,5 @@ install_manifest.txt
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+.ci-logs/

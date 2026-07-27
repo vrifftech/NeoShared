@@ -17,6 +17,7 @@
 #include <wx/textdlg.h>
 #include <wx/spinctrl.h>
 #include <wx/treectrl.h>
+#include <wx/wupdlock.h>
 
 #if defined(__WXMSW__) && !wxCHECK_VERSION(3, 3, 3)
 #error "Neo Tools Windows GUIs require wxWidgets 3.3.3 or newer. Use the neoshared vcpkg overlay."
@@ -92,52 +93,15 @@ inline ThemePalette themePalette(bool darkMode) {
     };
 }
 
-// wxGrid normally paints cell contents first and grid lines in a separate
-// pass. On some wxMSW/Windows 10 configurations, a small invalidation around
-// the mouse cursor can repaint the cell without reliably restoring that later
-// line pass. Paint each separator as part of its owning cell instead so any
-// cell repaint restores the same right and bottom edges deterministically.
-class PersistentGridCellRenderer final : public wxGridCellStringRenderer {
-public:
-    wxGridCellRenderer* Clone() const override {
-        return new PersistentGridCellRenderer();
-    }
-
-    void Draw(wxGrid& grid,
-              wxGridCellAttr& attr,
-              wxDC& dc,
-              const wxRect& rect,
-              int row,
-              int col,
-              bool isSelected) override {
-        wxGridCellStringRenderer::Draw(grid, attr, dc, rect, row, col, isSelected);
-
-        if (rect.GetWidth() <= 0 || rect.GetHeight() <= 0) {
-            return;
-        }
-
-        const wxPen previousPen = dc.GetPen();
-        const int right = rect.GetRight();
-        const int bottom = rect.GetBottom();
-
-        dc.SetPen(grid.GetColGridLinePen(col));
-        dc.DrawLine(right, rect.GetTop(), right, bottom + 1);
-
-        dc.SetPen(grid.GetRowGridLinePen(row));
-        dc.DrawLine(rect.GetLeft(), bottom, right + 1, bottom);
-
-        dc.SetPen(previousPen);
-    }
-};
-
+// wxWidgets 3.3.3 contains the Windows list/grid repaint corrections used by
+// the Neo tools. Keep wxGrid on its native renderer and line-painting path.
+// A custom per-cell renderer previously queried row/column line pens during
+// paint; on very large tables that added unnecessary index-sensitive work.
 inline void configureStableGridRendering(wxGrid& grid) {
-    // Native grid lines are a second paint pass. The renderer above owns the
-    // separators instead, keeping them inside the cell's invalidated rectangle.
-    grid.EnableGridLines(false);
-    grid.SetDefaultRenderer(new PersistentGridCellRenderer());
+    grid.EnableGridLines(true);
 
-    // Keep resizing available from the row/column labels, but do not switch to
-    // resize cursors while traversing the one-pixel separators in the cell area.
+    // Keep resizing available from the row and column labels, but avoid
+    // switching resize modes while the pointer crosses interior cell lines.
     grid.DisableDragGridSize();
 }
 
@@ -276,7 +240,6 @@ inline void applyStatusBarTheme(wxStatusBar& status, bool darkMode) {
         status.SetBackgroundColour(palette.button);
         status.SetForegroundColour(palette.text);
         status.Refresh(false);
-        status.Update();
     }
 }
 
@@ -320,8 +283,7 @@ inline void applyListTheme(wxListCtrl& list, bool darkMode) {
     for (long row = 0; row < list.GetItemCount(); ++row) {
         styleListRow(list, row, darkMode);
     }
-    list.Refresh();
-    list.Update();
+    list.Refresh(false);
 }
 
 inline void applyTreeTheme(wxTreeCtrl& tree, bool darkMode) {
@@ -330,65 +292,57 @@ inline void applyTreeTheme(wxTreeCtrl& tree, bool darkMode) {
     tree.SetForegroundColour(palette.text);
     tree.SetOwnBackgroundColour(palette.field);
     tree.SetOwnForegroundColour(palette.text);
-    tree.Refresh();
-    tree.Update();
+    tree.Refresh(false);
 }
 
 inline void applyGridTheme(wxGrid& grid, bool darkMode) {
     const ThemePalette palette = themePalette(darkMode);
     {
-        // wxGrid owns multiple internal paint windows. Batch the attribute
-        // changes and let wxGrid invalidate those windows itself instead of
-        // synchronously repainting each child during the recursive theme pass.
         wxGridUpdateLocker lock(&grid);
         grid.SetBackgroundColour(palette.field);
         grid.SetForegroundColour(palette.text);
         grid.SetDefaultCellBackgroundColour(palette.field);
         grid.SetDefaultCellTextColour(palette.text);
-        grid.SetLabelBackgroundColour(darkMode ? palette.panel : wxSystemSettings::GetColour(wxSYS_COLOUR_BTNFACE));
+        grid.SetLabelBackgroundColour(
+            darkMode ? palette.panel : wxSystemSettings::GetColour(wxSYS_COLOUR_BTNFACE));
         grid.SetLabelTextColour(palette.text);
-        // Separators are painted by PersistentGridCellRenderer as part of
-        // each cell, not by wxGrid's separate native grid-line pass.
-        grid.EnableGridLines(false);
+        grid.EnableGridLines(true);
         grid.SetGridLineColour(palette.gridLine);
         grid.SetSelectionBackground(palette.selection);
         grid.SetSelectionForeground(palette.selectionText);
-        for (int row = 0; row < grid.GetNumberRows(); ++row) {
-            for (int col = 0; col < grid.GetNumberCols(); ++col) {
-                grid.SetCellBackgroundColour(row, col, darkMode && (row % 2) ? palette.fieldAlt : palette.field);
-                grid.SetCellTextColour(row, col, palette.text);
-            }
-        }
     }
     grid.ForceRefresh();
-    if (wxWindow* cells = grid.GetGridWindow()) {
-        cells->Refresh(false);
-    }
 }
 
-inline void applyTheme(wxWindow* window, bool darkMode) {
-    activeDarkMode() = darkMode;
+inline void applyThemeRecursive(wxWindow* window, bool darkMode) {
     if (window == nullptr) return;
 
     const ThemePalette palette = themePalette(darkMode);
     wxColour background = palette.panel;
     wxColour foreground = palette.text;
 
-    if (dynamic_cast<wxFrame*>(window) != nullptr || dynamic_cast<wxDialog*>(window) != nullptr) {
+    if (dynamic_cast<wxFrame*>(window) != nullptr ||
+        dynamic_cast<wxDialog*>(window) != nullptr) {
         background = palette.frame;
     }
-    if (dynamic_cast<wxPanel*>(window) != nullptr || dynamic_cast<wxScrolledWindow*>(window) != nullptr) {
+    if (dynamic_cast<wxPanel*>(window) != nullptr ||
+        dynamic_cast<wxScrolledWindow*>(window) != nullptr) {
         background = palette.panel;
     }
-    if (dynamic_cast<wxTextCtrl*>(window) != nullptr || dynamic_cast<wxListCtrl*>(window) != nullptr) {
+    if (dynamic_cast<wxTextCtrl*>(window) != nullptr ||
+        dynamic_cast<wxListCtrl*>(window) != nullptr) {
         background = palette.field;
     }
-    if (dynamic_cast<wxButton*>(window) != nullptr || dynamic_cast<wxCheckBox*>(window) != nullptr ||
-        dynamic_cast<wxChoice*>(window) != nullptr || dynamic_cast<wxComboBox*>(window) != nullptr ||
-        dynamic_cast<wxRadioButton*>(window) != nullptr || dynamic_cast<wxSpinCtrl*>(window) != nullptr) {
+    if (dynamic_cast<wxButton*>(window) != nullptr ||
+        dynamic_cast<wxCheckBox*>(window) != nullptr ||
+        dynamic_cast<wxChoice*>(window) != nullptr ||
+        dynamic_cast<wxComboBox*>(window) != nullptr ||
+        dynamic_cast<wxRadioButton*>(window) != nullptr ||
+        dynamic_cast<wxSpinCtrl*>(window) != nullptr) {
         background = palette.button;
     }
-    if (dynamic_cast<wxStaticBox*>(window) != nullptr || dynamic_cast<wxStaticText*>(window) != nullptr) {
+    if (dynamic_cast<wxStaticBox*>(window) != nullptr ||
+        dynamic_cast<wxStaticText*>(window) != nullptr) {
         background = palette.panel;
     }
 
@@ -396,38 +350,51 @@ inline void applyTheme(wxWindow* window, bool darkMode) {
     window->SetForegroundColour(foreground);
 
     if (auto* text = dynamic_cast<wxTextCtrl*>(window)) {
-        text->SetBackgroundColour(text->IsEditable() ? palette.field : (darkMode ? palette.fieldAlt : wxSystemSettings::GetColour(wxSYS_COLOUR_BTNFACE)));
+        text->SetBackgroundColour(
+            text->IsEditable()
+                ? palette.field
+                : (darkMode ? palette.fieldAlt
+                            : wxSystemSettings::GetColour(wxSYS_COLOUR_BTNFACE)));
         text->SetForegroundColour(palette.text);
     }
+
+    // Composite controls own implementation children with independent paint
+    // state. Theme their public surface once and do not recurse into those
+    // internal windows.
     if (auto* list = dynamic_cast<wxListCtrl*>(window)) {
         applyListTheme(*list, darkMode);
+        return;
     }
     if (auto* grid = dynamic_cast<wxGrid*>(window)) {
         applyGridTheme(*grid, darkMode);
+        return;
     }
     if (auto* tree = dynamic_cast<wxTreeCtrl*>(window)) {
         applyTreeTheme(*tree, darkMode);
+        return;
     }
     if (auto* status = dynamic_cast<wxStatusBar*>(window)) {
         applyStatusBarTheme(*status, darkMode);
-    }
-    if (auto* frame = dynamic_cast<wxFrame*>(window)) {
-        if (auto* status = frame->GetStatusBar()) {
-            applyStatusBarTheme(*status, darkMode);
-        }
+        return;
     }
 
-    // wxGrid child windows are implementation details with their own paint
-    // pipeline. Recursively assigning colours to them can leave one-pixel
-    // separators invalidated until the next mouse event on wxMSW.
-    if (dynamic_cast<wxGrid*>(window) == nullptr) {
-        for (wxWindowList::compatibility_iterator node = window->GetChildren().GetFirst(); node; node = node->GetNext()) {
-            applyTheme(node->GetData(), darkMode);
-        }
+    for (wxWindowList::compatibility_iterator node = window->GetChildren().GetFirst();
+         node;
+         node = node->GetNext()) {
+        applyThemeRecursive(node->GetData(), darkMode);
     }
+}
 
-    window->Refresh();
-    window->Update();
+inline void applyTheme(wxWindow* window, bool darkMode) {
+    activeDarkMode() = darkMode;
+    if (window == nullptr) return;
+
+    {
+        wxWindowUpdateLocker updateLocker(window);
+        applyThemeRecursive(window, darkMode);
+        if (window->GetSizer() != nullptr) window->Layout();
+    }
+    window->Refresh(false);
 }
 
 inline void showError(wxWindow* parent, const std::exception& ex) {
