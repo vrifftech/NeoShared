@@ -686,15 +686,10 @@ std::string GffField::GetString() const {
         }
         return "[LIST]";
     }
-    case FIELD_TYPE_ORIENTATION: {
-        const auto& orient = checkedGffCast<GffOrientationField>(*this).value;
-        return FormatNumber(orient[0]) + "|" + FormatNumber(orient[1]) + "|" +
-               FormatNumber(orient[2]) + "|" + FormatNumber(orient[3]);
-    }
-    case FIELD_TYPE_POSITION: {
-        const auto& pos = checkedGffCast<GffPositionField>(*this).value;
-        return FormatNumber(pos[0]) + "|" + FormatNumber(pos[1]) + "|" + FormatNumber(pos[2]);
-    }
+    case FIELD_TYPE_ORIENTATION:
+        return FormatGffVector4Text(checkedGffCast<GffOrientationField>(*this).value);
+    case FIELD_TYPE_POSITION:
+        return FormatGffVector3Text(checkedGffCast<GffPositionField>(*this).value);
     case FIELD_TYPE_JADE_STRREF: {
         const auto& text = checkedGffCast<GffJadeStringRefField>(*this);
         return std::to_string(text.stringType) + "|" + (text.strref == 0xFFFFFFFFu ? std::string("-1") : std::to_string(text.strref));
@@ -2333,26 +2328,12 @@ bool GffFile::ChangeFieldValue(std::string path, const std::string& value) {
         case FIELD_TYPE_RESREF:
             checkedGffCast<GffResRefField>(*field).SetString(value);
             break;
-        case FIELD_TYPE_ORIENTATION: {
-            const auto tokens = splitNonEmpty(value, '|');
-            if (tokens.size() != 4) return false;
-            auto* orient = &checkedGffCast<GffOrientationField>(*field);
-            for (std::size_t i = 0; i < tokens.size(); ++i) {
-                if (!IsDecimalNumber(tokens[i])) return false;
-                orient->value[i] = ParseFloatDecimal(tokens[i]);
-            }
+        case FIELD_TYPE_ORIENTATION:
+            checkedGffCast<GffOrientationField>(*field).value = ParseGffVector4Text(value);
             break;
-        }
-        case FIELD_TYPE_POSITION: {
-            const auto tokens = splitNonEmpty(value, '|');
-            if (tokens.size() != 3) return false;
-            auto* pos = &checkedGffCast<GffPositionField>(*field);
-            for (std::size_t i = 0; i < tokens.size(); ++i) {
-                if (!IsDecimalNumber(tokens[i])) return false;
-                pos->value[i] = ParseFloatDecimal(tokens[i]);
-            }
+        case FIELD_TYPE_POSITION:
+            checkedGffCast<GffPositionField>(*field).value = ParseGffVector3Text(value);
             break;
-        }
         case FIELD_TYPE_JADE_STRREF: {
             const auto tokens = splitNonEmpty(value, '|');
             if (tokens.size() != 2 || !IsUnsignedDecimal(tokens[0])) return false;

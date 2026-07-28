@@ -145,6 +145,54 @@ std::string formatFloating(T value) {
     return std::to_string(static_cast<double>(value));
 }
 
+std::string trimAscii(std::string value) {
+    const auto notSpace = [](unsigned char ch) { return std::isspace(ch) == 0; };
+    value.erase(value.begin(), std::find_if(value.begin(), value.end(), notSpace));
+    value.erase(std::find_if(value.rbegin(), value.rend(), notSpace).base(), value.end());
+    return value;
+}
+
+template <std::size_t ComponentCount>
+std::array<float, ComponentCount> parseGffVectorText(const std::string& text,
+                                                      const char* fieldName) {
+    std::array<float, ComponentCount> result{};
+    std::size_t start = 0;
+
+    for (std::size_t index = 0; index < ComponentCount; ++index) {
+        const std::size_t separator = text.find('|', start);
+        const bool finalComponent = index + 1u == ComponentCount;
+
+        if ((!finalComponent && separator == std::string::npos) ||
+            (finalComponent && separator != std::string::npos)) {
+            throw std::invalid_argument(
+                std::string(fieldName) + " requires exactly " +
+                std::to_string(ComponentCount) + " pipe-separated numbers.");
+        }
+
+        const std::size_t end = separator == std::string::npos ? text.size() : separator;
+        const std::string component = trimAscii(text.substr(start, end - start));
+        if (component.empty()) {
+            throw std::invalid_argument(std::string(fieldName) +
+                                        " cannot contain an empty component.");
+        }
+
+        result[index] = ParseFloatDecimal(component);
+        start = end + 1u;
+    }
+
+    return result;
+}
+
+template <std::size_t ComponentCount>
+std::string formatGffVectorText(const std::array<float, ComponentCount>& value) {
+    std::string text;
+    for (std::size_t index = 0; index < ComponentCount; ++index) {
+        if (index != 0u) text.push_back('|');
+        text += FormatNumber(value[index]);
+    }
+    return text;
+}
+
 } // namespace
 
 bool IsUnsignedDecimal(const std::string& text) {
@@ -194,6 +242,22 @@ double ParseDoubleDecimal(const std::string& text) {
 
 float ParseFloatDecimal(const std::string& text) {
     return parseFloatingDecimal<float>(text);
+}
+
+GffVector3 ParseGffVector3Text(const std::string& text) {
+    return parseGffVectorText<3>(text, "GFF Vector3");
+}
+
+GffVector4 ParseGffVector4Text(const std::string& text) {
+    return parseGffVectorText<4>(text, "GFF Vector4");
+}
+
+std::string FormatGffVector3Text(const GffVector3& value) {
+    return formatGffVectorText(value);
+}
+
+std::string FormatGffVector4Text(const GffVector4& value) {
+    return formatGffVectorText(value);
 }
 
 std::filesystem::path ResolveOutputTarget(const std::filesystem::path& target) {

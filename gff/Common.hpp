@@ -11,6 +11,8 @@ namespace neogff {
 
 using UInt32 = std::uint32_t;
 using FourChar = std::array<char, 4>;
+using GffVector3 = std::array<float, 3>;
+using GffVector4 = std::array<float, 4>;
 
 bool IsUnsignedDecimal(const std::string& text);
 bool IsSignedDecimal(const std::string& text);
@@ -22,6 +24,14 @@ std::int32_t ParseInt32Decimal(const std::string& text);
 std::int64_t ParseInt64Decimal(const std::string& text);
 double ParseDoubleDecimal(const std::string& text);
 float ParseFloatDecimal(const std::string& text);
+
+// Canonical text boundary for GFF three- and four-component floating-point
+// fields. Components are separated by '|'. Empty, missing, or surplus
+// components and non-finite values are rejected.
+GffVector3 ParseGffVector3Text(const std::string& text);
+GffVector4 ParseGffVector4Text(const std::string& text);
+std::string FormatGffVector3Text(const GffVector3& value);
+std::string FormatGffVector4Text(const GffVector4& value);
 
 std::filesystem::path ResolveOutputTarget(const std::filesystem::path& target);
 std::filesystem::path MakeSiblingTempPath(const std::filesystem::path& target, const std::string& tag = "neogff");

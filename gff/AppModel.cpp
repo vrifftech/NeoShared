@@ -327,14 +327,14 @@ std::unique_ptr<GffField> createField(const std::string& label,
     case FIELD_TYPE_LIST:
         return std::make_unique<GffList>(label);
     case FIELD_TYPE_ORIENTATION: {
-        const auto parts = splitNonEmpty(value.empty() ? "0|0|0|0" : value, '|');
-        if (parts.size() != 4) throw std::invalid_argument("Orientation requires four pipe-separated floats.");
-        return std::make_unique<GffOrientationField>(label, parseFloatStrict(parts[0]), parseFloatStrict(parts[1]), parseFloatStrict(parts[2]), parseFloatStrict(parts[3]));
+        const auto components = ParseGffVector4Text(value.empty() ? "0|0|0|0" : value);
+        return std::make_unique<GffOrientationField>(label, components[0], components[1],
+                                                     components[2], components[3]);
     }
     case FIELD_TYPE_POSITION: {
-        const auto parts = splitNonEmpty(value.empty() ? "0|0|0" : value, '|');
-        if (parts.size() != 3) throw std::invalid_argument("Position requires three pipe-separated floats.");
-        return std::make_unique<GffPositionField>(label, parseFloatStrict(parts[0]), parseFloatStrict(parts[1]), parseFloatStrict(parts[2]));
+        const auto components = ParseGffVector3Text(value.empty() ? "0|0|0" : value);
+        return std::make_unique<GffPositionField>(label, components[0], components[1],
+                                                  components[2]);
     }
     case FIELD_TYPE_JADE_STRREF: {
         const auto parts = splitNonEmpty(value.empty() ? "4|-1" : value, '|');
