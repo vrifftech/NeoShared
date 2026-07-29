@@ -51,7 +51,3 @@ Windows:
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-
-## Continuous integration
-
-GitHub Actions builds and tests `neoshared` on Ubuntu 24.04 and Windows Server 2025 with Visual Studio 2026. The workflow runs for pushes, pull requests, manual dispatches, and a weekly runner-drift check. Dependabot keeps the referenced GitHub Actions current.
