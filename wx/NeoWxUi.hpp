@@ -32,6 +32,17 @@
 
 namespace wxui {
 
+inline void configureResponsiveWindow(wxTopLevelWindow& window,
+                                      const wxSize& preferredDip,
+                                      const wxSize& minimumDip,
+                                      int marginDip = 12) {
+    neowindow::configureResponsiveWindow(window, preferredDip, minimumDip, marginDip);
+}
+
+inline void constrainWindowToDisplay(wxTopLevelWindow& window, int marginDip = 8) {
+    neowindow::constrainWindowToDisplay(window, marginDip);
+}
+
 inline wxString toWx(const std::string& text) {
     return wxString::FromUTF8(text.c_str());
 }

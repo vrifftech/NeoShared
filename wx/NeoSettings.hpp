@@ -1,5 +1,7 @@
 #pragma once
 
+#include "NeoWindowPlacement.hpp"
+
 #include <wx/config.h>
 #include <wx/menu.h>
 #include <wx/string.h>
@@ -464,7 +466,9 @@ public:
         }
         config.Read(toWx(base + "X"), &x, static_cast<long>(window.GetPosition().x));
         config.Read(toWx(base + "Y"), &y, static_cast<long>(window.GetPosition().y));
-        window.SetSize(static_cast<int>(x), static_cast<int>(y), static_cast<int>(w), static_cast<int>(h));
+        neowindow::applyRestoredWindowRect(
+            window,
+            wxRect(static_cast<int>(x), static_cast<int>(y), static_cast<int>(w), static_cast<int>(h)));
         bool maximized = false;
         if (config.Read(toWx(base + "Maximized"), &maximized) && maximized) {
             window.Maximize(true);

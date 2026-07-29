@@ -1,6 +1,7 @@
 #pragma once
 
 #include "NeoGameInstallResolver.hpp"
+#include "NeoWindowPlacement.hpp"
 
 #include <wx/button.h>
 #include <wx/choice.h>
@@ -13,6 +14,7 @@
 #include <wx/textctrl.h>
 #include <wx/textdlg.h>
 #include <wx/wx.h>
+#include <wx/wrapsizer.h>
 
 #include <algorithm>
 #include <filesystem>
@@ -71,7 +73,7 @@ private:
         list_->AppendColumn("Override/Data", wxLIST_FORMAT_LEFT, FromDIP(260));
         root->Add(list_, 1, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(10));
 
-        auto* buttons = new wxBoxSizer(wxHORIZONTAL);
+        auto* actions = new wxWrapSizer(wxHORIZONTAL);
         auto* addInstall = new wxButton(this, wxID_ANY, "Add Install...");
         auto* changeInstall = new wxButton(this, wxID_ANY, "Change Install...");
         auto* browseTlk = new wxButton(this, wxID_ANY, "Browse TLK...");
@@ -81,21 +83,21 @@ private:
         auto* rescanAll = new wxButton(this, wxID_ANY, "Rescan All");
         auto* clear = new wxButton(this, wxID_ANY, "Clear Selected");
         auto* close = new wxButton(this, wxID_CLOSE, "Close");
-        buttons->Add(addInstall, 0, wxRIGHT, FromDIP(6));
-        buttons->Add(changeInstall, 0, wxRIGHT, FromDIP(6));
-        buttons->Add(browseTlk, 0, wxRIGHT, FromDIP(6));
-        buttons->Add(rename, 0, wxRIGHT, FromDIP(6));
-        buttons->Add(setActive, 0, wxRIGHT, FromDIP(6));
-        buttons->Add(rescanSelected, 0, wxRIGHT, FromDIP(6));
-        buttons->Add(rescanAll, 0, wxRIGHT, FromDIP(6));
-        buttons->Add(clear, 0, wxRIGHT, FromDIP(6));
-        buttons->AddStretchSpacer();
-        buttons->Add(close, 0);
-        root->Add(buttons, 0, wxEXPAND | wxALL, FromDIP(10));
+        for (wxButton* button : {addInstall, changeInstall, browseTlk, rename,
+                                 setActive, rescanSelected, rescanAll, clear}) {
+            actions->Add(button, 0, wxRIGHT | wxBOTTOM, FromDIP(6));
+        }
+        root->Add(actions, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP(10));
+
+        auto* closeRow = new wxBoxSizer(wxHORIZONTAL);
+        closeRow->AddStretchSpacer();
+        closeRow->Add(close, 0);
+        root->Add(closeRow, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(10));
 
         SetSizer(root);
-        SetMinSize(FromDIP(wxSize(980, 440)));
-        SetInitialSize(FromDIP(wxSize(1320, 620)));
+        neowindow::configureResponsiveWindow(*this, wxSize(1320, 620), wxSize(700, 400));
+        CentreOnParent();
+        neowindow::constrainWindowToDisplay(*this);
 
         addInstall->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { onAddInstall(); });
         changeInstall->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { onChangeInstall(); });
