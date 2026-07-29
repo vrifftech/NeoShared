@@ -2,6 +2,7 @@
 
 #include "TabularData.hpp"
 
+#include <cstdint>
 #include <filesystem>
 #include <string>
 #include <utility>
@@ -22,6 +23,9 @@ struct IniSection {
 struct StagedAsset {
     std::filesystem::path source;
     std::string targetName;
+    std::vector<std::uint8_t> data;
+
+    bool generated() const noexcept { return source.empty(); }
 };
 
 struct PatchProject {

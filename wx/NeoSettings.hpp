@@ -46,7 +46,15 @@ inline std::string pathToUtf8(const std::filesystem::path& path) {
 
 inline std::filesystem::path pathFromUtf8(const std::string& text) {
     if (text.empty()) return {};
-    return std::filesystem::u8path(text.begin(), text.end());
+#if defined(_WIN32)
+    // std::filesystem::path is natively UTF-16 on Windows. Convert through
+    // wxString rather than the locale-dependent narrow path constructor.
+    return std::filesystem::path(toWx(text).ToStdWstring());
+#else
+    // POSIX path storage is a byte sequence. NeoTools defines those bytes as
+    // UTF-8 at its application boundaries, so construct the path directly.
+    return std::filesystem::path(text);
+#endif
 }
 
 inline wxString pathToWx(const std::filesystem::path& path) {

@@ -5,7 +5,10 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <functional>
+#include <limits>
 #include <map>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -21,6 +24,17 @@ std::string lowerAscii(std::string text) {
     return text;
 }
 
+
+std::string encodeIniText(const std::string& value) {
+    std::string encoded;
+    encoded.reserve(value.size());
+    for (const char ch : value) {
+        if (ch == '\r') encoded += "<#CR#>";
+        else if (ch == '\n') encoded += "<#LF#>";
+        else encoded.push_back(ch);
+    }
+    return encoded;
+}
 std::string trim(std::string value) {
     auto notSpace = [](unsigned char ch) { return !std::isspace(ch); };
     value.erase(value.begin(), std::find_if(value.begin(), value.end(), notSpace));
@@ -87,7 +101,7 @@ std::string nextKey(const IniSection& section, const std::string& prefix) {
 
 void addAssetIfRequested(PatchProject& project, bool copyBaselineAsset, const std::filesystem::path& baselineAsset, const std::string& patchFilename) {
     if (copyBaselineAsset && !baselineAsset.empty()) {
-        project.assets.push_back({baselineAsset, patchFilename});
+        project.assets.push_back({baselineAsset, patchFilename, {}});
     }
 }
 
@@ -116,6 +130,23 @@ bool gffTypeIsEditableText(const std::string& type) {
     return key != "struct" && key != "list" && key != "void" && key != "cexolocstring";
 }
 
+bool originalTslCompatibleAddFieldType(const std::string& type) {
+    const std::string key = lowerAscii(gffPatchType(type));
+    return key == "byte" || key == "char" || key == "word" || key == "short" ||
+           key == "dword" || key == "int" || key == "int64" || key == "float" ||
+           key == "double" || key == "exostring" || key == "resref" ||
+           key == "exolocstring" || key == "orientation" || key == "position" ||
+           key == "struct" || key == "list";
+}
+
+bool originalTslCompatibleDirectFieldType(const std::string& type) {
+    const std::string key = lowerAscii(gffPatchType(type));
+    return key == "byte" || key == "char" || key == "word" || key == "short" ||
+           key == "dword" || key == "int" || key == "int64" || key == "float" ||
+           key == "double" || key == "exostring" || key == "resref" ||
+           key == "orientation" || key == "position";
+}
+
 bool truthy(std::string text) {
     text = lowerAscii(trim(std::move(text)));
     return text == "1" || text == "yes" || text == "true" || text == "editable";
@@ -139,35 +170,6 @@ bool pathIsAtOrBelow(const std::string& path, const std::string& root) {
             path.compare(0, root.size(), root) == 0 &&
             path[root.size()] == '\\');
 }
-
-std::string extractTypeId(const std::string& value) {
-    const std::string key = "typeid=";
-    const std::size_t pos = lowerAscii(value).find(key);
-    if (pos == std::string::npos) return "0";
-    std::size_t start = pos + key.size();
-    std::size_t end = start;
-    while (end < value.size() && std::isdigit(static_cast<unsigned char>(value[end]))) ++end;
-    return end > start ? value.substr(start, end - start) : std::string("0");
-}
-
-std::string extractLocStrRef(const std::string& value) {
-    const std::string key = "strref=";
-    const std::string lower = lowerAscii(value);
-    const std::size_t pos = lower.find(key);
-    if (pos == std::string::npos) return "-1";
-    std::size_t start = pos + key.size();
-    std::size_t end = start;
-    if (end < value.size() && value[end] == '-') ++end;
-    while (end < value.size() && std::isdigit(static_cast<unsigned char>(value[end]))) ++end;
-    return end > start ? value.substr(start, end - start) : std::string("-1");
-}
-
-std::string locLangKeyFromPath(const std::string& path) {
-    const std::size_t marker = path.rfind("(lang");
-    if (marker == std::string::npos || path.back() != ')') return {};
-    return "lang" + path.substr(marker + 5, path.size() - marker - 6);
-}
-
 
 struct GffRow {
     std::string path;
@@ -201,6 +203,61 @@ bool isLocStringChildType(const std::string& type) {
 
 bool isLocStringChildPath(const std::string& path) {
     return path.size() > 8 && path.back() == ')' && path.find('(') != std::string::npos;
+}
+
+std::string locStringParentPath(const std::string& path) {
+    const std::size_t marker = path.rfind('(');
+    return marker == std::string::npos ? std::string{} : path.substr(0, marker);
+}
+
+bool containsLineBreak(const std::string& value) {
+    return value.find('\r') != std::string::npos || value.find('\n') != std::string::npos;
+}
+
+bool pathHasDuplicateOccurrence(const std::string& path) {
+    return path.find("[#") != std::string::npos;
+}
+
+
+std::optional<std::uint32_t> unsignedDecimal(const std::string& text) {
+    if (text.empty()) return std::nullopt;
+    std::uint64_t value = 0;
+    for (const char ch : text) {
+        if (ch < '0' || ch > '9') return std::nullopt;
+        value = value * 10u + static_cast<unsigned>(ch - '0');
+        if (value > std::numeric_limits<std::uint32_t>::max()) return std::nullopt;
+    }
+    return static_cast<std::uint32_t>(value);
+}
+
+std::optional<std::uint32_t> structTypeIdFromSummary(const std::string& value) {
+    const std::string prefix = "typeid=";
+    const std::size_t begin = lowerAscii(value).find(prefix);
+    if (begin == std::string::npos) return std::nullopt;
+    const std::size_t numberBegin = begin + prefix.size();
+    std::size_t numberEnd = numberBegin;
+    while (numberEnd < value.size() && std::isdigit(static_cast<unsigned char>(value[numberEnd]))) ++numberEnd;
+    return unsignedDecimal(value.substr(numberBegin, numberEnd - numberBegin));
+}
+
+std::string structuralParentPath(const std::string& path) {
+    return isLocStringChildPath(path) ? locStringParentPath(path) : parentPathOf(path);
+}
+
+bool pathIsLocStringChildOf(const std::string& path, const std::string& parent) {
+    return path.size() > parent.size() + 2u && path.compare(0, parent.size(), parent) == 0 &&
+           path[parent.size()] == '(' && path.back() == ')';
+}
+
+bool pathBelongsToSubtree(const std::string& path, const std::string& root) {
+    return pathIsAtOrBelow(path, root) || pathIsLocStringChildOf(path, root);
+}
+
+std::string patchLabelForRow(const GffRow& row, const std::string& parentType) {
+    if (lowerAscii(gffPatchType(row.type)) == "struct" && lowerAscii(gffPatchType(parentType)) == "list") {
+        return {};
+    }
+    return leafOf(row.path);
 }
 
 std::vector<std::string> dataColumns(const neotabular::Table& table) {
@@ -259,10 +316,9 @@ std::string basenameForPatch(const std::filesystem::path& path) {
 
 std::string writeIniText(const PatchProject& project, bool includeSettings) {
     std::ostringstream out;
-    out << "; Neo tool generated TSLPatcher/HoloPatcher instructions\r\n";
-    out << "; This is an instruction file, not a binary delta.\r\n\r\n";
+    out << "; Neo tool generated TSLPatcher/HoloPatcher instructions\r\n\r\n";
     if (includeSettings && !project.findSection("Settings")) {
-        out << "[Settings]\r\nFileExists=1\r\n\r\n";
+        out << "[Settings]\r\nFileExists=1\r\nInstallerMode=1\r\n\r\n";
     }
     const std::vector<std::string> preferred = {"Settings", "TLKList", "InstallList", "2DAList", "GFFList", "CompileList", "SSFList"};
     std::set<std::string> emitted;
@@ -271,8 +327,18 @@ std::string writeIniText(const PatchProject& project, bool includeSettings) {
         if (emitted.count(lname)) return;
         emitted.insert(lname);
         out << '[' << section.name << "]\r\n";
+        if (includeSettings && lname == "settings") {
+            const bool hasFileExists = std::any_of(section.entries.begin(), section.entries.end(), [](const KeyValue& value) {
+                return lowerAscii(value.key) == "fileexists";
+            });
+            const bool hasInstallerMode = std::any_of(section.entries.begin(), section.entries.end(), [](const KeyValue& value) {
+                return lowerAscii(value.key) == "installermode";
+            });
+            if (!hasFileExists) out << "FileExists=1\r\n";
+            if (!hasInstallerMode) out << "InstallerMode=1\r\n";
+        }
         for (const auto& kv : section.entries) {
-            out << kv.key << '=' << kv.value << "\r\n";
+            out << kv.key << '=' << encodeIniText(kv.value) << "\r\n";
         }
         out << "\r\n";
     };
@@ -304,14 +370,40 @@ void writePackage(const PatchProject& project, const std::filesystem::path& outp
     std::error_code ec;
     std::filesystem::create_directories(outputDir, ec);
     if (ec) throw std::runtime_error("Unable to create TSLPatcher package folder: " + outputDir.string() + ": " + ec.message());
+
     for (const auto& asset : project.assets) {
-        if (asset.source.empty() || asset.targetName.empty()) continue;
+        if (asset.targetName.empty()) continue;
         const std::filesystem::path target = outputDir / asset.targetName;
         std::filesystem::create_directories(target.parent_path(), ec);
         if (ec) throw std::runtime_error("Unable to create asset folder: " + target.parent_path().string() + ": " + ec.message());
-        std::filesystem::copy_file(asset.source, target, std::filesystem::copy_options::overwrite_existing, ec);
-        if (ec) throw std::runtime_error("Unable to stage asset " + asset.source.string() + " as " + target.string() + ": " + ec.message());
+
+        if (!asset.source.empty()) {
+            std::filesystem::copy_file(asset.source, target, std::filesystem::copy_options::overwrite_existing, ec);
+            if (ec) {
+                throw std::runtime_error(
+                    "Unable to stage asset " + asset.source.string() + " as " + target.string() + ": " + ec.message());
+            }
+        } else {
+            std::ofstream out(target, std::ios::binary | std::ios::trunc);
+            if (!out) throw std::runtime_error("Unable to create generated package asset: " + target.string());
+            if (!asset.data.empty()) {
+                out.write(reinterpret_cast<const char*>(asset.data.data()), static_cast<std::streamsize>(asset.data.size()));
+            }
+            if (!out) throw std::runtime_error("Unable to write generated package asset: " + target.string());
+        }
     }
+
+    const std::filesystem::path infoPath = outputDir / "info.rtf";
+    if (!std::filesystem::exists(infoPath)) {
+        static constexpr const char kDefaultInfoRtf[] =
+            "{\\rtf1\\ansi\\deff0{\\fonttbl{\\f0 Arial;}}"
+            "\\viewkind4\\uc1\\pard\\f0\\fs20 Neo tool patch package.\\par}\r\n";
+        std::ofstream info(infoPath, std::ios::binary | std::ios::trunc);
+        if (!info) throw std::runtime_error("Unable to create TSLPatcher info.rtf: " + infoPath.string());
+        info.write(kDefaultInfoRtf, static_cast<std::streamsize>(sizeof(kDefaultInfoRtf) - 1u));
+        if (!info) throw std::runtime_error("Unable to write TSLPatcher info.rtf: " + infoPath.string());
+    }
+
     writeIniFile(project, outputDir / "changes.ini", includeSettings);
 }
 
@@ -353,103 +445,194 @@ PatchProject diffGffFlatTable(const neotabular::Table& original,
     const auto mod = gffRowsByPath(modified);
     const std::string stem = baseNameNoExt(patchFilename);
 
-    // A struct appended to a GFF List receives its final list index only when
-    // TSLPatcher/HoloPatcher applies the patch. Emitting a fixed TypeId/path
-    // here is unsafe: later child-field instructions can target the wrong
-    // struct when another mod has already appended to the same list. NeoDLG
-    // has a domain-aware dynamic ListIndex/2DAMEMORY implementation; the
-    // generic exporter deliberately rejects this operation until the same
-    // mechanism is implemented and tested generically.
-    std::vector<std::string> newListStructCandidates;
-    for (const auto& [path, row] : mod) {
-        if (orig.find(path) != orig.end() || !iequals(gffPatchType(row.type), "Struct")) continue;
-        const auto parent = mod.find(parentPathOf(path));
-        if (parent != mod.end() && iequals(gffPatchType(parent->second.type), "List")) {
-            newListStructCandidates.push_back(path);
+    // GFF paths containing duplicate-label occurrence suffixes are an internal
+    // NeoGFF representation. Neither original TSLPatcher nor HoloPatcher can
+    // address the second or later field with the same label.
+    for (const auto& [path, before] : orig) {
+        const auto after = mod.find(path);
+        if (after == mod.end()) continue;
+        if (pathHasDuplicateOccurrence(path) &&
+            (before.type != after->second.type || before.value != after->second.value)) {
+            project.unsupported.push_back(
+                "Duplicate-label GFF fields cannot be addressed unambiguously by TSLPatcher/HoloPatcher: " + path);
         }
     }
-    std::sort(newListStructCandidates.begin(), newListStructCandidates.end(), [](const std::string& lhs, const std::string& rhs) {
+
+    std::vector<std::string> removedRoots;
+    for (const auto& [path, row] : orig) {
+        if (mod.find(path) == mod.end()) removedRoots.push_back(path);
+    }
+    std::sort(removedRoots.begin(), removedRoots.end(), [](const std::string& lhs, const std::string& rhs) {
         if (lhs.size() != rhs.size()) return lhs.size() < rhs.size();
         return lhs < rhs;
     });
-
-    std::vector<std::string> rejectedListStructRoots;
-    for (const auto& candidate : newListStructCandidates) {
-        const bool alreadyCovered = std::any_of(rejectedListStructRoots.begin(), rejectedListStructRoots.end(), [&](const std::string& root) {
-            return pathIsAtOrBelow(candidate, root);
-        });
-        if (alreadyCovered) continue;
-        rejectedListStructRoots.push_back(candidate);
+    removedRoots.erase(
+        std::remove_if(removedRoots.begin(), removedRoots.end(), [&](const std::string& candidate) {
+            return std::any_of(removedRoots.begin(), removedRoots.end(), [&](const std::string& root) {
+                return root != candidate && root.size() < candidate.size() && pathBelongsToSubtree(candidate, root);
+            });
+        }),
+        removedRoots.end());
+    for (const auto& path : removedRoots) {
         project.unsupported.push_back(
-            "Generic GFF list-struct insertion requires dynamic TypeId=ListIndex and 2DAMEMORY field-path wiring: " + candidate +
-            ". The entire new subtree was omitted. Use a format-specific exporter such as NeoDLG, or distribute a whole-file replacement when appropriate.");
+            "GFF field or list-item deletion requires complete-file installation: " + path);
     }
 
-    for (const auto& [path, row] : orig) {
-        if (mod.find(path) == mod.end()) {
-            project.unsupported.push_back("GFF deleted field/row is not representable without whole-file replacement: " + path);
+    std::vector<std::string> newRoots;
+    for (const auto& [path, row] : mod) {
+        if (orig.find(path) != orig.end()) continue;
+        const std::string parent = structuralParentPath(path);
+        if (parent.empty() || orig.find(parent) != orig.end()) newRoots.push_back(path);
+    }
+    std::sort(newRoots.begin(), newRoots.end(), [&](const std::string& lhs, const std::string& rhs) {
+        return mod.at(lhs).order < mod.at(rhs).order;
+    });
+
+    auto validateNewSubtree = [&](const std::string& root, std::vector<std::string>& reasons) {
+        for (const auto& [path, row] : mod) {
+            if (orig.find(path) != orig.end() || !pathBelongsToSubtree(path, root)) continue;
+            if (pathHasDuplicateOccurrence(path)) {
+                reasons.push_back("duplicate-label field " + path);
+                continue;
+            }
+            if (isLocStringChildPath(path)) continue;
+            if (!originalTslCompatibleAddFieldType(row.type)) {
+                reasons.push_back("unsupported field type " + row.type + " at " + path);
+                continue;
+            }
+            if (lowerAscii(gffPatchType(row.type)) == "struct" && !structTypeIdFromSummary(row.value)) {
+                reasons.push_back("missing or invalid Struct TypeId at " + path);
+            }
         }
+    };
+
+    std::set<std::string> rejectedRoots;
+    for (const auto& root : newRoots) {
+        std::vector<std::string> reasons;
+        validateNewSubtree(root, reasons);
+        if (reasons.empty()) continue;
+        rejectedRoots.insert(root);
+        std::ostringstream message;
+        message << "Cannot represent new GFF subtree " << root << " for both original TSLPatcher and HoloPatcher:";
+        for (const auto& reason : reasons) message << " " << reason << ";";
+        project.unsupported.push_back(message.str());
+    }
+
+    std::set<std::string> emitted;
+    std::function<void(const std::string&, const std::string&, bool)> emitNewField;
+    emitNewField = [&](const std::string& path, const std::string& ownerSection, bool nested) {
+        if (!emitted.insert(path).second) return;
+        const auto rowIt = mod.find(path);
+        if (rowIt == mod.end()) return;
+        const GffRow& row = rowIt->second;
+        const std::string type = gffPatchType(row.type);
+        const std::string typeKey = lowerAscii(type);
+        const std::string parentPath = structuralParentPath(path);
+        const auto parentIt = mod.find(parentPath);
+        const std::string parentType = parentIt == mod.end() ? std::string{} : parentIt->second.type;
+
+        const std::string sectionName = uniqueSectionName(project, "gff_" + stem + "_" + leafOf(path));
+        addNumberedEntry(project, ownerSection, "AddField", sectionName);
+        project.add(sectionName, "FieldType", type);
+        if (!nested) project.add(sectionName, "Path", parentPath);
+        project.add(sectionName, "Label", patchLabelForRow(row, parentType));
+
+        if (typeKey == "struct") {
+            const std::uint32_t typeId = *structTypeIdFromSummary(row.value);
+            const auto listIndex = unsignedDecimal(leafOf(path));
+            if (lowerAscii(gffPatchType(parentType)) == "list" && listIndex && *listIndex == typeId) {
+                project.add(sectionName, "TypeId", "ListIndex");
+            } else {
+                project.add(sectionName, "TypeId", std::to_string(typeId));
+            }
+        } else if (typeKey == "exolocstring") {
+            const auto strref = mod.find(path + "(strref)");
+            project.add(sectionName, "StrRef", strref == mod.end() ? "-1" : strref->second.value);
+            std::vector<const GffRow*> localized;
+            for (const auto& [candidatePath, candidate] : mod) {
+                if (pathIsLocStringChildOf(candidatePath, path) &&
+                    candidatePath.rfind(path + "(lang", 0) == 0) {
+                    localized.push_back(&candidate);
+                }
+            }
+            std::sort(localized.begin(), localized.end(), [](const GffRow* lhs, const GffRow* rhs) {
+                return lhs->order < rhs->order;
+            });
+            for (const GffRow* child : localized) {
+                const std::size_t begin = child->path.rfind("(lang") + 1u;
+                project.add(sectionName, child->path.substr(begin, child->path.size() - begin - 1u), child->value);
+                emitted.insert(child->path);
+            }
+            emitted.insert(path + "(strref)");
+        } else if (typeKey != "list") {
+            project.add(sectionName, "Value", row.value);
+        }
+
+        if (typeKey == "struct" || typeKey == "list") {
+            std::vector<const GffRow*> children;
+            for (const auto& [candidatePath, candidate] : mod) {
+                if (orig.find(candidatePath) != orig.end() || isLocStringChildPath(candidatePath)) continue;
+                if (structuralParentPath(candidatePath) == path) children.push_back(&candidate);
+            }
+            std::sort(children.begin(), children.end(), [](const GffRow* lhs, const GffRow* rhs) {
+                return lhs->order < rhs->order;
+            });
+            for (const GffRow* child : children) emitNewField(child->path, sectionName, true);
+        }
+    };
+
+    for (const auto& root : newRoots) {
+        if (rejectedRoots.count(root) || isLocStringChildPath(root)) continue;
+        emitNewField(root, patchFilename, false);
     }
 
     for (const auto& [path, row] : mod) {
-        bool isRejectedListSubtree = false;
-        for (const auto& root : rejectedListStructRoots) {
-            if (pathIsAtOrBelow(path, root)) {
-                isRejectedListSubtree = true;
-                break;
-            }
-        }
-        if (isRejectedListSubtree) continue;
-
         const auto found = orig.find(path);
         if (found == orig.end()) {
-            if (isLocStringChildType(row.type) || isLocStringChildPath(path)) {
-                if (path.size() > 8 && path.rfind("(strref)") == path.size() - 8) {
-                    addPlainEntry(project, patchFilename, path, row.value);
-                } else {
-                    const std::string langKey = locLangKeyFromPath(path);
-                    if (!langKey.empty()) addPlainEntry(project, patchFilename, path, row.value);
-                    else project.unsupported.push_back("Unrecognized new localized-string child row: " + path);
-                }
-                continue;
-            }
-
-            const std::string sectionName = uniqueSectionName(project, "gff_" + stem + "_" + leafOf(path));
-            addNumberedEntry(project, patchFilename, "AddField", sectionName);
-            const std::string type = gffPatchType(row.type);
-            project.add(sectionName, "FieldType", type);
-            project.add(sectionName, "Path", parentPathOf(path));
-            std::string label = row.label;
-            if (!label.empty() && label.front() == '[' && label.back() == ']') label.clear();
-            if (label.empty() && lowerAscii(type) != "struct") label = leafOf(path);
-            project.add(sectionName, "Label", label);
-            if (iequals(type, "Struct")) {
-                project.add(sectionName, "TypeId", extractTypeId(row.value));
-            } else if (iequals(type, "ExoLocString")) {
-                project.add(sectionName, "StrRef", extractLocStrRef(row.value));
-                const std::string prefix = path + "(lang";
-                for (const auto& [childPath, child] : mod) {
-                    if (childPath.rfind(prefix, 0) == 0 && childPath.back() == ')') {
-                        const std::string langKey = locLangKeyFromPath(childPath);
-                        if (!langKey.empty()) project.add(sectionName, langKey, child.value);
+            if (emitted.count(path)) continue;
+            if (isLocStringChildPath(path)) {
+                const std::string parent = locStringParentPath(path);
+                if (orig.find(parent) != orig.end()) {
+                    if (lowerAscii(row.type) == "cexolocstring text" && containsLineBreak(row.value)) {
+                        project.unsupported.push_back(
+                            "HoloPatcher 1.7 cannot decode <#LF#>/<#CR#> tokens for an existing localized-string substring: " + path +
+                            ". Install the complete resource or use a single-line value.");
+                    } else {
+                        addPlainEntry(project, patchFilename, path, row.value);
                     }
                 }
-            } else if (iequals(type, "List")) {
-                // No additional values required.
-            } else {
-                project.add(sectionName, "Value", row.value);
             }
             continue;
         }
 
         if (!iequals(found->second.type, row.type)) {
-            project.unsupported.push_back("GFF field type change is not representable at " + path + ": " + found->second.type + " -> " + row.type);
+            project.unsupported.push_back(
+                "GFF field type change requires complete-file installation at " + path + ": " +
+                found->second.type + " -> " + row.type);
             continue;
         }
-        if (found->second.value != row.value && (truthy(row.editable) || gffTypeIsEditableText(row.type) || isLocStringChildPath(path))) {
-            if (lowerAscii(row.type) == "cexolocstring") continue;
-            addPlainEntry(project, patchFilename, path, row.value);
+        if (found->second.value == row.value) continue;
+        if (pathHasDuplicateOccurrence(path)) continue;
+        if (!(truthy(row.editable) || gffTypeIsEditableText(row.type) || isLocStringChildPath(path))) continue;
+
+        if (isLocStringChildPath(path)) {
+            if (lowerAscii(row.type) == "cexolocstring text" && containsLineBreak(row.value)) {
+                project.unsupported.push_back(
+                    "HoloPatcher 1.7 cannot decode <#LF#>/<#CR#> tokens for an existing localized-string substring: " + path +
+                    ". Install the complete resource or use a single-line value.");
+            } else {
+                addPlainEntry(project, patchFilename, path, row.value);
+            }
+            continue;
         }
+        if (lowerAscii(gffPatchType(row.type)) == "exolocstring") continue;
+        if (!originalTslCompatibleDirectFieldType(row.type)) {
+            project.unsupported.push_back(
+                "TSLPatcher/HoloPatcher cannot directly modify GFF field type " + row.type +
+                " at " + path + ". Use a complete-file installation.");
+            continue;
+        }
+        addPlainEntry(project, patchFilename, path, row.value);
     }
 
     return project;
@@ -492,7 +675,10 @@ PatchProject diffTwoDA(const neotabular::Table& original,
         addNumberedEntry(project, patchFilename, "AddColumn", sectionName);
         project.add(sectionName, "ColumnLabel", modCols[c]);
         project.add(sectionName, "DefaultValue", "****");
-        for (std::size_t r = 0; r < modified.rows.size(); ++r) {
+        // AddColumn executes before AddRow in the generated file section.
+        // Only address rows that already exist in the destination table here;
+        // values for newly appended rows are emitted by their AddRow sections.
+        for (std::size_t r = 0; r < original.rows.size(); ++r) {
             const std::string value = cellOrEmpty(modified.rows[r], c + 1);
             if (!value.empty() && value != "****") project.add(sectionName, "I" + std::to_string(r), value);
         }
@@ -520,6 +706,8 @@ PatchProject diffTwoDA(const neotabular::Table& original,
     for (std::size_t r = original.rows.size(); r < modified.rows.size(); ++r) {
         const std::string sectionName = uniqueSectionName(project, stem + "_add_row_" + std::to_string(r));
         addNumberedEntry(project, patchFilename, "AddRow", sectionName);
+        const std::string rowLabel = cellOrEmpty(modified.rows[r], 0);
+        if (!rowLabel.empty()) project.add(sectionName, "RowLabel", rowLabel);
         for (std::size_t c = 0; c < modCols.size(); ++c) {
             const std::string value = cellOrEmpty(modified.rows[r], c + 1);
             if (!value.empty() && value != "****") project.add(sectionName, modCols[c], value);
@@ -539,16 +727,15 @@ PatchProject diffSsfTable(const neotabular::Table& original,
     project.section(patchFilename);
     addAssetIfRequested(project, copyBaselineAsset, baselineAsset, patchFilename);
 
-    // Exact keys accepted by the original TSLPatcher Bioware::SSF module.
+    // These 28 named slots are the intersection supported by both the original
+    // TSLPatcher and HoloPatcher 1.7. The original patcher also accepts
+    // Unknown(29)-Unknown(40), but HoloPatcher 1.7 has no mapping for them.
     static constexpr const char* kSoundNames[] = {
         "Battlecry 1", "Battlecry 2", "Battlecry 3", "Battlecry 4", "Battlecry 5", "Battlecry 6",
         "Selected 1", "Selected 2", "Selected 3", "Attack 1", "Attack 2", "Attack 3",
         "Pain 1", "Pain 2", "Low health", "Death", "Critical hit", "Target immune",
         "Place mine", "Disarm mine", "Stealth on", "Search", "Pick lock start", "Pick lock fail",
-        "Pick lock done", "Leave party", "Rejoin party", "Poisoned",
-        "Unknown (29)", "Unknown (30)", "Unknown (31)", "Unknown (32)",
-        "Unknown (33)", "Unknown (34)", "Unknown (35)", "Unknown (36)",
-        "Unknown (37)", "Unknown (38)", "Unknown (39)", "Unknown (40)"
+        "Pick lock done", "Leave party", "Rejoin party", "Poisoned"
     };
 
     const std::size_t indexCol = requiredColumn(modified, "Index");
@@ -577,8 +764,9 @@ PatchProject diffSsfTable(const neotabular::Table& original,
         }
         if (!validIndex || oneBasedIndex < 1u || oneBasedIndex > std::size(kSoundNames)) {
             project.unsupported.push_back(
-                "TSLPatcher SSFList addresses the fixed 40-slot KotOR SSF layout; row " +
-                std::to_string(r + 1u) + " cannot be addressed by SSFList.");
+                "A package compatible with both original TSLPatcher and HoloPatcher 1.7 can modify only "
+                "the 28 named KotOR SSF slots; row " + std::to_string(r + 1u) +
+                " cannot be emitted by SSFList.");
             continue;
         }
         addPlainEntry(project, patchFilename, kSoundNames[oneBasedIndex - 1u], newValue.empty() ? "-1" : newValue);
