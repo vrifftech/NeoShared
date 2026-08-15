@@ -9,11 +9,13 @@
 #include <wx/dataobj.h>
 #include <wx/dialog.h>
 #include <wx/radiobut.h>
+#include <wx/statbox.h>
 #include <wx/stattext.h>
 #include <wx/textctrl.h>
 
 #include <algorithm>
 #include <exception>
+#include <filesystem>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -21,66 +23,186 @@
 
 namespace wxui {
 
+// Increment this when the shared patch-export contract changes in a way that
+// every consuming GUI must adopt. Tool repositories use this to fail clearly
+// instead of silently building against a stale, folder-only neoshared checkout.
+inline constexpr unsigned kPatcherExportUiApiVersion = 3u;
+
 enum class PatcherOutputMode {
     WriteToIni,
     Fragment,
 };
 
-class PatcherOutputModeDialog final : public wxDialog {
+struct PatcherOutputSelection {
+    PatcherOutputMode mode = PatcherOutputMode::WriteToIni;
+    // Set only for WriteToIni. Fragment deliberately has no destination before
+    // the preview is generated.
+    std::filesystem::path iniPath;
+
+    bool writesToIni() const noexcept {
+        return mode == PatcherOutputMode::WriteToIni;
+    }
+};
+
+class PatcherOutputDialog final : public wxDialog {
 public:
-    explicit PatcherOutputModeDialog(wxWindow* parent)
+    PatcherOutputDialog(wxWindow* parent,
+                        const std::filesystem::path& initialDirectory = {},
+                        const std::string& defaultFile = "changes.ini")
         : wxDialog(parent,
                    wxID_ANY,
                    "Patcher Output",
                    wxDefaultPosition,
                    wxDefaultSize,
-                   wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER) {
+                   wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER),
+          initialDirectory_(initialDirectory),
+          defaultFile_(defaultFile.empty() ? "changes.ini" : defaultFile) {
         auto* root = new wxBoxSizer(wxVERTICAL);
+
         auto* heading = new wxStaticText(
             this,
             wxID_ANY,
-            "Choose what to do with the generated TSLPatcher/HoloPatcher instructions:");
+            "Choose how to deliver the generated TSLPatcher/HoloPatcher instructions:");
+        heading->Wrap(FromDIP(700));
         root->Add(heading, 0, wxEXPAND | wxALL, FromDIP(12));
 
         writeToIni_ = new wxRadioButton(
             this,
             wxID_ANY,
-            "Write to INI",
+            "Write to a selected installer INI",
             wxDefaultPosition,
             wxDefaultSize,
             wxRB_GROUP);
+        writeToIni_->SetValue(true);
+        root->Add(writeToIni_, 0, wxLEFT | wxRIGHT | wxTOP, FromDIP(12));
+
+        auto* writeDescription = new wxStaticText(
+            this,
+            wxID_ANY,
+            "Select an exact existing or new .ini file. Generated instructions are merged into that file, and required payloads are staged beside it.");
+        writeDescription->Wrap(FromDIP(660));
+        root->Add(writeDescription, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(32));
+
+        auto* iniBox = new wxStaticBoxSizer(wxVERTICAL, this, "Installer INI");
+        auto* iniRow = new wxBoxSizer(wxHORIZONTAL);
+        iniPath_ = new wxTextCtrl(
+            iniBox->GetStaticBox(),
+            wxID_ANY,
+            wxEmptyString,
+            wxDefaultPosition,
+            wxDefaultSize,
+            wxTE_READONLY);
+        iniPath_->SetHint("Select a specific .ini file, such as full/changes.ini or lite/changes.ini");
+        browseButton_ = new wxButton(iniBox->GetStaticBox(), wxID_ANY, "Select INI...");
+        iniRow->Add(iniPath_, 1, wxEXPAND | wxRIGHT, FromDIP(8));
+        iniRow->Add(browseButton_, 0);
+        iniBox->Add(iniRow, 0, wxEXPAND | wxALL, FromDIP(8));
+        root->Add(iniBox, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(12));
+
         fragment_ = new wxRadioButton(
             this,
             wxID_ANY,
-            "Fragment (copy or save as new INI)");
-        writeToIni_->SetValue(true);
+            "Fragment (preview, copy, or save as a new INI)");
+        root->Add(fragment_, 0, wxLEFT | wxRIGHT | wxTOP, FromDIP(12));
 
-        root->Add(writeToIni_, 0, wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(12));
-        root->Add(fragment_, 0, wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(12));
-        root->Add(CreateStdDialogButtonSizer(wxOK | wxCANCEL), 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(12));
+        auto* fragmentDescription = new wxStaticText(
+            this,
+            wxID_ANY,
+            "No destination is requested before generation. Fragment mode shows the exact text, creates no payloads, omits [Settings], and never merges into or overwrites an existing INI.");
+        fragmentDescription->Wrap(FromDIP(660));
+        root->Add(fragmentDescription, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(32));
+
+        auto* buttons = CreateStdDialogButtonSizer(wxOK | wxCANCEL);
+        root->Add(buttons, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(12));
 
         SetSizer(root);
         root->Fit(this);
-        neowindow::configureResponsiveWindow(*this, wxSize(560, 220), wxSize(420, 180));
+        neowindow::configureResponsiveWindow(*this, wxSize(760, 430), wxSize(520, 340));
         applyTheme(this, currentDarkMode());
+
+        writeToIni_->Bind(wxEVT_RADIOBUTTON, &PatcherOutputDialog::onModeChanged, this);
+        fragment_->Bind(wxEVT_RADIOBUTTON, &PatcherOutputDialog::onModeChanged, this);
+        browseButton_->Bind(wxEVT_BUTTON, &PatcherOutputDialog::onBrowse, this);
+        Bind(wxEVT_BUTTON, &PatcherOutputDialog::onAccept, this, wxID_OK);
+        updateModeControls();
     }
 
-    PatcherOutputMode selectedMode() const noexcept {
-        return fragment_ != nullptr && fragment_->GetValue()
+    PatcherOutputSelection selection() const {
+        PatcherOutputSelection result;
+        result.mode = fragment_ != nullptr && fragment_->GetValue()
             ? PatcherOutputMode::Fragment
             : PatcherOutputMode::WriteToIni;
+        if (result.writesToIni()) result.iniPath = selectedIni_;
+        return result;
     }
 
 private:
+    void onModeChanged(wxCommandEvent&) {
+        updateModeControls();
+    }
+
+    void updateModeControls() {
+        const bool enabled = writeToIni_ != nullptr && writeToIni_->GetValue();
+        if (iniPath_ != nullptr) iniPath_->Enable(enabled);
+        if (browseButton_ != nullptr) browseButton_->Enable(enabled);
+    }
+
+    bool selectIniPath() {
+        const auto selected = choosePatcherIniFile(
+            this,
+            "Select an existing installer INI or enter a new INI filename",
+            selectedIni_.empty() ? initialDirectory_ : selectedIni_.parent_path(),
+            selectedIni_.empty()
+                ? defaultFile_
+                : neosettings::pathToUtf8(selectedIni_.filename()));
+        if (!selected) return false;
+        selectedIni_ = *selected;
+        iniPath_->SetValue(neosettings::pathToWx(selectedIni_));
+        iniPath_->SetInsertionPointEnd();
+        return true;
+    }
+
+    void onBrowse(wxCommandEvent&) {
+        (void)selectIniPath();
+    }
+
+    void onAccept(wxCommandEvent&) {
+        if (writeToIni_ != nullptr && writeToIni_->GetValue() && selectedIni_.empty()) {
+            wxMessageBox(
+                "Write to INI requires a specific installer .ini file. Select an existing INI or enter a new INI filename.",
+                "Select Installer INI",
+                wxOK | wxICON_INFORMATION,
+                this);
+            if (!selectIniPath()) return;
+        }
+        EndModal(wxID_OK);
+    }
+
+    std::filesystem::path initialDirectory_;
+    std::string defaultFile_;
+    std::filesystem::path selectedIni_;
     wxRadioButton* writeToIni_ = nullptr;
     wxRadioButton* fragment_ = nullptr;
+    wxTextCtrl* iniPath_ = nullptr;
+    wxButton* browseButton_ = nullptr;
 };
 
-inline std::optional<PatcherOutputMode> choosePatcherOutputMode(wxWindow* parent) {
-    PatcherOutputModeDialog dialog(parent);
+// This is the only selection entry point automatic patch exporters should use.
+// It always presents both output modes and, for Write to INI, returns an exact
+// .ini path rather than a package directory.
+inline std::optional<PatcherOutputSelection> choosePatcherOutput(
+    wxWindow* parent,
+    const std::filesystem::path& initialDirectory = {},
+    const std::string& defaultFile = "changes.ini") {
+    PatcherOutputDialog dialog(parent, initialDirectory, defaultFile);
     if (dialog.ShowModal() != wxID_OK) return std::nullopt;
-    return dialog.selectedMode();
+    return dialog.selection();
 }
+
+// Deliberately removed: a mode-only chooser allowed callers to fall back to a
+// directory-based package writer. Automatic exporters must obtain the mode and
+// exact INI path together through choosePatcherOutput().
+inline std::optional<PatcherOutputMode> choosePatcherOutputMode(wxWindow*) = delete;
 
 inline std::vector<std::string> patchProjectAssetNames(const neotsl::PatchProject& project) {
     std::vector<std::string> result;
@@ -105,7 +227,6 @@ public:
                    wxDefaultPosition,
                    wxDefaultSize,
                    wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER),
-          project_(project),
           fragment_(neotsl::writeIniFragmentText(project)) {
         auto* root = new wxBoxSizer(wxVERTICAL);
 
@@ -167,13 +288,16 @@ private:
         for (;;) {
             const auto output = choosePatcherIniFile(
                 this,
-                "Save INI fragment as new file",
-                {},
+                "Save INI fragment as a new file",
+                lastSaveDirectory_,
                 "fragment.ini");
             if (!output) return;
 
             try {
-                const auto report = neotsl::writeFragment(project_, *output);
+                // Save the exact string shown in the preview rather than
+                // regenerating it from the project.
+                const auto report = neotsl::writeFragmentText(fragment_, *output);
+                lastSaveDirectory_ = report.iniPath.parent_path();
                 saveButton_->SetLabel("Save Another INI...");
                 wxMessageBox(
                     "Saved the generated fragment to:\n" + neosettings::pathToWx(report.iniPath),
@@ -219,8 +343,8 @@ private:
         copyButton_->SetLabel("Copy Again");
     }
 
-    const neotsl::PatchProject& project_;
     std::string fragment_;
+    std::filesystem::path lastSaveDirectory_;
     wxTextCtrl* text_ = nullptr;
     wxButton* saveButton_ = nullptr;
     wxButton* copyButton_ = nullptr;
@@ -237,11 +361,7 @@ inline void showIniFragmentDialog(wxWindow* parent,
             companionFiles.push_back(name);
         }
     }
-    IniFragmentDialog dialog(
-        parent,
-        title,
-        project,
-        companionFiles);
+    IniFragmentDialog dialog(parent, title, project, companionFiles);
     dialog.ShowModal();
 }
 

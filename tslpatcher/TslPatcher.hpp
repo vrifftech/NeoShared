@@ -77,8 +77,9 @@ IniMergeReport preflightIniMerge(const PatchProject& project,
                                  const std::filesystem::path& path,
                                  bool includeSettings = true);
 
-// Writes a package to outputDir/changes.ini. Existing INI content and identical
-// payload files are retained; conflicting payload files are rejected.
+// Legacy directory-based package helper. New GUI code must select an exact
+// installer INI and call writePackageToIni instead.
+[[deprecated("Use writePackageToIni() with an exact installer .ini path")]]
 IniMergeReport writePackage(const PatchProject& project,
                             const std::filesystem::path& outputDir,
                             bool includeSettings = true);
@@ -90,7 +91,12 @@ IniMergeReport writePackageToIni(const PatchProject& project,
                                  const std::filesystem::path& outputIni,
                                  bool includeSettings = true);
 
-// Writes the generated fragment to a new INI file. Fragment output never
+// Writes the exact supplied fragment text to a new INI file. The destination
+// must not already exist. This never stages package assets.
+IniMergeReport writeFragmentText(const std::string& fragmentText,
+                                 const std::filesystem::path& outputIni);
+
+// Generates and writes a fragment to a new INI file. Fragment output never
 // merges with or overwrites an existing file and never stages package assets.
 IniMergeReport writeFragment(const PatchProject& project,
                              const std::filesystem::path& outputIni);
