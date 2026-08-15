@@ -24,6 +24,7 @@
 #endif
 
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -467,6 +468,36 @@ inline std::optional<std::filesystem::path> chooseSaveFile(wxWindow* parent,
                         wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
     if (dialog.ShowModal() != wxID_OK) return std::nullopt;
     return neosettings::pathFromWx(dialog.GetPath());
+}
+
+inline std::optional<std::filesystem::path> choosePatcherIniFile(
+    wxWindow* parent,
+    const std::string& title,
+    const std::filesystem::path& initialDirectory = {},
+    const std::string& defaultFile = "changes.ini") {
+    wxFileDialog dialog(
+        parent,
+        toWx(title),
+        neosettings::pathToWx(initialDirectory),
+        toWx(defaultFile),
+        "Installer INI files (*.ini)|*.ini|All files (*.*)|*.*",
+        wxFD_SAVE);
+    if (dialog.ShowModal() != wxID_OK) return std::nullopt;
+    std::filesystem::path selected = neosettings::pathFromWx(dialog.GetPath());
+    if (selected.extension().empty()) selected += ".ini";
+    std::string extension = neosettings::pathToUtf8(selected.extension());
+    std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    if (extension != ".ini") {
+        wxMessageBox(
+            "The selected installer configuration must use the .ini extension.",
+            "Invalid installer INI",
+            wxOK | wxICON_ERROR,
+            parent);
+        return std::nullopt;
+    }
+    return selected;
 }
 
 inline std::optional<std::filesystem::path> chooseDirectory(wxWindow* parent,

@@ -104,7 +104,7 @@ public:
     UInt32 nextAvailableStrRef() const;
     bool containsStrRef(UInt32 strRef) const noexcept;
     UInt32 stringEntriesOffset() const noexcept { return stringEntriesOffset_; }
-    bool fileExists() const noexcept { return fileOpen_; }
+    bool hasOpenFile() const noexcept { return fileOpen_; }
     bool modified() const noexcept { return modified_; }
     const std::string& filename() const noexcept { return filename_; }
     bool hasSaveTarget() const noexcept { return hasSaveTarget_; }
