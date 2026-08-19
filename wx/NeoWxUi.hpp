@@ -502,9 +502,19 @@ inline std::optional<std::filesystem::path> choosePatcherIniFile(
 
 inline std::optional<std::filesystem::path> chooseDirectory(wxWindow* parent,
                                                             const std::string& title) {
+#if defined(__EMSCRIPTEN__)
+    (void)title;
+    wxMessageBox(
+        "Writable directory selection is unavailable in the browser preview. Select individual files with Open, and download individual results with Save or Export. Use a desktop build for directory-wide operations.",
+        "Directory Operation Unavailable",
+        wxOK | wxICON_INFORMATION,
+        parent);
+    return std::nullopt;
+#else
     wxDirDialog dialog(parent, toWx(title), wxEmptyString, wxDD_DEFAULT_STYLE | wxDD_DIR_MUST_EXIST);
     if (dialog.ShowModal() != wxID_OK) return std::nullopt;
     return neosettings::pathFromWx(dialog.GetPath());
+#endif
 }
 
 inline void setColumns(wxListCtrl& list, const std::vector<std::pair<std::string, int>>& columns) {

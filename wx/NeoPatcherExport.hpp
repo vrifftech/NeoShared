@@ -34,7 +34,11 @@ enum class PatcherOutputMode {
 };
 
 struct PatcherOutputSelection {
+#if defined(__EMSCRIPTEN__)
+    PatcherOutputMode mode = PatcherOutputMode::Fragment;
+#else
     PatcherOutputMode mode = PatcherOutputMode::WriteToIni;
+#endif
     // Set only for WriteToIni. Fragment deliberately has no destination before
     // the preview is generated.
     std::filesystem::path iniPath;
@@ -104,6 +108,23 @@ public:
             wxID_ANY,
             "Fragment (preview, copy, or save as a new INI)");
         root->Add(fragment_, 0, wxLEFT | wxRIGHT | wxTOP, FromDIP(12));
+
+#if defined(__EMSCRIPTEN__)
+        // The wxWidgets browser port can import or download individual files,
+        // but it cannot yet perform one atomic installer-directory transaction.
+        // A Write-to-INI export could otherwise download the INI while silently
+        // omitting companion payloads. Keep the audited text-only Fragment flow
+        // available and make the package-aware desktop boundary explicit.
+        writeToIni_->SetValue(false);
+        writeToIni_->Enable(false);
+        fragment_->SetValue(true);
+        auto* browserNote = new wxStaticText(
+            this,
+            wxID_ANY,
+            "Write to INI is disabled in the browser preview because an installer INI and its companion payload files must be updated together. Use Fragment here, or use a desktop build for package-aware Write to INI output.");
+        browserNote->Wrap(FromDIP(660));
+        root->Add(browserNote, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP(32));
+#endif
 
         auto* fragmentDescription = new wxStaticText(
             this,

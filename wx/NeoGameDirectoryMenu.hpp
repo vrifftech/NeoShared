@@ -96,6 +96,15 @@ public:
         unbindItemHandlers();
         clearMenu();
 
+#if defined(__EMSCRIPTEN__)
+        wxMenuItem* unavailable = menu_.Append(
+            wxID_ANY,
+            "Installed-game browsing is unavailable in the browser",
+            "Use the normal Open command and select files explicitly");
+        unavailable->Enable(false);
+        return;
+#endif
+
         const std::vector<SavedGameDirectory> directories = savedGameDirectories();
         for (const SavedGameDirectory& directory : directories) {
             if (!isAllowedGameId(allowedGameIds_, directory.gameId)) continue;
@@ -277,6 +286,15 @@ inline std::unique_ptr<OpenGameDirectoryMenu> appendOpenGameDirectoryMenu(
         owner,
         parent,
         OpenGameFileDialog{[&owner](const std::filesystem::path& directory) {
+#if defined(__EMSCRIPTEN__)
+            wxString message = "Native file-manager launching is unavailable in the browser.\n\n";
+            message += "Use the normal Open command and select the required files explicitly.";
+            wxMessageBox(message,
+                         "Unavailable in Browser Build",
+                         wxOK | wxICON_INFORMATION,
+                         &owner);
+            return;
+#else
             if (wxLaunchDefaultApplication(neosettings::pathToWx(directory))) return;
 
             wxString message = "The system file manager could not open:\n\n";
@@ -285,6 +303,7 @@ inline std::unique_ptr<OpenGameDirectoryMenu> appendOpenGameDirectoryMenu(
                          "Unable to Open Game Directory",
                          wxOK | wxICON_ERROR,
                          &owner);
+#endif
         }},
         label);
 }

@@ -58,6 +58,10 @@ private:
             introText =
                 "Saved game directories are shared by all Neo tools to resolve TLK files, overrides, and resource roots. Each game can have multiple named installs, such as Steam, GOG, or K2 Test. Manual file opening still works when no game is configured.";
         }
+#if defined(__EMSCRIPTEN__)
+        introText =
+            "Installed-game registration is unavailable in the browser. Open individual resources explicitly for the current session. Use a desktop build for installation scanning, persistent TLK paths, overrides, and resource-root resolution.";
+#endif
         auto* intro = new wxStaticText(this, wxID_ANY, introText);
         intro->Wrap(FromDIP(760));
         root->Add(intro, 0, wxEXPAND | wxALL, FromDIP(10));
@@ -83,6 +87,12 @@ private:
         auto* rescanAll = new wxButton(this, wxID_ANY, "Rescan All");
         auto* clear = new wxButton(this, wxID_ANY, "Clear Selected");
         auto* close = new wxButton(this, wxID_CLOSE, "Close");
+#if defined(__EMSCRIPTEN__)
+        for (wxButton* button : {addInstall, changeInstall, browseTlk, rename,
+                                 setActive, rescanSelected, rescanAll, clear}) {
+            button->Enable(false);
+        }
+#endif
         for (wxButton* button : {addInstall, changeInstall, browseTlk, rename,
                                  setActive, rescanSelected, rescanAll, clear}) {
             actions->Add(button, 0, wxRIGHT | wxBOTTOM, FromDIP(6));
@@ -197,17 +207,34 @@ private:
     void onAddInstall() {
         const GameDefinition* game = requireGame();
         if (game == nullptr) return;
+#if defined(__EMSCRIPTEN__)
+        wxMessageBox(
+            "A browser page cannot scan or retain unrestricted access to an installed game directory. Use the normal Open command and explicitly select the files required for this session.",
+            "Game Directories Unavailable",
+            wxOK | wxICON_INFORMATION,
+            this);
+        return;
+#else
         wxDirDialog dialog(this, neosettings::toWx("Choose install folder for " + game->displayName), wxEmptyString,
                            wxDD_DEFAULT_STYLE | wxDD_DIR_MUST_EXIST);
         if (dialog.ShowModal() != wxID_OK) return;
         const auto path = std::filesystem::path(neosettings::toStd(dialog.GetPath()));
         const auto install = resolver().rememberUserInstall(game->id, path);
         refreshList(install.id, install.installId);
+#endif
     }
 
     void onChangeInstall() {
         const GameDefinition* game = requireGame();
         if (game == nullptr) return;
+#if defined(__EMSCRIPTEN__)
+        wxMessageBox(
+            "A browser page cannot scan or retain unrestricted access to an installed game directory. Use the normal Open command and explicitly select the files required for this session.",
+            "Game Directories Unavailable",
+            wxOK | wxICON_INFORMATION,
+            this);
+        return;
+#else
         const auto selected = selectedInstall();
         wxDirDialog dialog(this, neosettings::toWx("Choose install folder for " + game->displayName), wxEmptyString,
                            wxDD_DEFAULT_STYLE | wxDD_DIR_MUST_EXIST);
@@ -218,9 +245,18 @@ private:
                                                             selected ? selected->displayName : std::string{},
                                                             selected ? selected->installId : std::string{});
         refreshList(install.id, install.installId);
+#endif
     }
 
     void onBrowseTlk() {
+#if defined(__EMSCRIPTEN__)
+        wxMessageBox(
+            "Persistent installed-game TLK registration is unavailable in the browser. Imported browser files live in a virtual filesystem and cannot be treated as a durable game installation path.",
+            "Game Directories Unavailable",
+            wxOK | wxICON_INFORMATION,
+            this);
+        return;
+#else
         const GameDefinition* game = requireGame();
         if (game == nullptr) return;
         const auto selected = selectedInstall();
@@ -232,6 +268,7 @@ private:
                                                        selected ? selected->installId : std::string{},
                                                        selected ? selected->displayName : std::string{});
         refreshList(install.id, install.installId);
+#endif
     }
 
     void onRename() {

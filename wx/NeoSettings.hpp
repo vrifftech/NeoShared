@@ -247,16 +247,29 @@ public:
     }
 
     std::optional<std::filesystem::path> lastTlkPath() const {
+#if defined(__EMSCRIPTEN__)
+        // Browser-selected files are imported into the process-local /tmp
+        // filesystem. Persisting that path would create a stale reference on
+        // the next page load, so only non-path UI preferences are persistent.
+        return std::nullopt;
+#else
         return readPath("Paths/LastTLKPath", {"LastTLKPath"});
+#endif
     }
 
     void setLastTlkPath(const std::filesystem::path& path) const {
+#if defined(__EMSCRIPTEN__)
+        (void)path;
+#else
         writePath("Paths/LastTLKPath", path);
+#endif
     }
 
     void clearLastTlkPath() const {
+#if !defined(__EMSCRIPTEN__)
         deleteEntry("Paths/LastTLKPath");
         deleteEntry("LastTLKPath");
+#endif
     }
 
     std::string preferredView(const std::string& fallback = {}) const {
@@ -275,6 +288,12 @@ public:
         const std::string& name,
         std::size_t maxItems = kMaxRecentFiles,
         const std::vector<std::string>& legacyDelimitedKeys = {}) const {
+#if defined(__EMSCRIPTEN__)
+        (void)name;
+        (void)maxItems;
+        (void)legacyDelimitedKeys;
+        return {};
+#else
         std::vector<std::filesystem::path> paths;
         auto addUnique = [&](const std::filesystem::path& path) {
             if (path.empty()) return;
@@ -314,11 +333,18 @@ public:
         if (paths.size() > maxItems) paths.resize(maxItems);
         if (foundLegacy) setRecentPaths(name, paths, maxItems);
         return paths;
+#endif
     }
 
     void setRecentPaths(const std::string& name,
                         const std::vector<std::filesystem::path>& paths,
                         std::size_t maxItems = kMaxRecentFiles) const {
+#if defined(__EMSCRIPTEN__)
+        (void)name;
+        (void)paths;
+        (void)maxItems;
+        return;
+#else
         const std::string group = "MRU/Paths/" + trimSlashes(name);
         wxConfig config(toWx(configName_));
         config.DeleteGroup(toWx(group));
@@ -339,11 +365,18 @@ public:
         }
         config.Write(toWx(group + "/Count"), static_cast<long>(writtenPaths.size()));
         config.Flush();
+#endif
     }
 
     void addRecentPath(const std::string& name,
                        const std::filesystem::path& path,
                        std::size_t maxItems = kMaxRecentFiles) const {
+#if defined(__EMSCRIPTEN__)
+        (void)name;
+        (void)path;
+        (void)maxItems;
+        return;
+#else
         if (path.empty()) return;
         auto paths = recentPaths(name, maxItems);
         const auto normalized = normalizedPath(path);
@@ -353,23 +386,39 @@ public:
         paths.insert(paths.begin(), normalized);
         if (paths.size() > maxItems) paths.resize(maxItems);
         setRecentPaths(name, paths, maxItems);
+#endif
     }
 
     void removeRecentPath(const std::string& name,
                           const std::filesystem::path& path,
                           std::size_t maxItems = kMaxRecentFiles) const {
+#if defined(__EMSCRIPTEN__)
+        (void)name;
+        (void)path;
+        (void)maxItems;
+        return;
+#else
         auto paths = recentPaths(name, maxItems);
         paths.erase(std::remove_if(paths.begin(), paths.end(), [&](const auto& existing) {
             return samePathForMru(existing, path);
         }), paths.end());
         setRecentPaths(name, paths, maxItems);
+#endif
     }
 
     void clearRecentPaths(const std::string& name) const {
+#if defined(__EMSCRIPTEN__)
+        (void)name;
+#else
         deleteGroup("MRU/Paths/" + trimSlashes(name));
+#endif
     }
 
     std::vector<std::filesystem::path> recentFiles(std::size_t maxItems = kMaxRecentFiles) const {
+#if defined(__EMSCRIPTEN__)
+        (void)maxItems;
+        return {};
+#else
         std::vector<std::filesystem::path> files;
         auto addUnique = [&](const std::filesystem::path& path) {
             if (path.empty()) return;
@@ -403,10 +452,16 @@ public:
         if (files.size() > maxItems) files.resize(maxItems);
         if (foundLegacy) setRecentFiles(files, maxItems);
         return files;
+#endif
     }
 
     void setRecentFiles(const std::vector<std::filesystem::path>& files,
                         std::size_t maxItems = kMaxRecentFiles) const {
+#if defined(__EMSCRIPTEN__)
+        (void)files;
+        (void)maxItems;
+        return;
+#else
         wxConfig config(toWx(configName_));
         config.DeleteGroup("MRU/Files");
         std::size_t written = 0;
@@ -418,10 +473,16 @@ public:
         }
         config.Write("MRU/FileCount", static_cast<long>(written));
         config.Flush();
+#endif
     }
 
     void addRecentFile(const std::filesystem::path& path,
                        std::size_t maxItems = kMaxRecentFiles) const {
+#if defined(__EMSCRIPTEN__)
+        (void)path;
+        (void)maxItems;
+        return;
+#else
         if (path.empty()) return;
         std::vector<std::filesystem::path> files = recentFiles(maxItems);
         const auto normalized = normalizedPath(path);
@@ -431,18 +492,28 @@ public:
         files.insert(files.begin(), normalized);
         if (files.size() > maxItems) files.resize(maxItems);
         setRecentFiles(files, maxItems);
+#endif
     }
 
     void removeRecentFile(const std::filesystem::path& path,
                           std::size_t maxItems = kMaxRecentFiles) const {
+#if defined(__EMSCRIPTEN__)
+        (void)path;
+        (void)maxItems;
+        return;
+#else
         std::vector<std::filesystem::path> files = recentFiles(maxItems);
         files.erase(std::remove_if(files.begin(), files.end(), [&](const auto& existing) {
             return samePathForMru(existing, path);
         }), files.end());
         setRecentFiles(files, maxItems);
+#endif
     }
 
     void clearRecentFiles() const {
+#if defined(__EMSCRIPTEN__)
+        return;
+#else
         wxConfig config(toWx(configName_));
         config.DeleteGroup("MRU");
         for (std::size_t i = 0; i < kMaxRecentFiles; ++i) {
@@ -451,6 +522,7 @@ public:
             config.DeleteEntry(toWx(std::string("RecentFiles/") + index), false);
         }
         config.Flush();
+#endif
     }
 
     void saveWindowPlacement(const wxTopLevelWindow& window, const std::string& name = "Main") const {
