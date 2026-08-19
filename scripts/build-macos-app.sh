@@ -151,5 +151,4 @@ bash "$NEOSHARED_ROOT_VALUE/scripts/package-macos-app.sh" \
   --arch "$ARCH" \
   --app-name "$APP_NAME" \
   --version "$VERSION" \
-  --deployment-target "$DEPLOYMENT_TARGET" \
-  --source-root "$SOURCE_ROOT"
+  --deployment-target "$DEPLOYMENT_TARGET"

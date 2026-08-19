@@ -110,8 +110,5 @@ bash "$NEOSHARED_ROOT_VALUE/scripts/package-wasm-site.sh" \
   --app-name "$APP_NAME" \
   --slug "$SLUG" \
   --version "$VERSION" \
-  --icon "$ICON" \
-  --source-root "$SOURCE_ROOT" \
-  --neoshared-root "$NEOSHARED_ROOT_VALUE" \
-  --wx-source "$NEO_WASM_WX_SOURCE"
+  --icon "$ICON"
 echo "GitHub Pages site: $DIST_DIR"

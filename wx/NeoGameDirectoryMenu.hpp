@@ -287,6 +287,7 @@ inline std::unique_ptr<OpenGameDirectoryMenu> appendOpenGameDirectoryMenu(
         parent,
         OpenGameFileDialog{[&owner](const std::filesystem::path& directory) {
 #if defined(__EMSCRIPTEN__)
+            (void)directory;
             wxString message = "Native file-manager launching is unavailable in the browser.\n\n";
             message += "Use the normal Open command and select the required files explicitly.";
             wxMessageBox(message,

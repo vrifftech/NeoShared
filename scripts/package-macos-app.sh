@@ -8,7 +8,6 @@ ARCH=""
 APP_NAME=""
 VERSION=""
 DEPLOYMENT_TARGET=""
-SOURCE_ROOT=""
 
 usage() {
   cat <<'USAGE'
@@ -21,7 +20,6 @@ Options:
   --app-name NAME            Application display name
   --version VERSION          Application semantic version
   --deployment-target VER    Requested minimum macOS version
-  --source-root DIR          Application repository for build metadata
   -h, --help                 Show this help
 USAGE
 }
@@ -34,7 +32,6 @@ while [[ $# -gt 0 ]]; do
     --app-name) APP_NAME="$2"; shift 2;;
     --version) VERSION="$2"; shift 2;;
     --deployment-target) DEPLOYMENT_TARGET="$2"; shift 2;;
-    --source-root) SOURCE_ROOT="$2"; shift 2;;
     -h|--help) usage; exit 0;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2;;
   esac
@@ -84,31 +81,6 @@ cmake \
   "-DAPP_BUNDLE=$APP_BUNDLE" \
   "-DSEARCH_DIRS=$SEARCH_DIRS_JOINED" \
   -P "$ROOT_DIR/cmake/NeoMacOSFixupBundle.cmake"
-
-RESOURCES="$APP_BUNDLE/Contents/Resources"
-mkdir -p "$RESOURCES"
-repo_revision() {
-  local repo="$1"
-  if [[ -n "$repo" && -d "$repo/.git" ]]; then
-    git -C "$repo" rev-parse HEAD 2>/dev/null || printf 'unknown'
-  else
-    printf 'unknown'
-  fi
-}
-WX_VERSION="unknown"
-command -v wx-config >/dev/null 2>&1 && WX_VERSION="$(wx-config --version 2>/dev/null || printf unknown)"
-{
-  printf 'Application: %s\n' "${APP_NAME:-$EXECUTABLE_NAME}"
-  printf 'Version: %s\n' "${VERSION:-unknown}"
-  printf 'Architecture: %s\n' "$ARCH"
-  printf 'Requested deployment target: %s\n' "${DEPLOYMENT_TARGET:-unspecified}"
-  printf 'Build macOS: %s\n' "$(sw_vers -productVersion)"
-  printf 'wxWidgets: %s\n' "$WX_VERSION"
-  printf 'Application revision: %s\n' "$(repo_revision "$SOURCE_ROOT")"
-  printf 'neoshared revision: %s\n' "$(repo_revision "$ROOT_DIR")"
-  printf 'Signing: ad hoc\n'
-  printf 'Notarized: no\n'
-} > "$RESOURCES/BUILD_INFO.txt"
 
 check_arch() {
   local binary="$1"

@@ -46,8 +46,6 @@
   <div id="neo-browser-bar">
     <img src="@NEO_WASM_APP_SLUG@.svg" alt="">
     <strong>@NEO_WASM_APP_NAME@ @NEO_WASM_APP_VERSION@</strong>
-    <span>WebAssembly preview</span>
-    <a href="PORT_STATUS.txt" target="_blank" rel="noopener" style="color:#a9cdf5">Browser limitations</a>
     <span class="spacer"></span>
     <span class="privacy">Files are processed locally in this browser tab.</span>
   </div>

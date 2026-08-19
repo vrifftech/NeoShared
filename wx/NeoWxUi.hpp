@@ -30,6 +30,7 @@
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <string>
 #include <utility>
@@ -403,6 +404,9 @@ inline void applyThemeRecursive(wxWindow* window, bool darkMode) {
 
 inline void applyTheme(wxWindow* window, bool darkMode) {
     activeDarkMode() = darkMode;
+#if defined(__EMSCRIPTEN__)
+    neobrowser::setDarkMode(darkMode);
+#endif
     if (window == nullptr) return;
 
     {
@@ -533,6 +537,83 @@ inline std::vector<std::filesystem::path> chooseOpenFiles(
     for (const auto& path : paths) result.emplace_back(neosettings::pathFromWx(path));
     return result;
 #endif
+}
+
+using OpenFileCallback = std::function<void(std::optional<std::filesystem::path>)>;
+using OpenFilesCallback = std::function<void(std::vector<std::filesystem::path>)>;
+
+inline void requestOpenFile(
+    wxWindow* parent,
+    const std::string& title,
+    const std::string& wildcard,
+    const std::filesystem::path& initialDirectory,
+    OpenFileCallback callback) {
+    if (!callback) return;
+#if defined(__EMSCRIPTEN__)
+    (void)initialDirectory;
+    neobrowser::requestOpenFiles(
+        title,
+        detail::wildcardToBrowserAccept(wildcard),
+        false,
+        [parent, callback = std::move(callback)](neobrowser::OpenFilesResult result) mutable {
+            if (parent != nullptr && parent->IsBeingDeleted()) return;
+            if (!result.error.empty()) {
+                wxMessageBox(toWx(result.error), "File Open Error",
+                             wxOK | wxICON_ERROR, parent);
+                return;
+            }
+            if (result.paths.empty()) {
+                callback(std::nullopt);
+                return;
+            }
+            callback(std::move(result.paths.front()));
+        });
+#else
+    callback(chooseOpenFile(parent, title, wildcard, initialDirectory));
+#endif
+}
+
+inline void requestOpenFile(
+    wxWindow* parent,
+    const std::string& title,
+    const std::string& wildcard,
+    OpenFileCallback callback) {
+    requestOpenFile(parent, title, wildcard, {}, std::move(callback));
+}
+
+inline void requestOpenFiles(
+    wxWindow* parent,
+    const std::string& title,
+    const std::string& wildcard,
+    const std::filesystem::path& initialDirectory,
+    OpenFilesCallback callback) {
+    if (!callback) return;
+#if defined(__EMSCRIPTEN__)
+    (void)initialDirectory;
+    neobrowser::requestOpenFiles(
+        title,
+        detail::wildcardToBrowserAccept(wildcard),
+        true,
+        [parent, callback = std::move(callback)](neobrowser::OpenFilesResult result) mutable {
+            if (parent != nullptr && parent->IsBeingDeleted()) return;
+            if (!result.error.empty()) {
+                wxMessageBox(toWx(result.error), "File Open Error",
+                             wxOK | wxICON_ERROR, parent);
+                return;
+            }
+            callback(std::move(result.paths));
+        });
+#else
+    callback(chooseOpenFiles(parent, title, wildcard, initialDirectory));
+#endif
+}
+
+inline void requestOpenFiles(
+    wxWindow* parent,
+    const std::string& title,
+    const std::string& wildcard,
+    OpenFilesCallback callback) {
+    requestOpenFiles(parent, title, wildcard, {}, std::move(callback));
 }
 
 inline std::optional<std::filesystem::path> chooseSaveFile(wxWindow* parent,

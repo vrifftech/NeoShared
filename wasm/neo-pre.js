@@ -70,35 +70,79 @@
     });
   }
 
-  Module.neoToolsBrowserFiles = {
-    chooseOpenFiles: async function(options) {
-      if (typeof FS === 'undefined') throw new Error('Emscripten filesystem is unavailable.');
-      var files = await chooseHostFiles(options);
-      if (!files.length) return [];
+  async function importHostFiles(options) {
+    if (typeof FS === 'undefined') throw new Error('Emscripten filesystem is unavailable.');
+    var files = await chooseHostFiles(options);
+    if (!files.length) return [];
 
-      var directory = uniqueBrowserDirectory('import');
-      var used = Object.create(null);
-      var paths = [];
-      for (var index = 0; index < files.length; ++index) {
-        var file = files[index];
-        var originalName = safeBrowserFileName(file.name, 'import.bin');
-        var candidate = originalName;
-        var suffix = 2;
-        while (used[candidate]) {
-          var dot = originalName.lastIndexOf('.');
-          var stem = dot > 0 ? originalName.substring(0, dot) : originalName;
-          var extension = dot > 0 ? originalName.substring(dot) : '';
-          candidate = stem + '-' + suffix + extension;
-          suffix += 1;
-        }
-        used[candidate] = true;
-
-        var bytes = new Uint8Array(await file.arrayBuffer());
-        var path = directory + '/' + candidate;
-        FS.writeFile(path, bytes);
-        paths.push(path);
+    var directory = uniqueBrowserDirectory('import');
+    var used = Object.create(null);
+    var paths = [];
+    for (var index = 0; index < files.length; ++index) {
+      var file = files[index];
+      var originalName = safeBrowserFileName(file.name, 'import.bin');
+      var candidate = originalName;
+      var suffix = 2;
+      while (used[candidate]) {
+        var dot = originalName.lastIndexOf('.');
+        var stem = dot > 0 ? originalName.substring(0, dot) : originalName;
+        var extension = dot > 0 ? originalName.substring(dot) : '';
+        candidate = stem + '-' + suffix + extension;
+        suffix += 1;
       }
-      return paths;
+      used[candidate] = true;
+
+      var bytes = new Uint8Array(await file.arrayBuffer());
+      var path = directory + '/' + candidate;
+      FS.writeFile(path, bytes);
+      paths.push(path);
+    }
+    return paths;
+  }
+
+  function completeOpenFilesRequest(requestId, paths, error) {
+    // The wx DOM port enters C++ menu/control handlers through a synchronous
+    // ccall. Complete in a later browser task so the original wx event has
+    // fully unwound before entering WebAssembly again.
+    window.setTimeout(function() {
+      try {
+        if (!Module.ccall) throw new Error('Emscripten ccall is unavailable.');
+        Module.ccall(
+          'neo_browser_open_files_completed',
+          null,
+          ['number', 'string', 'string'],
+          [requestId, (paths || []).join('\n'), error || '']);
+      } catch (callbackError) {
+        console.error('[NeoTools] Browser file completion callback failed:', callbackError);
+      }
+    }, 0);
+  }
+
+  Module.neoToolsBrowserFiles = {
+    requestOpenFiles: function(requestId, options) {
+      try {
+        // Calling the async function starts chooseHostFiles() immediately,
+        // while this invocation still has the user's click activation. Only the
+        // completion is deferred.
+        var importPromise = importHostFiles(options);
+        Promise.resolve(importPromise).then(
+          function(paths) { completeOpenFilesRequest(requestId, paths, ''); },
+          function(error) {
+            var message = error && error.message ? error.message : String(error || 'Unknown browser file error.');
+            console.error('[NeoTools] Browser file picker failed:', error);
+            completeOpenFilesRequest(requestId, [], message);
+          });
+        return true;
+      } catch (error) {
+        var message = error && error.message ? error.message : String(error || 'Unknown browser file error.');
+        console.error('[NeoTools] Browser file picker request failed:', error);
+        completeOpenFilesRequest(requestId, [], message);
+        return true;
+      }
+    },
+
+    chooseOpenFiles: function(options) {
+      return importHostFiles(options);
     },
 
     chooseSaveFile: function(options) {
