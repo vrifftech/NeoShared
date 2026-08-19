@@ -51,3 +51,8 @@ Desktop.ini
 /build-macos*/
 /stage-macos*/
 /dist/
+
+# WebAssembly and GitHub Pages outputs
+/build-wasm*/
+/dist-wasm/
+/.neo-wasm-deps/

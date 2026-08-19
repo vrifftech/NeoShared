@@ -35,7 +35,7 @@ WX_BUILD="$DEPS_ROOT/wxwidgets-wasm-build"
 [[ -n "$JOBS" ]] || JOBS="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)"
 [[ "$CLEAN" == 0 ]] || rm -rf "$WX_BUILD"
 
-for cmd in emcc em++ emconfigure emmake emar embuilder autoconf autoreconf automake make; do
+for cmd in emcc em++ emconfigure emmake emar embuilder autoconf autoreconf automake make install; do
   command -v "$cmd" >/dev/null || { echo "Missing command: $cmd" >&2; exit 2; }
 done
 
@@ -47,11 +47,23 @@ NEO_WASM_CONFIG_SUB="$GNU_CONFIG_DIR/config.sub"
   exit 2
 }
 export NEO_WASM_CONFIG_SUB
-# Resolve wrappers from this repository, not from the application checkout.
+# Autoconf executes AUTOM4TE, SHELL, and CONFIG_SHELL directly. Git's
+# executable bit can be lost when a repository is populated from a ZIP or
+# committed from a filesystem that does not preserve Unix modes. Install
+# private executable copies in the dependency cache instead of relying on the
+# mode of the checked-out neoshared scripts.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export SHELL="$SCRIPT_DIR/wasm-config-sub-wrapper.sh"
-export CONFIG_SHELL="$SCRIPT_DIR/wasm-config-sub-wrapper.sh"
-export AUTOM4TE="$SCRIPT_DIR/wasm-autom4te-wrapper.sh"
+WRAPPER_DIR="$DEPS_ROOT/autoconf-wrappers"
+mkdir -p "$WRAPPER_DIR"
+install -m 0755 \
+  "$SCRIPT_DIR/wasm-config-sub-wrapper.sh" \
+  "$WRAPPER_DIR/wasm-config-sub-wrapper.sh"
+install -m 0755 \
+  "$SCRIPT_DIR/wasm-autom4te-wrapper.sh" \
+  "$WRAPPER_DIR/wasm-autom4te-wrapper.sh"
+export SHELL="$WRAPPER_DIR/wasm-config-sub-wrapper.sh"
+export CONFIG_SHELL="$WRAPPER_DIR/wasm-config-sub-wrapper.sh"
+export AUTOM4TE="$WRAPPER_DIR/wasm-autom4te-wrapper.sh"
 
 MARKER_TEXT="emscripten=$NEO_WASM_EMSCRIPTEN_VERSION wx=$NEO_WASM_WX_COMMIT model=js-exceptions-no-pthreads-v3"
 if [[ -x "$WX_BUILD/wx-config" && -f "$WX_BUILD/.neo-wasm-build" ]] &&

@@ -54,6 +54,21 @@ These are deliberate fail-closed boundaries, not silent partial exports. A
 future ZIP-based package workspace or browser File System Access integration
 can add those workflows without weakening the existing desktop semantics.
 
+## Autoconf wrapper permissions
+
+GNU Autoconf executes its `AUTOM4TE`, `SHELL`, and `CONFIG_SHELL` helpers as
+programs. Repository ZIPs and Windows-originated commits may lose Unix
+executable mode bits even when the script contents are correct. The shared
+wxWidgets-WASM build therefore installs private mode-`0755` copies under:
+
+```text
+<deps-root>/autoconf-wrappers/
+```
+
+Do not add tool-specific `chmod` steps to individual application workflows.
+Publish the corrected `neoshared` revision and point each application's
+`NEOSHARED_REF` at that revision.
+
 ## Native validation boundary
 
 The committed repositories do not add browser smoke-test fixtures or test-only
