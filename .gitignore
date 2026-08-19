@@ -46,3 +46,8 @@ Thumbs.db
 Desktop.ini
 
 .ci-logs/
+
+# macOS native build and package outputs
+/build-macos*/
+/stage-macos*/
+/dist/

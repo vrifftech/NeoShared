@@ -1,0 +1,53 @@
+name: macOS
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  MACOSX_DEPLOYMENT_TARGET: '15.0'
+
+jobs:
+  macos:
+    name: macOS 15 (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out neoshared
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Validate native runner
+        run: |
+          test "$(uname -m)" = "${{ matrix.arch }}"
+          sw_vers
+          xcodebuild -version
+
+      - name: Install dependencies
+        run: brew install cmake ninja
+
+      - name: Configure, build, and test
+        run: |
+          bash ./scripts/build-macos.sh \
+            --arch "${{ matrix.arch }}" \
+            --deployment-target "$MACOSX_DEPLOYMENT_TARGET" \
+            --jobs 2 \
+            --clean

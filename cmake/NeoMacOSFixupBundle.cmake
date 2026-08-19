@@ -1,0 +1,22 @@
+cmake_minimum_required(VERSION 3.16)
+
+if(NOT CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
+    message(FATAL_ERROR "NeoMacOSFixupBundle.cmake must run on macOS")
+endif()
+if(NOT DEFINED APP_BUNDLE OR APP_BUNDLE STREQUAL "")
+    message(FATAL_ERROR "APP_BUNDLE is required")
+endif()
+if(NOT IS_DIRECTORY "${APP_BUNDLE}")
+    message(FATAL_ERROR "Application bundle does not exist: ${APP_BUNDLE}")
+endif()
+
+set(_neo_search_dirs "")
+if(DEFINED SEARCH_DIRS AND NOT SEARCH_DIRS STREQUAL "")
+    string(REPLACE "|" ";" _neo_search_dirs "${SEARCH_DIRS}")
+endif()
+
+include(BundleUtilities)
+set(BU_CHMOD_BUNDLE_ITEMS TRUE)
+set(BU_COPY_FULL_FRAMEWORK_CONTENTS TRUE)
+fixup_bundle("${APP_BUNDLE}" "" "${_neo_search_dirs}")
+verify_app("${APP_BUNDLE}")
