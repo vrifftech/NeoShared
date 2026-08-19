@@ -69,6 +69,28 @@ Do not add tool-specific `chmod` steps to individual application workflows.
 Publish the corrected `neoshared` revision and point each application's
 `NEOSHARED_REF` at that revision.
 
+
+## CMake wxWidgets discovery
+
+Emscripten configures CMake to search headers and libraries only inside the SDK
+sysroot. The pinned wxWidgets-WASM build is intentionally external to that
+sysroot. CMake's stock `FindwxWidgets` first obtains flags from `wx-config`, then
+validates the reported headers and `-l` libraries with CMake search commands.
+Without a compatibility wrapper, valid files in `<deps-root>/wxwidgets-wasm-build`
+are rejected as out-of-sysroot and the application reports that wxWidgets was
+not found.
+
+`cmake/wasm/FindwxWidgets.cmake` delegates to CMake's stock module while
+temporarily allowing the explicit external paths reported by `wx-config`. It
+restores the Emscripten root-search policy immediately afterward, so unrelated
+package discovery remains sysroot-isolated. `scripts/build-wasm-app.sh` also
+prints the selected wx configuration, compile flags, and libraries before CMake
+configuration to make future discovery failures diagnosable from one CI log.
+
+Do not work around this by copying wxWidgets into the Emscripten SDK sysroot or
+by changing root-search modes globally in every application repository. Publish
+and pin the corrected `neoshared` revision instead.
+
 ## Native validation boundary
 
 The committed repositories do not add browser smoke-test fixtures or test-only

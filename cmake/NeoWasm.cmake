@@ -15,6 +15,13 @@ set(NEO_WX_WASM_BUILD "" CACHE PATH
 
 get_filename_component(_NEO_WASM_SHARED_ROOT "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
 
+# Register a narrow compatibility wrapper for CMake's stock FindwxWidgets.
+# This file is included before project(), so the Emscripten toolchain may not
+# have set EMSCRIPTEN/CMAKE_SYSTEM_NAME yet. Register the wrapper unconditionally;
+# it delegates unchanged on native builds and adjusts root-search modes only
+# after the toolchain identifies an Emscripten configure.
+list(PREPEND CMAKE_MODULE_PATH "${_NEO_WASM_SHARED_ROOT}/cmake/wasm")
+
 function(neo_configure_wasm_target target_name)
     set(_one_value_args NAME SLUG ICON)
     cmake_parse_arguments(NEO_WASM "" "${_one_value_args}" "" ${ARGN})

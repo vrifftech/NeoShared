@@ -69,6 +69,14 @@ source "$DEPS_ROOT/neo-wasm-versions.env"
 source "$NEO_WASM_EMSDK_ROOT/emsdk_env.sh" >/dev/null
 WX_BUILD="$DEPS_ROOT/wxwidgets-wasm-build"
 [[ -x "$WX_BUILD/wx-config" ]] || { echo "wx-config was not produced" >&2; exit 1; }
+export WX_CONFIG="$WX_BUILD/wx-config"
+
+echo "wxWidgets-WASM discovery diagnostics:"
+echo "  wx-config: $WX_CONFIG"
+echo "  selected:  $("$WX_CONFIG" --selected-config)"
+echo "  version:   $("$WX_CONFIG" --version)"
+echo "  cxxflags:  $("$WX_CONFIG" --cxxflags)"
+echo "  libraries: $("$WX_CONFIG" --libs core,base,adv,aui)"
 [[ "$CLEAN" == 0 ]] || rm -rf "$BUILD_DIR"
 
 cmake_args=(
