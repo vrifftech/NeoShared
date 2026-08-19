@@ -18,6 +18,7 @@
 #include <filesystem>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -121,7 +122,7 @@ public:
         auto* browserNote = new wxStaticText(
             this,
             wxID_ANY,
-            "Write to INI is disabled in the browser preview because an installer INI and its companion payload files must be updated together. Use Fragment here, or use a desktop build for package-aware Write to INI output.");
+            "Write to INI is disabled in the browser build because an installer INI and its companion payload files must be updated together. Use Fragment here, or use a desktop build for package-aware Write to INI output.");
         browserNote->Wrap(FromDIP(660));
         root->Add(browserNote, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP(32));
 #endif
@@ -318,13 +319,26 @@ private:
                 // Save the exact string shown in the preview rather than
                 // regenerating it from the project.
                 const auto report = neotsl::writeFragmentText(fragment_, *output);
+#if defined(__EMSCRIPTEN__)
+                if (!publishBrowserFile(report.iniPath, report.iniPath.filename().string())) {
+                    throw std::runtime_error("The browser could not download the generated INI fragment.");
+                }
+#endif
                 lastSaveDirectory_ = report.iniPath.parent_path();
                 saveButton_->SetLabel("Save Another INI...");
+#if defined(__EMSCRIPTEN__)
+                wxMessageBox(
+                    "Downloaded the generated fragment as:\n" + neosettings::pathToWx(report.iniPath.filename()),
+                    "Fragment Downloaded",
+                    wxOK | wxICON_INFORMATION,
+                    this);
+#else
                 wxMessageBox(
                     "Saved the generated fragment to:\n" + neosettings::pathToWx(report.iniPath),
                     "Fragment Saved",
                     wxOK | wxICON_INFORMATION,
                     this);
+#endif
                 return;
             } catch (const std::exception& ex) {
                 wxMessageBox(

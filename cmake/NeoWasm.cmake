@@ -70,6 +70,10 @@ function(neo_configure_wasm_target target_name)
     set(_shell_file "${_wasm_generated_dir}/${NEO_WASM_SLUG}-shell.html")
     configure_file("${_shell_template}" "${_shell_file}" @ONLY)
 
+    target_sources(${target_name} PRIVATE
+        "${_NEO_WASM_SHARED_ROOT}/wx/NeoBrowserFiles.cpp"
+    )
+
     target_compile_definitions(${target_name} PRIVATE
         NEO_WASM=1
         NEO_BROWSER_BUILD=1

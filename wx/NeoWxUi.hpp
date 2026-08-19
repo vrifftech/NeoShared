@@ -2,6 +2,10 @@
 
 #include "NeoSettings.hpp"
 
+#if defined(__EMSCRIPTEN__)
+#include "NeoBrowserFiles.hpp"
+#endif
+
 #include <wx/wx.h>
 #include <wx/textctrl.h>
 #include <wx/statusbr.h>
@@ -433,15 +437,79 @@ inline std::optional<std::string> promptText(wxWindow* parent,
     return toStd(dialog.GetValue());
 }
 
+namespace detail {
+
+inline std::vector<std::string> splitText(const std::string& text, char delimiter) {
+    std::vector<std::string> parts;
+    std::size_t begin = 0;
+    for (;;) {
+        const std::size_t end = text.find(delimiter, begin);
+        parts.push_back(text.substr(begin, end == std::string::npos ? std::string::npos : end - begin));
+        if (end == std::string::npos) break;
+        begin = end + 1;
+    }
+    return parts;
+}
+
+inline std::string trimAscii(std::string text) {
+    const auto notSpace = [](unsigned char ch) { return !std::isspace(ch); };
+    text.erase(text.begin(), std::find_if(text.begin(), text.end(), notSpace));
+    text.erase(std::find_if(text.rbegin(), text.rend(), notSpace).base(), text.end());
+    return text;
+}
+
+inline std::string wildcardToBrowserAccept(const std::string& wildcard) {
+    const auto parts = splitText(wildcard, '|');
+    std::vector<std::string> extensions;
+    for (std::size_t index = 1; index < parts.size(); index += 2) {
+        for (auto pattern : splitText(parts[index], ';')) {
+            pattern = trimAscii(std::move(pattern));
+            if (pattern == "*" || pattern == "*.*" || pattern.empty()) continue;
+            if (pattern.rfind("*.", 0) == 0) pattern.erase(pattern.begin());
+            if (pattern.empty() || pattern.front() != '.') continue;
+            std::transform(pattern.begin(), pattern.end(), pattern.begin(), [](unsigned char ch) {
+                return static_cast<char>(std::tolower(ch));
+            });
+            if (std::find(extensions.begin(), extensions.end(), pattern) == extensions.end()) {
+                extensions.push_back(std::move(pattern));
+            }
+        }
+    }
+
+    std::string accept;
+    for (const auto& extension : extensions) {
+        if (!accept.empty()) accept += ',';
+        accept += extension;
+    }
+    return accept;
+}
+
+inline std::string firstWildcardExtension(const std::string& wildcard) {
+    const std::string accept = wildcardToBrowserAccept(wildcard);
+    const std::size_t comma = accept.find(',');
+    return accept.substr(0, comma);
+}
+
+} // namespace detail
+
 inline std::optional<std::filesystem::path> chooseOpenFile(
     wxWindow* parent,
     const std::string& title,
     const std::string& wildcard,
     const std::filesystem::path& initialDirectory = {}) {
+#if defined(__EMSCRIPTEN__)
+    (void)parent;
+    (void)initialDirectory;
+    const auto files = neobrowser::chooseOpenFiles(
+        title, detail::wildcardToBrowserAccept(wildcard), false);
+    if (files.empty()) return std::nullopt;
+    return files.front();
+#else
     wxFileDialog dialog(parent, toWx(title), neosettings::pathToWx(initialDirectory), wxEmptyString, toWx(wildcard),
                         wxFD_OPEN | wxFD_FILE_MUST_EXIST);
     if (dialog.ShowModal() != wxID_OK) return std::nullopt;
     return neosettings::pathFromWx(dialog.GetPath());
+#endif
 }
 
 inline std::vector<std::filesystem::path> chooseOpenFiles(
@@ -449,6 +517,12 @@ inline std::vector<std::filesystem::path> chooseOpenFiles(
     const std::string& title,
     const std::string& wildcard,
     const std::filesystem::path& initialDirectory = {}) {
+#if defined(__EMSCRIPTEN__)
+    (void)parent;
+    (void)initialDirectory;
+    return neobrowser::chooseOpenFiles(
+        title, detail::wildcardToBrowserAccept(wildcard), true);
+#else
     wxFileDialog dialog(parent, toWx(title), neosettings::pathToWx(initialDirectory), wxEmptyString, toWx(wildcard),
                         wxFD_OPEN | wxFD_FILE_MUST_EXIST | wxFD_MULTIPLE);
     if (dialog.ShowModal() != wxID_OK) return {};
@@ -458,16 +532,29 @@ inline std::vector<std::filesystem::path> chooseOpenFiles(
     result.reserve(paths.size());
     for (const auto& path : paths) result.emplace_back(neosettings::pathFromWx(path));
     return result;
+#endif
 }
 
 inline std::optional<std::filesystem::path> chooseSaveFile(wxWindow* parent,
                                                            const std::string& title,
                                                            const std::string& wildcard,
                                                            const std::string& defaultFile = {}) {
+#if defined(__EMSCRIPTEN__)
+    (void)parent;
+    auto selected = neobrowser::chooseSaveFile(
+        title, defaultFile.empty() ? "download.bin" : defaultFile);
+    if (!selected) return std::nullopt;
+    if (selected->extension().empty()) {
+        const std::string extension = detail::firstWildcardExtension(wildcard);
+        if (!extension.empty()) *selected += extension;
+    }
+    return selected;
+#else
     wxFileDialog dialog(parent, toWx(title), wxEmptyString, toWx(defaultFile), toWx(wildcard),
                         wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
     if (dialog.ShowModal() != wxID_OK) return std::nullopt;
     return neosettings::pathFromWx(dialog.GetPath());
+#endif
 }
 
 inline std::optional<std::filesystem::path> choosePatcherIniFile(
@@ -475,6 +562,12 @@ inline std::optional<std::filesystem::path> choosePatcherIniFile(
     const std::string& title,
     const std::filesystem::path& initialDirectory = {},
     const std::string& defaultFile = "changes.ini") {
+#if defined(__EMSCRIPTEN__)
+    (void)initialDirectory;
+    auto selected = neobrowser::chooseSaveFile(
+        title, defaultFile.empty() ? "changes.ini" : defaultFile);
+    if (!selected) return std::nullopt;
+#else
     wxFileDialog dialog(
         parent,
         toWx(title),
@@ -483,9 +576,10 @@ inline std::optional<std::filesystem::path> choosePatcherIniFile(
         "Installer INI files (*.ini)|*.ini|All files (*.*)|*.*",
         wxFD_SAVE);
     if (dialog.ShowModal() != wxID_OK) return std::nullopt;
-    std::filesystem::path selected = neosettings::pathFromWx(dialog.GetPath());
-    if (selected.extension().empty()) selected += ".ini";
-    std::string extension = neosettings::pathToUtf8(selected.extension());
+    std::optional<std::filesystem::path> selected = neosettings::pathFromWx(dialog.GetPath());
+#endif
+    if (selected->extension().empty()) *selected += ".ini";
+    std::string extension = neosettings::pathToUtf8(selected->extension());
     std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char ch) {
         return static_cast<char>(std::tolower(ch));
     });
@@ -500,12 +594,23 @@ inline std::optional<std::filesystem::path> choosePatcherIniFile(
     return selected;
 }
 
+inline bool publishBrowserFile(const std::filesystem::path& virtualPath,
+                               const std::string& downloadName = {}) {
+#if defined(__EMSCRIPTEN__)
+    return neobrowser::downloadFile(virtualPath, downloadName);
+#else
+    (void)virtualPath;
+    (void)downloadName;
+    return true;
+#endif
+}
+
 inline std::optional<std::filesystem::path> chooseDirectory(wxWindow* parent,
                                                             const std::string& title) {
 #if defined(__EMSCRIPTEN__)
     (void)title;
     wxMessageBox(
-        "Writable directory selection is unavailable in the browser preview. Select individual files with Open, and download individual results with Save or Export. Use a desktop build for directory-wide operations.",
+        "Writable directory selection is unavailable in the browser build. Select individual files with Open, and download individual results with Save or Export. Use a desktop build for directory-wide operations.",
         "Directory Operation Unavailable",
         wxOK | wxICON_INFORMATION,
         parent);
