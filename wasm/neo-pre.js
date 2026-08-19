@@ -118,6 +118,113 @@
     }, 0);
   }
 
+
+  var activeDownloadEntries = [];
+
+  function ensureDownloadPanel() {
+    var panel = document.getElementById('neo-download-panel');
+    if (panel) return panel;
+
+    panel = document.createElement('div');
+    panel.id = 'neo-download-panel';
+    panel.setAttribute('role', 'status');
+    panel.setAttribute('aria-live', 'polite');
+    panel.style.position = 'fixed';
+    panel.style.right = '12px';
+    panel.style.bottom = '12px';
+    panel.style.zIndex = '2147483647';
+    panel.style.display = 'flex';
+    panel.style.flexDirection = 'column';
+    panel.style.gap = '8px';
+    panel.style.width = 'min(440px, calc(100vw - 24px))';
+    panel.style.pointerEvents = 'none';
+    document.body.appendChild(panel);
+    return panel;
+  }
+
+  function removeDownloadItem(item, url) {
+    if (item && item.parentNode) item.parentNode.removeChild(item);
+    for (var index = activeDownloadEntries.length - 1; index >= 0; --index) {
+      if (activeDownloadEntries[index].item === item || activeDownloadEntries[index].url === url) {
+        activeDownloadEntries.splice(index, 1);
+      }
+    }
+    try { URL.revokeObjectURL(url); } catch (_) {}
+  }
+
+  function presentBrowserDownload(bytes, name) {
+    var blob = new Blob([bytes], { type: 'application/octet-stream' });
+    var url = URL.createObjectURL(blob);
+
+    var panel = ensureDownloadPanel();
+    var item = document.createElement('div');
+    item.style.display = 'flex';
+    item.style.alignItems = 'center';
+    item.style.gap = '8px';
+    item.style.padding = '9px 10px';
+    item.style.border = '1px solid #596473';
+    item.style.borderRadius = '7px';
+    item.style.background = '#252b33';
+    item.style.color = '#eef2f6';
+    item.style.boxShadow = '0 6px 22px rgba(0,0,0,.35)';
+    item.style.pointerEvents = 'auto';
+
+    var label = document.createElement('span');
+    label.textContent = 'Download ready:';
+    label.style.flex = '0 0 auto';
+    label.style.fontSize = '13px';
+
+    var anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = name;
+    anchor.textContent = name;
+    anchor.title = 'Download ' + name;
+    anchor.style.flex = '1 1 auto';
+    anchor.style.minWidth = '0';
+    anchor.style.overflow = 'hidden';
+    anchor.style.textOverflow = 'ellipsis';
+    anchor.style.whiteSpace = 'nowrap';
+    anchor.style.color = '#9dc8ff';
+    anchor.style.fontWeight = '600';
+
+    var close = document.createElement('button');
+    close.type = 'button';
+    close.textContent = '×';
+    close.title = 'Dismiss download';
+    close.setAttribute('aria-label', 'Dismiss download');
+    close.style.flex = '0 0 auto';
+    close.style.width = '26px';
+    close.style.height = '26px';
+    close.style.padding = '0';
+    close.style.border = '1px solid #66717f';
+    close.style.borderRadius = '5px';
+    close.style.background = '#343c47';
+    close.style.color = '#eef2f6';
+    close.style.cursor = 'pointer';
+    close.addEventListener('click', function() { removeDownloadItem(item, url); });
+
+    item.appendChild(label);
+    item.appendChild(anchor);
+    item.appendChild(close);
+    panel.appendChild(item);
+    activeDownloadEntries.push({ item: item, url: url });
+    while (activeDownloadEntries.length > 6) {
+      var oldest = activeDownloadEntries[0];
+      removeDownloadItem(oldest.item, oldest.url);
+    }
+
+    // Attempt the ordinary immediate download while transient activation is
+    // still present. The visible link remains even if the browser blocks the
+    // synthetic click, so the user always has a real click target to retry.
+    var mayAutoDownload = !navigator.userActivation || navigator.userActivation.isActive;
+    if (mayAutoDownload) {
+      try { anchor.click(); } catch (error) {
+        console.warn('[NeoTools] Automatic download was blocked; use the visible download link.', error);
+      }
+    }
+    return true;
+  }
+
   Module.neoToolsBrowserFiles = {
     requestOpenFiles: function(requestId, options) {
       try {
@@ -160,17 +267,7 @@
       var bytes = FS.readFile(path, { encoding: 'binary' });
       var name = safeBrowserFileName(downloadName,
         safeBrowserFileName(String(path || '').split('/').pop(), 'download.bin'));
-      var blob = new Blob([bytes], { type: 'application/octet-stream' });
-      var url = URL.createObjectURL(blob);
-      var anchor = document.createElement('a');
-      anchor.href = url;
-      anchor.download = name;
-      anchor.style.display = 'none';
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      window.setTimeout(function() { URL.revokeObjectURL(url); }, 1000);
-      return true;
+      return presentBrowserDownload(bytes, name);
     }
   };
 
@@ -204,7 +301,13 @@
   }
 
   window.neoToolsFlushSettings = flushSettings;
-  window.addEventListener('pagehide', flushSettings);
+  window.addEventListener('pagehide', function() {
+    while (activeDownloadEntries.length) {
+      var entry = activeDownloadEntries.pop();
+      try { URL.revokeObjectURL(entry.url); } catch (_) {}
+    }
+    flushSettings();
+  });
   document.addEventListener('visibilitychange', function() {
     if (document.visibilityState === 'hidden') flushSettings();
   });

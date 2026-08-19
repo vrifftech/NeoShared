@@ -1,6 +1,7 @@
 #include "NeoBrowserFiles.hpp"
 
 #include <cstdint>
+#include <cctype>
 #include <exception>
 #include <cstdio>
 #include <cstdlib>
@@ -107,6 +108,26 @@ EM_JS(void, neo_browser_set_dark_mode_js, (int enabled), {
 #endif
 
 namespace {
+
+std::string safeDownloadName(std::string name) {
+    for (char& ch : name) {
+        const unsigned char value = static_cast<unsigned char>(ch);
+        if (ch == '/' || ch == '\\' || value < 0x20u || value == 0x7Fu) ch = '_';
+    }
+    while (!name.empty() && std::isspace(static_cast<unsigned char>(name.front())) != 0) {
+        name.erase(name.begin());
+    }
+    while (!name.empty() && std::isspace(static_cast<unsigned char>(name.back())) != 0) {
+        name.pop_back();
+    }
+    if (name.empty() || name == "." || name == "..") return "download.bin";
+    return name;
+}
+
+std::uint64_t nextDownloadPathId() {
+    static std::uint64_t next = 1;
+    return next++;
+}
 
 #if defined(__EMSCRIPTEN__)
 
@@ -256,6 +277,22 @@ std::optional<std::filesystem::path> chooseSaveFile(const std::string& title,
     (void)title;
     (void)defaultFile;
     return std::nullopt;
+#endif
+}
+
+std::filesystem::path createDownloadPath(const std::string& downloadName) {
+#if defined(__EMSCRIPTEN__)
+    const std::filesystem::path directory =
+        std::filesystem::path("/tmp/neotools-download") /
+        std::to_string(nextDownloadPathId());
+    std::filesystem::create_directories(directory);
+    return directory / safeDownloadName(downloadName);
+#else
+    const std::filesystem::path directory =
+        std::filesystem::temp_directory_path() / "neotools-download" /
+        std::to_string(nextDownloadPathId());
+    std::filesystem::create_directories(directory);
+    return directory / safeDownloadName(downloadName);
 #endif
 }
 
