@@ -8,7 +8,7 @@
 
 namespace neobrowser {
 
-inline constexpr unsigned kBrowserFileApiVersion = 3u;
+inline constexpr unsigned kBrowserFileApiVersion = 4u;
 
 struct OpenFilesResult {
     std::vector<std::filesystem::path> paths;
@@ -46,9 +46,42 @@ std::optional<std::filesystem::path> chooseSaveFile(const std::string& title,
 // The returned leaf name is sanitized for browser download use.
 std::filesystem::path createDownloadPath(const std::string& downloadName);
 
-// Downloads an existing process-local file through the browser. When
-// downloadName is empty, the virtual file's leaf name is used. The browser
-// bridge also exposes a visible retry link when automatic download is blocked.
+enum class DownloadDisposition {
+    Cancelled = 0,
+    Saved = 1,
+    Ready = 2,
+};
+
+struct DownloadResult {
+    DownloadDisposition disposition{DownloadDisposition::Cancelled};
+    std::string error;
+
+    bool cancelled() const noexcept {
+        return disposition == DownloadDisposition::Cancelled && error.empty();
+    }
+    bool saved() const noexcept {
+        return disposition == DownloadDisposition::Saved && error.empty();
+    }
+    bool ready() const noexcept {
+        return disposition == DownloadDisposition::Ready && error.empty();
+    }
+};
+
+using DownloadCallback = std::function<void(DownloadResult)>;
+
+// Starts a browser save transaction and returns immediately. Chromium-family
+// browsers receive their native Save File picker. Other browsers receive a
+// persistent, real download link in the NeoTools browser bar. callback runs
+// later through wx's event queue after the browser has saved, queued, cancelled,
+// or rejected the operation.
+void requestDownloadFile(const std::filesystem::path& virtualPath,
+                         const std::string& downloadName,
+                         DownloadCallback callback);
+
+// Legacy immediate facade retained for callers not yet migrated to the
+// completion API. In browsers without the File System Access API it prepares a
+// persistent top-bar download link. Prefer requestDownloadFile() whenever the
+// application needs truthful completion or cancellation reporting.
 bool downloadFile(const std::filesystem::path& virtualPath,
                   const std::string& downloadName = {});
 

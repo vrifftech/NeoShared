@@ -39,16 +39,22 @@ unchanged.
 
 ## Browser filesystem boundary
 
-The selected wxWidgets port can import files into Emscripten's virtual
-filesystem and download individual saved files. It does not provide an atomic,
-writable installer-directory transaction. The browser preview therefore:
+The shared browser bridge imports host files into Emscripten's virtual
+filesystem and provides an asynchronous save transaction for individual output
+files. Chromium-family browsers receive a native Save File dialog; other
+browsers receive a persistent, real download link in the NeoTools browser bar.
+It does not provide an atomic, writable installer-directory transaction. The
+browser build therefore:
 
 - keeps patcher **Fragment** preview/copy/download available;
 - disables package-aware **Write to INI**, which must update the selected INI
   and all companion payloads together;
 - disables installed-game-directory scanning;
 - disables directory-wide export and extraction, including NeoERF's
-  multi-resource extraction command.
+  multi-resource extraction command;
+- reports save completion, cancellation, and fallback-link preparation only
+  after the browser has responded, rather than treating link creation as a
+  completed download.
 
 These are deliberate fail-closed boundaries, not silent partial exports. A
 future ZIP-based package workspace or browser File System Access integration

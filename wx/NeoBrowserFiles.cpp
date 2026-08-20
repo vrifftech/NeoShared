@@ -1,10 +1,10 @@
 #include "NeoBrowserFiles.hpp"
 
-#include <cstdint>
 #include <cctype>
-#include <exception>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <exception>
 #include <system_error>
 #include <unordered_map>
 #include <utility>
@@ -78,6 +78,21 @@ EM_JS(char*, neo_browser_choose_save_file_js,
     }
 });
 
+EM_JS(int, neo_browser_request_download_file_js,
+      (unsigned int requestId, const char* virtualPath, const char* downloadName), {
+    try {
+        if (!Module.neoToolsBrowserFiles || !Module.neoToolsBrowserFiles.requestDownloadFile) {
+            console.error('[NeoTools] Browser download transaction bridge is unavailable.');
+            return 0;
+        }
+        return Module.neoToolsBrowserFiles.requestDownloadFile(
+            requestId, UTF8ToString(virtualPath), UTF8ToString(downloadName)) ? 1 : 0;
+    } catch (error) {
+        console.error('[NeoTools] Browser download transaction failed to start:', error);
+        return 0;
+    }
+});
+
 EM_JS(int, neo_browser_download_file_js,
       (const char* virtualPath, const char* downloadName), {
     try {
@@ -131,16 +146,22 @@ std::uint64_t nextDownloadPathId() {
 
 #if defined(__EMSCRIPTEN__)
 
-using CallbackMap = std::unordered_map<std::uint32_t, neobrowser::OpenFilesCallback>;
+using OpenCallbackMap = std::unordered_map<std::uint32_t, neobrowser::OpenFilesCallback>;
+using DownloadCallbackMap = std::unordered_map<std::uint32_t, neobrowser::DownloadCallback>;
 
-CallbackMap& openFileCallbacks() {
-    static CallbackMap callbacks;
+OpenCallbackMap& openFileCallbacks() {
+    static OpenCallbackMap callbacks;
     return callbacks;
 }
 
-std::uint32_t nextOpenFileRequestId() {
+DownloadCallbackMap& downloadCallbacks() {
+    static DownloadCallbackMap callbacks;
+    return callbacks;
+}
+
+template <typename Map>
+std::uint32_t nextRequestId(Map& callbacks) {
     static std::uint32_t next = 1;
-    auto& callbacks = openFileCallbacks();
     for (;;) {
         const std::uint32_t candidate = next++;
         if (next == 0) next = 1;
@@ -183,6 +204,41 @@ void runOpenFilesCallback(neobrowser::OpenFilesCallback callback,
     }
 }
 
+void runDownloadCallback(neobrowser::DownloadCallback callback,
+                         neobrowser::DownloadResult result) noexcept {
+    try {
+        callback(std::move(result));
+    } catch (const std::exception& exception) {
+        std::fprintf(stderr, "[NeoTools] Browser download completion failed: %s\n", exception.what());
+    } catch (...) {
+        std::fprintf(stderr, "[NeoTools] Browser download completion failed with an unknown exception.\n");
+    }
+}
+
+void scheduleOpenFilesCallback(neobrowser::OpenFilesCallback callback,
+                               neobrowser::OpenFilesResult result) noexcept {
+    if (wxTheApp != nullptr) {
+        wxTheApp->CallAfter(
+            [callback = std::move(callback), result = std::move(result)]() mutable {
+                runOpenFilesCallback(std::move(callback), std::move(result));
+            });
+        return;
+    }
+    runOpenFilesCallback(std::move(callback), std::move(result));
+}
+
+void scheduleDownloadCallback(neobrowser::DownloadCallback callback,
+                              neobrowser::DownloadResult result) noexcept {
+    if (wxTheApp != nullptr) {
+        wxTheApp->CallAfter(
+            [callback = std::move(callback), result = std::move(result)]() mutable {
+                runDownloadCallback(std::move(callback), std::move(result));
+            });
+        return;
+    }
+    runDownloadCallback(std::move(callback), std::move(result));
+}
+
 void invokeOpenFilesCallback(std::uint32_t requestId,
                              std::vector<std::filesystem::path> paths,
                              std::string error) noexcept {
@@ -192,20 +248,33 @@ void invokeOpenFilesCallback(std::uint32_t requestId,
 
     neobrowser::OpenFilesCallback callback = std::move(found->second);
     callbacks.erase(found);
-    neobrowser::OpenFilesResult result{std::move(paths), std::move(error)};
+    scheduleOpenFilesCallback(
+        std::move(callback),
+        neobrowser::OpenFilesResult{std::move(paths), std::move(error)});
+}
 
-    // Return from the JavaScript completion ccall before running application
-    // code. The callback may parse a large resource, update wx controls, or
-    // open a modal error dialog; all of those belong in wx's normal pending-
-    // event pump, not inside the bridge ccall itself.
-    if (wxTheApp != nullptr) {
-        wxTheApp->CallAfter(
-            [callback = std::move(callback), result = std::move(result)]() mutable {
-                runOpenFilesCallback(std::move(callback), std::move(result));
-            });
-        return;
+neobrowser::DownloadDisposition downloadDispositionFromInt(int value) noexcept {
+    if (value == static_cast<int>(neobrowser::DownloadDisposition::Saved)) {
+        return neobrowser::DownloadDisposition::Saved;
     }
-    runOpenFilesCallback(std::move(callback), std::move(result));
+    if (value == static_cast<int>(neobrowser::DownloadDisposition::Ready)) {
+        return neobrowser::DownloadDisposition::Ready;
+    }
+    return neobrowser::DownloadDisposition::Cancelled;
+}
+
+void invokeDownloadCallback(std::uint32_t requestId,
+                            int disposition,
+                            std::string error) noexcept {
+    auto& callbacks = downloadCallbacks();
+    const auto found = callbacks.find(requestId);
+    if (found == callbacks.end()) return;
+
+    neobrowser::DownloadCallback callback = std::move(found->second);
+    callbacks.erase(found);
+    scheduleDownloadCallback(
+        std::move(callback),
+        neobrowser::DownloadResult{downloadDispositionFromInt(disposition), std::move(error)});
 }
 
 #endif
@@ -224,6 +293,16 @@ extern "C" EMSCRIPTEN_KEEPALIVE void neo_browser_open_files_completed(
         error == nullptr ? std::string{} : std::string(error));
 }
 
+extern "C" EMSCRIPTEN_KEEPALIVE void neo_browser_download_completed(
+    unsigned int requestId,
+    int disposition,
+    const char* error) {
+    invokeDownloadCallback(
+        requestId,
+        disposition,
+        error == nullptr ? std::string{} : std::string(error));
+}
+
 #endif
 
 namespace neobrowser {
@@ -234,8 +313,9 @@ void requestOpenFiles(const std::string& title,
                       OpenFilesCallback callback) {
     if (!callback) return;
 #if defined(__EMSCRIPTEN__)
-    const std::uint32_t requestId = nextOpenFileRequestId();
-    openFileCallbacks().emplace(requestId, std::move(callback));
+    auto& callbacks = openFileCallbacks();
+    const std::uint32_t requestId = nextRequestId(callbacks);
+    callbacks.emplace(requestId, std::move(callback));
     if (neo_browser_request_open_files_js(
             requestId, title.c_str(), accept.c_str(), multiple ? 1 : 0) == 0) {
         invokeOpenFilesCallback(
@@ -293,6 +373,43 @@ std::filesystem::path createDownloadPath(const std::string& downloadName) {
         std::to_string(nextDownloadPathId());
     std::filesystem::create_directories(directory);
     return directory / safeDownloadName(downloadName);
+#endif
+}
+
+void requestDownloadFile(const std::filesystem::path& virtualPath,
+                         const std::string& downloadName,
+                         DownloadCallback callback) {
+    if (!callback) return;
+#if defined(__EMSCRIPTEN__)
+    std::error_code filesystemError;
+    if (!std::filesystem::is_regular_file(virtualPath, filesystemError) || filesystemError) {
+        scheduleDownloadCallback(
+            std::move(callback),
+            DownloadResult{
+                DownloadDisposition::Cancelled,
+                "The prepared browser download file does not exist."});
+        return;
+    }
+
+    const std::string path = virtualPath.generic_string();
+    const std::string name = downloadName.empty()
+        ? virtualPath.filename().generic_string()
+        : downloadName;
+    auto& callbacks = downloadCallbacks();
+    const std::uint32_t requestId = nextRequestId(callbacks);
+    callbacks.emplace(requestId, std::move(callback));
+    if (neo_browser_request_download_file_js(requestId, path.c_str(), name.c_str()) == 0) {
+        invokeDownloadCallback(
+            requestId,
+            static_cast<int>(DownloadDisposition::Cancelled),
+            "The browser download bridge is unavailable.");
+    }
+#else
+    (void)virtualPath;
+    (void)downloadName;
+    callback(DownloadResult{
+        DownloadDisposition::Cancelled,
+        "Browser downloads are unavailable in this build."});
 #endif
 }
 
