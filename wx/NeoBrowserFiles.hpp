@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <filesystem>
 #include <functional>
 #include <optional>
@@ -8,7 +9,7 @@
 
 namespace neobrowser {
 
-inline constexpr unsigned kBrowserFileApiVersion = 4u;
+inline constexpr unsigned kBrowserFileApiVersion = 5u;
 
 struct OpenFilesResult {
     std::vector<std::filesystem::path> paths;
@@ -69,19 +70,24 @@ struct DownloadResult {
 
 using DownloadCallback = std::function<void(DownloadResult)>;
 
-// Starts a browser save transaction and returns immediately. Chromium-family
-// browsers receive their native Save File picker. Other browsers receive a
-// persistent, real download link in the NeoTools browser bar. callback runs
-// later through wx's event queue after the browser has saved, queued, cancelled,
-// or rejected the operation.
+// Prepares a persistent, real browser download action and returns immediately.
+// The user completes the transfer with a normal DOM link click; no native save
+// picker or asynchronous wait is entered from the wxWidgets event dispatch.
+// callback runs later through wx's event queue once the link has been prepared.
 void requestDownloadFile(const std::filesystem::path& virtualPath,
                          const std::string& downloadName,
                          DownloadCallback callback);
 
+// Copies bytes out of WebAssembly memory and presents a prominent browser
+// download action. This is the preferred path for generated or extracted data:
+// it avoids Emscripten filesystem durability/atomic-replace operations entirely.
+bool prepareDownloadBytes(const void* bytes,
+                          std::size_t byteCount,
+                          const std::string& downloadName);
+
 // Legacy immediate facade retained for callers not yet migrated to the
-// completion API. In browsers without the File System Access API it prepares a
-// persistent top-bar download link. Prefer requestDownloadFile() whenever the
-// application needs truthful completion or cancellation reporting.
+// completion API. It prepares the same prominent, persistent browser download
+// action without reporting completion.
 bool downloadFile(const std::filesystem::path& virtualPath,
                   const std::string& downloadName = {});
 

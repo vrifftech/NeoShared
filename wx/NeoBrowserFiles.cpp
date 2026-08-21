@@ -108,6 +108,25 @@ EM_JS(int, neo_browser_download_file_js,
     }
 });
 
+EM_JS(int, neo_browser_prepare_download_bytes_js,
+      (const void* bytes, size_t byteCount, const char* downloadName), {
+    try {
+        if (!Module.neoToolsBrowserFiles || !Module.neoToolsBrowserFiles.prepareDownloadBytes) {
+            console.error('[NeoTools] Browser byte-download bridge is unavailable.');
+            return 0;
+        }
+        var begin = Number(bytes);
+        var count = Number(byteCount);
+        var copy = new Uint8Array(count);
+        if (count > 0) copy.set(HEAPU8.subarray(begin, begin + count));
+        return Module.neoToolsBrowserFiles.prepareDownloadBytes(
+            copy, UTF8ToString(downloadName)) ? 1 : 0;
+    } catch (error) {
+        console.error('[NeoTools] Unable to prepare browser byte download:', error);
+        return 0;
+    }
+});
+
 EM_JS(void, neo_browser_set_dark_mode_js, (int enabled), {
     try {
         const dark = enabled !== 0;
@@ -410,6 +429,22 @@ void requestDownloadFile(const std::filesystem::path& virtualPath,
     callback(DownloadResult{
         DownloadDisposition::Cancelled,
         "Browser downloads are unavailable in this build."});
+#endif
+}
+
+bool prepareDownloadBytes(const void* bytes,
+                          std::size_t byteCount,
+                          const std::string& downloadName) {
+#if defined(__EMSCRIPTEN__)
+    if (byteCount > 0 && bytes == nullptr) return false;
+    const std::string safeName = safeDownloadName(downloadName);
+    return neo_browser_prepare_download_bytes_js(
+        bytes, byteCount, safeName.c_str()) != 0;
+#else
+    (void)bytes;
+    (void)byteCount;
+    (void)downloadName;
+    return false;
 #endif
 }
 

@@ -145,34 +145,28 @@
 
     host = document.createElement('div');
     host.id = 'neo-download-host';
-    host.setAttribute('role', 'status');
+    host.setAttribute('role', 'region');
+    host.setAttribute('aria-label', 'Prepared downloads');
     host.setAttribute('aria-live', 'polite');
-    host.style.display = 'flex';
-    host.style.alignItems = 'center';
-    host.style.gap = '6px';
-    host.style.maxWidth = 'min(52vw, 720px)';
-    host.style.overflowX = 'auto';
-    host.style.overflowY = 'hidden';
-    host.style.pointerEvents = 'auto';
-    host.style.flex = '0 1 auto';
-
-    var browserBar = document.getElementById('neo-browser-bar');
-    if (browserBar) {
-      var privacy = browserBar.querySelector('.privacy');
-      browserBar.insertBefore(host, privacy || null);
-      return host;
-    }
-
-    // The generated NeoTools shell always has #neo-browser-bar, but keep an
-    // obvious fixed fallback for custom embedding pages.
     host.style.position = 'fixed';
-    host.style.right = '12px';
-    host.style.top = '12px';
+    host.style.left = '50%';
+    host.style.top = '48px';
+    host.style.transform = 'translateX(-50%)';
     host.style.zIndex = '2147483647';
-    host.style.padding = '6px';
+    host.style.display = 'flex';
+    host.style.flexDirection = 'column';
+    host.style.alignItems = 'stretch';
+    host.style.gap = '7px';
+    host.style.width = 'min(620px, calc(100vw - 24px))';
+    host.style.maxHeight = 'min(45vh, 360px)';
+    host.style.overflowY = 'auto';
+    host.style.padding = '9px';
     host.style.background = '#20242b';
-    host.style.border = '1px solid #596473';
-    host.style.borderRadius = '7px';
+    host.style.border = '1px solid #72a7e7';
+    host.style.borderRadius = '8px';
+    host.style.boxShadow = '0 10px 32px rgba(0,0,0,.42)';
+    host.style.pointerEvents = 'auto';
+    host.style.fontFamily = 'system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';
     document.body.appendChild(host);
     return host;
   }
@@ -187,20 +181,33 @@
     try { URL.revokeObjectURL(url); } catch (_) {}
   }
 
-  function queueBrowserDownload(bytes, name, attemptImmediate) {
-    // Copy out of the Emscripten heap before creating the Blob. Memory growth
-    // may replace the heap buffer after this function returns.
-    var copy = new Uint8Array(bytes.length);
-    copy.set(bytes);
-    var blob = new Blob([copy], { type: 'application/octet-stream' });
+  function queueBrowserDownload(bytes, name) {
+    // Callers pass an owned Uint8Array copy rather than a live Emscripten heap
+    // view, so the Blob remains valid if WebAssembly memory grows later.
+    var stableBytes = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    var blob = new Blob([stableBytes], { type: 'application/octet-stream' });
     var url = URL.createObjectURL(blob);
 
     var host = ensureDownloadHost();
-    var item = document.createElement('span');
-    item.style.display = 'inline-flex';
+    var item = document.createElement('div');
+    item.style.display = 'grid';
+    item.style.gridTemplateColumns = 'minmax(0,1fr) auto';
     item.style.alignItems = 'center';
-    item.style.gap = '4px';
-    item.style.flex = '0 0 auto';
+    item.style.gap = '8px';
+    item.style.padding = '7px';
+    item.style.background = '#2b323c';
+    item.style.border = '1px solid #596473';
+    item.style.borderRadius = '6px';
+
+    var content = document.createElement('div');
+    content.style.minWidth = '0';
+
+    var message = document.createElement('div');
+    message.textContent = 'File ready';
+    message.style.marginBottom = '5px';
+    message.style.color = '#eef2f6';
+    message.style.fontSize = '12px';
+    message.style.fontWeight = '650';
 
     var anchor = document.createElement('a');
     anchor.href = url;
@@ -208,29 +215,32 @@
     anchor.textContent = 'Download ' + name;
     anchor.title = 'Download ' + name;
     anchor.setAttribute('data-neo-download-name', name);
-    anchor.style.display = 'inline-flex';
-    anchor.style.alignItems = 'center';
-    anchor.style.minHeight = '26px';
-    anchor.style.maxWidth = '360px';
-    anchor.style.padding = '3px 9px';
-    anchor.style.border = '1px solid #72a7e7';
+    anchor.style.display = 'block';
+    anchor.style.width = '100%';
+    anchor.style.padding = '8px 11px';
+    anchor.style.border = '1px solid #8fc0ff';
     anchor.style.borderRadius = '5px';
     anchor.style.background = '#315f91';
     anchor.style.color = '#ffffff';
-    anchor.style.fontWeight = '650';
+    anchor.style.fontWeight = '700';
+    anchor.style.textAlign = 'center';
     anchor.style.textDecoration = 'none';
     anchor.style.whiteSpace = 'nowrap';
     anchor.style.overflow = 'hidden';
     anchor.style.textOverflow = 'ellipsis';
     anchor.style.cursor = 'pointer';
+    anchor.addEventListener('click', function() {
+      message.textContent = 'Download requested — the link remains available';
+      anchor.textContent = 'Download again: ' + name;
+    });
 
     var close = document.createElement('button');
     close.type = 'button';
     close.textContent = '×';
     close.title = 'Dismiss prepared download';
     close.setAttribute('aria-label', 'Dismiss prepared download ' + name);
-    close.style.width = '24px';
-    close.style.height = '24px';
+    close.style.width = '30px';
+    close.style.height = '30px';
     close.style.padding = '0';
     close.style.border = '1px solid #66717f';
     close.style.borderRadius = '5px';
@@ -241,25 +251,24 @@
       event.preventDefault();
       event.stopPropagation();
       removeDownloadItem(item, url);
+      if (!activeDownloadEntries.length && host.parentNode) host.parentNode.removeChild(host);
     });
 
-    item.appendChild(anchor);
+    content.appendChild(message);
+    content.appendChild(anchor);
+    item.appendChild(content);
     item.appendChild(close);
-    host.appendChild(item);
+    host.prepend(item);
     activeDownloadEntries.push({ item: item, url: url, anchor: anchor });
     while (activeDownloadEntries.length > 6) {
       var oldest = activeDownloadEntries[0];
       removeDownloadItem(oldest.item, oldest.url);
     }
 
-    // This is only a convenience attempt. The persistent top-bar link is the
-    // authoritative fallback and remains available if the browser blocks the
-    // synthetic click or consumes transient activation elsewhere.
-    if (attemptImmediate) {
-      try { anchor.click(); } catch (error) {
-        console.warn('[NeoTools] Automatic download was blocked; use the top-bar download link.', error);
-      }
-    }
+    // Do not synthesize a click and do not invoke a native save picker here.
+    // The next click is a normal browser DOM activation on this visible link,
+    // outside wxWidgets-WASM's synchronous event-dispatch interlock.
+    try { anchor.focus({ preventScroll: true }); } catch (_) { try { anchor.focus(); } catch (_) {} }
     return true;
   }
 
@@ -271,43 +280,8 @@
     return copy;
   }
 
-  function queueDownloadFromPath(path, name, attemptImmediate) {
-    return queueBrowserDownload(readDownloadBytes(path), name, attemptImmediate);
-  }
-
-  function saveWithFileSystemAccess(requestId, pickerPromise, path, name) {
-    Promise.resolve(pickerPromise).then(function(handle) {
-      return Promise.resolve(handle.createWritable()).then(function(writable) {
-        var bytes = readDownloadBytes(path);
-        return Promise.resolve(writable.write(new Blob([bytes], {
-          type: 'application/octet-stream'
-        }))).then(function() {
-          return writable.close();
-        });
-      });
-    }).then(function() {
-      completeDownloadRequest(requestId, 1, ''); // Saved
-    }).catch(function(error) {
-      if (error && error.name === 'AbortError') {
-        completeDownloadRequest(requestId, 0, ''); // Cancelled
-        return;
-      }
-
-      // Permission/user-activation failures are common when a browser doesn't
-      // fully support the File System Access API. Preserve the result as a real
-      // top-bar download link instead of dropping the user's extracted bytes.
-      try {
-        queueDownloadFromPath(path, name, false);
-        console.warn('[NeoTools] Native Save dialog was unavailable; use the top-bar download link.', error);
-        completeDownloadRequest(requestId, 2, ''); // Ready
-      } catch (fallbackError) {
-        var message = fallbackError && fallbackError.message
-          ? fallbackError.message
-          : String(fallbackError || error || 'Unknown browser download error.');
-        console.error('[NeoTools] Browser save and download fallback failed:', fallbackError);
-        completeDownloadRequest(requestId, 0, message);
-      }
-    });
+  function queueDownloadFromPath(path, name) {
+    return queueBrowserDownload(readDownloadBytes(path), name);
   }
 
   Module.neoToolsBrowserFiles = {
@@ -351,24 +325,8 @@
       var name = safeBrowserFileName(downloadName,
         safeBrowserFileName(String(path || '').split('/').pop(), 'download.bin'));
       try {
-        // Invoke the native picker synchronously while the wx button/menu click
-        // still carries transient user activation, but do not await it inside
-        // the synchronous wx DOM ccall.
-        if (typeof window.showSaveFilePicker === 'function') {
-          var pickerPromise;
-          try {
-            pickerPromise = window.showSaveFilePicker({ suggestedName: name });
-          } catch (pickerError) {
-            queueDownloadFromPath(path, name, false);
-            completeDownloadRequest(requestId, 2, '');
-            return true;
-          }
-          saveWithFileSystemAccess(requestId, pickerPromise, path, name);
-          return true;
-        }
-
-        queueDownloadFromPath(path, name, true);
-        completeDownloadRequest(requestId, 2, '');
+        queueDownloadFromPath(path, name);
+        completeDownloadRequest(requestId, 2, ''); // Ready
         return true;
       } catch (error) {
         var message = error && error.message ? error.message : String(error || 'Unknown browser download error.');
@@ -378,13 +336,15 @@
       }
     },
 
-    // Compatibility path for applications that cannot consume completion yet.
-    // It intentionally exposes a persistent top-bar link instead of claiming
-    // that an automatic download was accepted by the browser.
+    prepareDownloadBytes: function(bytes, downloadName) {
+      var name = safeBrowserFileName(downloadName, 'download.bin');
+      return queueBrowserDownload(bytes, name);
+    },
+
     downloadFile: function(path, downloadName) {
       var name = safeBrowserFileName(downloadName,
         safeBrowserFileName(String(path || '').split('/').pop(), 'download.bin'));
-      return queueDownloadFromPath(path, name, true);
+      return queueDownloadFromPath(path, name);
     }
   };
 
