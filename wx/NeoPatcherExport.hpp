@@ -6,14 +6,18 @@
 
 #include <wx/button.h>
 #include <wx/clipbrd.h>
+#include <wx/choice.h>
 #include <wx/dataobj.h>
 #include <wx/dialog.h>
 #include <wx/radiobut.h>
 #include <wx/statbox.h>
 #include <wx/stattext.h>
 #include <wx/textctrl.h>
+#include <wx/weakref.h>
 
 #include <algorithm>
+#include <cstdint>
+#include <cctype>
 #include <exception>
 #include <filesystem>
 #include <optional>
@@ -27,7 +31,7 @@ namespace wxui {
 // Increment this when the shared patch-export contract changes in a way that
 // every consuming GUI must adopt. Tool repositories use this to fail clearly
 // instead of silently building against a stale, folder-only neoshared checkout.
-inline constexpr unsigned kPatcherExportUiApiVersion = 3u;
+inline constexpr unsigned kPatcherExportUiApiVersion = 4u;
 
 enum class PatcherOutputMode {
     WriteToIni,
@@ -40,9 +44,15 @@ struct PatcherOutputSelection {
 #else
     PatcherOutputMode mode = PatcherOutputMode::WriteToIni;
 #endif
-    // Set only for WriteToIni. Fragment deliberately has no destination before
-    // the preview is generated.
+    // Set only for desktop WriteToIni. Fragment deliberately has no
+    // destination before the preview is generated.
     std::filesystem::path iniPath;
+#if defined(__EMSCRIPTEN__)
+    // Browser Write-to-INI uses an opaque directory-handle session plus the
+    // exact package-relative INI path selected or entered by the user.
+    std::uint32_t browserDirectorySession = 0;
+    std::string browserIniPath;
+#endif
 
     bool writesToIni() const noexcept {
         return mode == PatcherOutputMode::WriteToIni;
@@ -53,7 +63,8 @@ class PatcherOutputDialog final : public wxDialog {
 public:
     PatcherOutputDialog(wxWindow* parent,
                         const std::filesystem::path& initialDirectory = {},
-                        const std::string& defaultFile = "changes.ini")
+                        const std::string& defaultFile = "changes.ini",
+                        bool allowBrowserPackageWrite = false)
         : wxDialog(parent,
                    wxID_ANY,
                    "Patcher Output",
@@ -78,7 +89,6 @@ public:
             wxDefaultPosition,
             wxDefaultSize,
             wxRB_GROUP);
-        writeToIni_->SetValue(true);
         root->Add(writeToIni_, 0, wxLEFT | wxRIGHT | wxTOP, FromDIP(12));
 
         auto* writeDescription = new wxStaticText(
@@ -86,9 +96,42 @@ public:
             wxID_ANY,
             "Select an exact existing or new .ini file. Generated instructions are merged into that file, and required payloads are staged beside it.");
         writeDescription->Wrap(FromDIP(660));
-        root->Add(writeDescription, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(32));
+        root->Add(writeDescription, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(24));
 
         auto* iniBox = new wxStaticBoxSizer(wxVERTICAL, this, "Installer INI");
+#if defined(__EMSCRIPTEN__)
+        browserPackageWriteEnabled_ = allowBrowserPackageWrite;
+        browserDirectorySupported_ = browserPackageWriteEnabled_ &&
+            neobrowser::packageDirectoryAccessSupported();
+#else
+        (void)allowBrowserPackageWrite;
+#endif
+#if defined(__EMSCRIPTEN__)
+        auto* folderRow = new wxBoxSizer(wxHORIZONTAL);
+        browserDirectoryLabel_ = new wxStaticText(
+            iniBox->GetStaticBox(), wxID_ANY, "No installer folder selected.");
+        browseButton_ = new wxButton(
+            iniBox->GetStaticBox(), wxID_ANY, "Select Installer Folder...");
+        folderRow->Add(browserDirectoryLabel_, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(8));
+        folderRow->Add(browseButton_, 0);
+        iniBox->Add(folderRow, 0, wxEXPAND | wxALL, FromDIP(8));
+
+        auto* existingLabel = new wxStaticText(
+            iniBox->GetStaticBox(), wxID_ANY, "Existing INIs in the selected folder:");
+        iniBox->Add(existingLabel, 0, wxLEFT | wxRIGHT | wxTOP, FromDIP(8));
+        browserIniChoice_ = new wxChoice(iniBox->GetStaticBox(), wxID_ANY);
+        browserIniChoice_->SetToolTip(
+            "Existing INIs are shown by package-relative path so same-named files in different option folders remain distinguishable.");
+        iniBox->Add(browserIniChoice_, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(8));
+
+        auto* pathLabel = new wxStaticText(
+            iniBox->GetStaticBox(), wxID_ANY,
+            "Exact package-relative INI path (select one above or enter a new path):");
+        iniBox->Add(pathLabel, 0, wxLEFT | wxRIGHT | wxTOP, FromDIP(8));
+        iniPath_ = new wxTextCtrl(iniBox->GetStaticBox(), wxID_ANY);
+        iniPath_->SetHint("changes.ini, full/changes.ini, or install_lite.ini");
+        iniBox->Add(iniPath_, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(8));
+#else
         auto* iniRow = new wxBoxSizer(wxHORIZONTAL);
         iniPath_ = new wxTextCtrl(
             iniBox->GetStaticBox(),
@@ -102,6 +145,7 @@ public:
         iniRow->Add(iniPath_, 1, wxEXPAND | wxRIGHT, FromDIP(8));
         iniRow->Add(browseButton_, 0);
         iniBox->Add(iniRow, 0, wxEXPAND | wxALL, FromDIP(8));
+#endif
         root->Add(iniBox, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(12));
 
         fragment_ = new wxRadioButton(
@@ -111,20 +155,30 @@ public:
         root->Add(fragment_, 0, wxLEFT | wxRIGHT | wxTOP, FromDIP(12));
 
 #if defined(__EMSCRIPTEN__)
-        // The wxWidgets browser port can import or download individual files,
-        // but it cannot yet perform one atomic installer-directory transaction.
-        // A Write-to-INI export could otherwise download the INI while silently
-        // omitting companion payloads. Keep the audited text-only Fragment flow
-        // available and make the package-aware desktop boundary explicit.
-        writeToIni_->SetValue(false);
-        writeToIni_->Enable(false);
-        fragment_->SetValue(true);
-        auto* browserNote = new wxStaticText(
-            this,
-            wxID_ANY,
-            "Write to INI is disabled in the browser build because an installer INI and its companion payload files must be updated together. Use Fragment here, or use a desktop build for package-aware Write to INI output.");
-        browserNote->Wrap(FromDIP(660));
-        root->Add(browserNote, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP(32));
+        if (browserDirectorySupported_) {
+            writeToIni_->SetValue(true);
+            fragment_->SetValue(false);
+            auto* browserNote = new wxStaticText(
+                this,
+                wxID_ANY,
+                "The browser will request read/write access to one installer folder. NeoTools preflights the selected INI and same-name payloads, writes payloads first, and commits the INI last. The folder remains on your computer; it is not uploaded.");
+            browserNote->Wrap(FromDIP(660));
+            root->Add(browserNote, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP(20));
+        } else {
+            writeToIni_->SetValue(false);
+            writeToIni_->Enable(false);
+            fragment_->SetValue(true);
+            auto* browserNote = new wxStaticText(
+                this,
+                wxID_ANY,
+                browserPackageWriteEnabled_
+                    ? "This browser does not provide writable folder access. Fragment remains available; package-aware Write to INI requires a browser implementing the File System Access directory API or a desktop build."
+                    : "Package-aware Write to INI is not enabled for this exporter in the browser build. Fragment remains available and creates no companion payloads.");
+            browserNote->Wrap(FromDIP(660));
+            root->Add(browserNote, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP(20));
+        }
+#else
+        writeToIni_->SetValue(true);
 #endif
 
         auto* fragmentDescription = new wxStaticText(
@@ -132,19 +186,22 @@ public:
             wxID_ANY,
             "No destination is requested before generation. Fragment mode shows the exact text, creates no payloads, omits [Settings], and never merges into or overwrites an existing INI.");
         fragmentDescription->Wrap(FromDIP(660));
-        root->Add(fragmentDescription, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(32));
+        root->Add(fragmentDescription, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(24));
 
         auto* buttons = CreateStdDialogButtonSizer(wxOK | wxCANCEL);
         root->Add(buttons, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(12));
 
         SetSizer(root);
         root->Fit(this);
-        neowindow::configureResponsiveWindow(*this, wxSize(760, 430), wxSize(520, 340));
+        neowindow::configureResponsiveWindow(*this, wxSize(800, 560), wxSize(540, 380));
         applyTheme(this, currentDarkMode());
 
         writeToIni_->Bind(wxEVT_RADIOBUTTON, &PatcherOutputDialog::onModeChanged, this);
         fragment_->Bind(wxEVT_RADIOBUTTON, &PatcherOutputDialog::onModeChanged, this);
         browseButton_->Bind(wxEVT_BUTTON, &PatcherOutputDialog::onBrowse, this);
+#if defined(__EMSCRIPTEN__)
+        browserIniChoice_->Bind(wxEVT_CHOICE, &PatcherOutputDialog::onBrowserIniChoice, this);
+#endif
         Bind(wxEVT_BUTTON, &PatcherOutputDialog::onAccept, this, wxID_OK);
         updateModeControls();
     }
@@ -154,7 +211,14 @@ public:
         result.mode = fragment_ != nullptr && fragment_->GetValue()
             ? PatcherOutputMode::Fragment
             : PatcherOutputMode::WriteToIni;
-        if (result.writesToIni()) result.iniPath = selectedIni_;
+        if (result.writesToIni()) {
+#if defined(__EMSCRIPTEN__)
+            result.browserDirectorySession = browserDirectorySession_;
+            result.browserIniPath = selectedIniRelative_;
+#else
+            result.iniPath = selectedIni_;
+#endif
+        }
         return result;
     }
 
@@ -164,12 +228,111 @@ private:
     }
 
     void updateModeControls() {
-        const bool enabled = writeToIni_ != nullptr && writeToIni_->GetValue();
-        if (iniPath_ != nullptr) iniPath_->Enable(enabled);
-        if (browseButton_ != nullptr) browseButton_->Enable(enabled);
+        const bool writeSelected = writeToIni_ != nullptr && writeToIni_->GetValue();
+#if defined(__EMSCRIPTEN__)
+        const bool pathEnabled = writeSelected && browserDirectorySupported_ &&
+            browserDirectorySession_ != 0 && !browserDirectoryRequestPending_;
+        if (browserDirectoryLabel_ != nullptr) browserDirectoryLabel_->Enable(writeSelected);
+        if (browserIniChoice_ != nullptr) browserIniChoice_->Enable(pathEnabled);
+        if (iniPath_ != nullptr) iniPath_->Enable(pathEnabled);
+        if (browseButton_ != nullptr) {
+            browseButton_->Enable(
+                writeSelected && browserDirectorySupported_ && !browserDirectoryRequestPending_);
+        }
+#else
+        if (iniPath_ != nullptr) iniPath_->Enable(writeSelected);
+        if (browseButton_ != nullptr) browseButton_->Enable(writeSelected);
+#endif
     }
 
+#if defined(__EMSCRIPTEN__)
+    void completeBrowserDirectory(neobrowser::PackageDirectoryResult result) {
+        browserDirectoryRequestPending_ = false;
+        if (!result.error.empty()) {
+            browserDirectoryLabel_->SetLabel("Installer folder selection failed.");
+            updateModeControls();
+            wxMessageBox(
+                toWx(result.error),
+                "Unable to Select Installer Folder",
+                wxOK | wxICON_ERROR,
+                this);
+            return;
+        }
+        if (result.cancelled()) {
+            browserDirectoryLabel_->SetLabel(
+                browserDirectorySession_ == 0
+                    ? wxString("No installer folder selected.")
+                    : toWx("Selected folder: " + browserDirectoryName_));
+            updateModeControls();
+            return;
+        }
+
+        browserDirectorySession_ = result.sessionId;
+        browserDirectoryName_ = result.displayName.empty()
+            ? std::string("installer folder")
+            : std::move(result.displayName);
+        browserDirectoryLabel_->SetLabel(
+            toWx("Selected folder: " + browserDirectoryName_));
+        browserIniChoice_->Clear();
+        browserIniPaths_ = std::move(result.iniPaths);
+        for (const auto& path : browserIniPaths_) browserIniChoice_->Append(toWx(path));
+
+        std::string selected = defaultFile_;
+        if (!browserIniPaths_.empty()) {
+            auto preferred = std::find_if(
+                browserIniPaths_.begin(), browserIniPaths_.end(),
+                [this](const std::string& path) {
+                    std::string left = path;
+                    std::string right = defaultFile_;
+                    std::transform(left.begin(), left.end(), left.begin(), [](unsigned char ch) {
+                        return static_cast<char>(std::tolower(ch));
+                    });
+                    std::transform(right.begin(), right.end(), right.begin(), [](unsigned char ch) {
+                        return static_cast<char>(std::tolower(ch));
+                    });
+                    return left == right;
+                });
+            const std::size_t index = preferred == browserIniPaths_.end()
+                ? 0u
+                : static_cast<std::size_t>(preferred - browserIniPaths_.begin());
+            browserIniChoice_->SetSelection(static_cast<int>(index));
+            selected = browserIniPaths_[index];
+        }
+        selectedIniRelative_ = neobrowser::normalizePackageRelativePath(selected, true);
+        iniPath_->ChangeValue(toWx(selectedIniRelative_));
+        iniPath_->SetInsertionPointEnd();
+        updateModeControls();
+        Layout();
+    }
+
+    void onBrowserIniChoice(wxCommandEvent&) {
+        const int selection = browserIniChoice_ == nullptr
+            ? wxNOT_FOUND
+            : browserIniChoice_->GetSelection();
+        if (selection == wxNOT_FOUND ||
+            static_cast<std::size_t>(selection) >= browserIniPaths_.size()) {
+            return;
+        }
+        selectedIniRelative_ = browserIniPaths_[static_cast<std::size_t>(selection)];
+        iniPath_->ChangeValue(toWx(selectedIniRelative_));
+        iniPath_->SetInsertionPointEnd();
+    }
+#endif
+
     bool selectIniPath() {
+#if defined(__EMSCRIPTEN__)
+        if (browserDirectoryRequestPending_) return false;
+        browserDirectoryRequestPending_ = true;
+        browserDirectoryLabel_->SetLabel("Selecting and scanning installer folder...");
+        updateModeControls();
+        wxWeakRef<PatcherOutputDialog> weakThis(this);
+        neobrowser::requestPackageDirectory(
+            [weakThis](neobrowser::PackageDirectoryResult result) mutable {
+                if (!weakThis) return;
+                weakThis->completeBrowserDirectory(std::move(result));
+            });
+        return false;
+#else
         const auto selected = choosePatcherIniFile(
             this,
             "Select an existing installer INI or enter a new INI filename",
@@ -182,6 +345,7 @@ private:
         iniPath_->SetValue(neosettings::pathToWx(selectedIni_));
         iniPath_->SetInsertionPointEnd();
         return true;
+#endif
     }
 
     void onBrowse(wxCommandEvent&) {
@@ -189,13 +353,47 @@ private:
     }
 
     void onAccept(wxCommandEvent&) {
-        if (writeToIni_ != nullptr && writeToIni_->GetValue() && selectedIni_.empty()) {
-            wxMessageBox(
-                "Write to INI requires a specific installer .ini file. Select an existing INI or enter a new INI filename.",
-                "Select Installer INI",
-                wxOK | wxICON_INFORMATION,
-                this);
-            if (!selectIniPath()) return;
+        if (writeToIni_ != nullptr && writeToIni_->GetValue()) {
+#if defined(__EMSCRIPTEN__)
+            if (browserDirectoryRequestPending_) {
+                wxMessageBox(
+                    "Wait for installer-folder selection to finish.",
+                    "Installer Folder Selection",
+                    wxOK | wxICON_INFORMATION,
+                    this);
+                return;
+            }
+            if (browserDirectorySession_ == 0) {
+                wxMessageBox(
+                    "Write to INI requires an installer folder. Select the folder containing the target INI, or the folder in which a new INI should be created.",
+                    "Select Installer Folder",
+                    wxOK | wxICON_INFORMATION,
+                    this);
+                (void)selectIniPath();
+                return;
+            }
+            try {
+                selectedIniRelative_ = neobrowser::normalizePackageRelativePath(
+                    toStd(iniPath_->GetValue()), true);
+                iniPath_->ChangeValue(toWx(selectedIniRelative_));
+            } catch (const std::exception& exception) {
+                wxMessageBox(
+                    toWx(exception.what()),
+                    "Invalid Installer INI Path",
+                    wxOK | wxICON_ERROR,
+                    this);
+                return;
+            }
+#else
+            if (selectedIni_.empty()) {
+                wxMessageBox(
+                    "Write to INI requires a specific installer .ini file. Select an existing INI or enter a new INI filename.",
+                    "Select Installer INI",
+                    wxOK | wxICON_INFORMATION,
+                    this);
+                if (!selectIniPath()) return;
+            }
+#endif
         }
         EndModal(wxID_OK);
     }
@@ -207,16 +405,28 @@ private:
     wxRadioButton* fragment_ = nullptr;
     wxTextCtrl* iniPath_ = nullptr;
     wxButton* browseButton_ = nullptr;
+#if defined(__EMSCRIPTEN__)
+    bool browserPackageWriteEnabled_ = false;
+    bool browserDirectorySupported_ = false;
+    bool browserDirectoryRequestPending_ = false;
+    std::uint32_t browserDirectorySession_ = 0;
+    std::string browserDirectoryName_;
+    std::string selectedIniRelative_;
+    std::vector<std::string> browserIniPaths_;
+    wxStaticText* browserDirectoryLabel_ = nullptr;
+    wxChoice* browserIniChoice_ = nullptr;
+#endif
 };
-
 // This is the only selection entry point automatic patch exporters should use.
 // It always presents both output modes and, for Write to INI, returns an exact
 // .ini path rather than a package directory.
 inline std::optional<PatcherOutputSelection> choosePatcherOutput(
     wxWindow* parent,
     const std::filesystem::path& initialDirectory = {},
-    const std::string& defaultFile = "changes.ini") {
-    PatcherOutputDialog dialog(parent, initialDirectory, defaultFile);
+    const std::string& defaultFile = "changes.ini",
+    bool allowBrowserPackageWrite = false) {
+    PatcherOutputDialog dialog(
+        parent, initialDirectory, defaultFile, allowBrowserPackageWrite);
     if (dialog.ShowModal() != wxID_OK) return std::nullopt;
     return dialog.selection();
 }

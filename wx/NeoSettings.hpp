@@ -15,12 +15,26 @@
 #include <sstream>
 #include <string>
 #include <utility>
+#include <unordered_map>
 #include <vector>
 
 namespace neosettings {
 
 constexpr int kMaxRecentFiles = 10;
 constexpr const char* kSharedConfigName = "NeoTools";
+inline constexpr unsigned kRecentFilesApiVersion = 1u;
+
+#if defined(__EMSCRIPTEN__)
+// Browser-selected host files are copied into the process-local Emscripten
+// filesystem. Their virtual paths are valid only until the page is reloaded,
+// so recent-file history is intentionally session-scoped rather than written
+// to wxConfig/localStorage where it would become a stale path on the next run.
+inline std::unordered_map<std::string, std::vector<std::filesystem::path>>&
+browserSessionRecentFilesStore() {
+    static std::unordered_map<std::string, std::vector<std::filesystem::path>> store;
+    return store;
+}
+#endif
 
 inline wxString toWx(const std::string& text) {
     return wxString::FromUTF8(text.c_str());
@@ -416,8 +430,12 @@ public:
 
     std::vector<std::filesystem::path> recentFiles(std::size_t maxItems = kMaxRecentFiles) const {
 #if defined(__EMSCRIPTEN__)
-        (void)maxItems;
-        return {};
+        const auto& store = browserSessionRecentFilesStore();
+        const auto found = store.find(configName_);
+        if (found == store.end()) return {};
+        std::vector<std::filesystem::path> files = found->second;
+        if (files.size() > maxItems) files.resize(maxItems);
+        return files;
 #else
         std::vector<std::filesystem::path> files;
         auto addUnique = [&](const std::filesystem::path& path) {
@@ -458,8 +476,24 @@ public:
     void setRecentFiles(const std::vector<std::filesystem::path>& files,
                         std::size_t maxItems = kMaxRecentFiles) const {
 #if defined(__EMSCRIPTEN__)
-        (void)files;
-        (void)maxItems;
+        if (maxItems == 0) {
+            browserSessionRecentFilesStore().erase(configName_);
+            return;
+        }
+        auto& destination = browserSessionRecentFilesStore()[configName_];
+        destination.clear();
+        for (const auto& file : files) {
+            if (file.empty()) continue;
+            const auto normalized = normalizedPath(file);
+            if (std::find_if(destination.begin(), destination.end(), [&](const auto& existing) {
+                    return samePathForMru(existing, normalized);
+                }) != destination.end()) {
+                continue;
+            }
+            destination.push_back(normalized);
+            if (destination.size() >= maxItems) break;
+        }
+        if (destination.empty()) browserSessionRecentFilesStore().erase(configName_);
         return;
 #else
         wxConfig config(toWx(configName_));
@@ -478,11 +512,6 @@ public:
 
     void addRecentFile(const std::filesystem::path& path,
                        std::size_t maxItems = kMaxRecentFiles) const {
-#if defined(__EMSCRIPTEN__)
-        (void)path;
-        (void)maxItems;
-        return;
-#else
         if (path.empty()) return;
         std::vector<std::filesystem::path> files = recentFiles(maxItems);
         const auto normalized = normalizedPath(path);
@@ -492,26 +521,20 @@ public:
         files.insert(files.begin(), normalized);
         if (files.size() > maxItems) files.resize(maxItems);
         setRecentFiles(files, maxItems);
-#endif
     }
 
     void removeRecentFile(const std::filesystem::path& path,
                           std::size_t maxItems = kMaxRecentFiles) const {
-#if defined(__EMSCRIPTEN__)
-        (void)path;
-        (void)maxItems;
-        return;
-#else
         std::vector<std::filesystem::path> files = recentFiles(maxItems);
         files.erase(std::remove_if(files.begin(), files.end(), [&](const auto& existing) {
             return samePathForMru(existing, path);
         }), files.end());
         setRecentFiles(files, maxItems);
-#endif
     }
 
     void clearRecentFiles() const {
 #if defined(__EMSCRIPTEN__)
+        browserSessionRecentFilesStore().erase(configName_);
         return;
 #else
         wxConfig config(toWx(configName_));
@@ -595,10 +618,20 @@ inline void populateRecentFilesMenu(wxMenu& menu, const AppSettings& settings,
         none->Enable(false);
     } else {
         for (std::size_t i = 0; i < files.size(); ++i) {
+#if defined(__EMSCRIPTEN__)
+            std::string displayPath = pathToUtf8(files[i].filename());
+            if (displayPath.empty()) displayPath = pathToUtf8(files[i]);
+#else
+            const std::string displayPath = pathToUtf8(files[i]);
+#endif
             const std::string label = "&" + std::to_string(i + 1) + " " +
-                                      ellipsizeMiddle(pathToUtf8(files[i]), 72);
+                                      ellipsizeMiddle(displayPath, 72);
             wxMenuItem* item = menu.Append(firstRecentId + static_cast<int>(i), toWx(escapeMenuLabel(label)));
+#if defined(__EMSCRIPTEN__)
+            item->SetHelp(toWx("Reopen this browser-session copy"));
+#else
             item->SetHelp(pathToWx(files[i]));
+#endif
         }
     }
     menu.AppendSeparator();

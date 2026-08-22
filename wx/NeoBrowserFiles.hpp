@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <optional>
@@ -9,7 +10,7 @@
 
 namespace neobrowser {
 
-inline constexpr unsigned kBrowserFileApiVersion = 5u;
+inline constexpr unsigned kBrowserFileApiVersion = 6u;
 
 struct OpenFilesResult {
     std::vector<std::filesystem::path> paths;
@@ -90,6 +91,73 @@ bool prepareDownloadBytes(const void* bytes,
 // action without reporting completion.
 bool downloadFile(const std::filesystem::path& virtualPath,
                   const std::string& downloadName = {});
+
+// Browser package-directory support used by patcher Write-to-INI workflows.
+// The directory handle remains in JavaScript; C++ receives an opaque session
+// ID and works against a process-local mirror before committing the verified
+// files back to the user-selected installer folder.
+bool packageDirectoryAccessSupported();
+
+struct PackageDirectoryResult {
+    std::uint32_t sessionId = 0;
+    std::string displayName;
+    std::vector<std::string> iniPaths;
+    std::string error;
+
+    bool cancelled() const noexcept {
+        return sessionId == 0 && error.empty();
+    }
+};
+
+using PackageDirectoryCallback = std::function<void(PackageDirectoryResult)>;
+
+// Starts a browser directory picker in read/write mode and returns immediately.
+// Existing INIs are returned as package-relative paths so multiple files named
+// changes.ini remain distinguishable.
+void requestPackageDirectory(PackageDirectoryCallback callback);
+
+// Normalizes and validates a portable path relative to the selected installer
+// directory. Backslashes are accepted and normalized to '/'. Absolute paths,
+// empty components, '.'/'..', control characters, and (when requireIni is
+// true) non-INI leaves are rejected.
+std::string normalizePackageRelativePath(std::string path,
+                                         bool requireIni = false);
+
+struct PackageWorkspaceResult {
+    std::uint32_t sessionId = 0;
+    std::filesystem::path workspaceRoot;
+    std::filesystem::path iniPath;
+    std::string relativeIniPath;
+    bool iniExisted = false;
+    std::string error;
+};
+
+using PackageWorkspaceCallback = std::function<void(PackageWorkspaceResult)>;
+
+// Mirrors the selected INI and the named package-relative files into a fresh
+// Emscripten workspace. The callback runs later through wx's event queue.
+void requestPackageWorkspace(std::uint32_t sessionId,
+                             const std::string& relativeIniPath,
+                             const std::vector<std::string>& relativeFiles,
+                             PackageWorkspaceCallback callback);
+
+struct PackageCommitResult {
+    std::size_t filesWritten = 0;
+    std::size_t filesReused = 0;
+    bool iniChanged = false;
+    std::string error;
+};
+
+using PackageCommitCallback = std::function<void(PackageCommitResult)>;
+
+// Commits verified workspace outputs back to the selected installer folder.
+// Existing host files are rechecked against the imported baseline first.
+// Payloads are committed before the INI, and same-content files are retained.
+void requestCommitPackageWorkspace(std::uint32_t sessionId,
+                                   const std::filesystem::path& workspaceRoot,
+                                   const std::string& relativeIniPath,
+                                   const std::vector<std::string>& relativeFiles,
+                                   PackageCommitCallback callback);
 
 // Synchronizes the browser-native wxWidgets controls with the application's
 // theme. The pinned wxWidgets-WASM DOM port scopes its dark CSS under

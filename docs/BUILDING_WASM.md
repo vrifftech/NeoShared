@@ -42,22 +42,28 @@ unchanged.
 The shared browser bridge imports host files into Emscripten's virtual
 filesystem and exposes individual outputs through a prominent, persistent
 **Download <filename>** action above the editor. It does not enter a native
-Save File picker from a wxWidgets event, and it does not provide an atomic,
-writable installer-directory transaction. The browser build therefore:
+Save File picker from a wxWidgets event.
 
-- keeps patcher **Fragment** preview/copy/download available;
-- disables package-aware **Write to INI**, which must update the selected INI
-  and all companion payloads together;
-- disables installed-game-directory scanning;
-- disables directory-wide export and extraction, including NeoERF's
-  multi-resource extraction command;
-- reports that an output is ready only after the browser download action has
-  been created; the user completes the transfer with a normal browser link
-  click.
+For exporters that explicitly opt in, package-aware **Write to INI** uses the
+browser File System Access directory API:
 
-These are deliberate fail-closed boundaries, not silent partial exports. A
-future ZIP-based package workspace or browser File System Access integration
-can add those workflows without weakening the existing desktop semantics.
+1. the user grants read/write access to one installer folder;
+2. existing INIs are listed by exact package-relative path;
+3. the selected INI, same-name payloads, and `info.rtf` are copied into a fresh
+   virtual preflight workspace;
+4. the existing audited C++ merge and payload logic runs against that workspace;
+5. the browser rechecks the host files for concurrent changes;
+6. unchanged files are reused, payloads are written before the INI, and the INI
+   is committed last.
+
+The folder remains on the user's computer and is not uploaded. Browsers without
+writable directory access, and exporters that have not adopted the package
+transaction, remain fail-closed in **Fragment** mode. Fragment still creates no
+payloads, omits `[Settings]`, and never merges into an existing INI.
+
+Installed-game-directory scanning and unrestricted directory-wide operations
+remain unavailable. Individual browser downloads continue through the visible
+Download action above the editor.
 
 ## Autoconf wrapper permissions
 
@@ -103,3 +109,9 @@ resources. The first hosted Pages run is the authoritative Emscripten compile
 and link check. After it succeeds, manually open the deployed site and exercise
 Open, Save/download, clipboard, modal dialogs, large-document interaction, and
 Fragment output in a supported browser.
+
+## Browser recent files
+
+Recent-file menus retain imported virtual files only for the current page session.
+Reloading the page clears the list because browsers do not expose reusable host paths,
+and shared code does not silently persist user file contents.

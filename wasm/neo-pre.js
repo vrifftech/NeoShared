@@ -7,6 +7,8 @@
   var persistentRoot = '/home/web_user/.config/neotools';
   var syncing = false;
   var browserFileSequence = 0;
+  var packageDirectorySequence = 0;
+  var packageDirectorySessions = new Map();
 
   function safeBrowserFileName(name, fallback) {
     var value = String(name || '').replace(/[\\/\u0000-\u001f\u007f]/g, '_').trim();
@@ -117,6 +119,470 @@
       }
     }, 0);
   }
+
+
+  function completePackageDirectoryRequest(requestId, sessionId, displayName, iniPaths, error) {
+    window.setTimeout(function() {
+      try {
+        if (!Module.ccall) throw new Error('Emscripten ccall is unavailable.');
+        Module.ccall(
+          'neo_browser_package_directory_completed',
+          null,
+          ['number', 'number', 'string', 'string', 'string'],
+          [requestId, sessionId || 0, displayName || '', (iniPaths || []).join('\n'), error || '']);
+      } catch (callbackError) {
+        console.error('[NeoTools] Browser package-directory callback failed:', callbackError);
+      }
+    }, 0);
+  }
+
+  function completePackageWorkspaceRequest(requestId, result, error) {
+    result = result || {};
+    window.setTimeout(function() {
+      try {
+        if (!Module.ccall) throw new Error('Emscripten ccall is unavailable.');
+        Module.ccall(
+          'neo_browser_package_workspace_completed',
+          null,
+          ['number', 'number', 'string', 'string', 'string', 'number', 'string'],
+          [requestId,
+           result.sessionId || 0,
+           result.workspaceRoot || '',
+           result.iniPath || '',
+           result.relativeIniPath || '',
+           result.iniExisted ? 1 : 0,
+           error || '']);
+      } catch (callbackError) {
+        console.error('[NeoTools] Browser package-workspace callback failed:', callbackError);
+      }
+    }, 0);
+  }
+
+  function completePackageCommitRequest(requestId, result, error) {
+    result = result || {};
+    window.setTimeout(function() {
+      try {
+        if (!Module.ccall) throw new Error('Emscripten ccall is unavailable.');
+        Module.ccall(
+          'neo_browser_package_commit_completed',
+          null,
+          ['number', 'number', 'number', 'number', 'string'],
+          [requestId,
+           result.filesWritten || 0,
+           result.filesReused || 0,
+           result.iniChanged ? 1 : 0,
+           error || '']);
+      } catch (callbackError) {
+        console.error('[NeoTools] Browser package-commit callback failed:', callbackError);
+      }
+    }, 0);
+  }
+
+  function packageDirectorySupported() {
+    return typeof window !== 'undefined' &&
+      window.isSecureContext === true &&
+      typeof window.showDirectoryPicker === 'function';
+  }
+
+  function normalizePackageRelativePath(value, requireIni) {
+    var source = String(value || '').replace(/\\/g, '/').trim();
+    if (!source) throw new Error('Package-relative path must not be empty.');
+    if (source.charAt(0) === '/' || /^[A-Za-z]:/.test(source)) {
+      throw new Error('Package paths must be relative to the selected installer folder.');
+    }
+    var components = source.split('/');
+    for (var index = 0; index < components.length; ++index) {
+      var component = components[index];
+      if (!component || component === '.' || component === '..') {
+        throw new Error('Package paths must not contain empty, current, or parent components.');
+      }
+      if (component.indexOf(':') !== -1) {
+        throw new Error('Package paths must not contain a colon.');
+      }
+      if (/[\u0000-\u001f\u007f]/.test(component)) {
+        throw new Error('Package paths must not contain control characters.');
+      }
+    }
+    var result = components.join('/');
+    if (requireIni) {
+      var leaf = components[components.length - 1];
+      var dot = leaf.lastIndexOf('.');
+      if (dot < 0) result += '.ini';
+      else if (leaf.substring(dot).toLowerCase() !== '.ini') {
+        throw new Error('The selected installer configuration must use the .ini extension.');
+      }
+    }
+    return result;
+  }
+
+  function parsePackagePathPayload(payload) {
+    var values = String(payload || '').split('\n');
+    var result = [];
+    var seen = Object.create(null);
+    for (var index = 0; index < values.length; ++index) {
+      if (!values[index]) continue;
+      var normalized = normalizePackageRelativePath(values[index], false);
+      var key = normalized.toLowerCase();
+      if (seen[key]) continue;
+      seen[key] = true;
+      result.push(normalized);
+    }
+    return result;
+  }
+
+  function bytesEqual(left, right) {
+    if (!left || !right || left.length !== right.length) return false;
+    for (var index = 0; index < left.length; ++index) {
+      if (left[index] !== right[index]) return false;
+    }
+    return true;
+  }
+
+  function copyBytes(bytes) {
+    var copy = new Uint8Array(bytes ? bytes.length : 0);
+    if (bytes && bytes.length) copy.set(bytes);
+    return copy;
+  }
+
+  async function ensurePackagePermission(handle) {
+    if (!handle) throw new Error('The selected installer folder is unavailable.');
+    var options = { mode: 'readwrite' };
+    if (typeof handle.queryPermission === 'function') {
+      var state = await handle.queryPermission(options);
+      if (state === 'granted') return;
+    }
+    if (typeof handle.requestPermission === 'function') {
+      var requested = await handle.requestPermission(options);
+      if (requested === 'granted') return;
+    }
+    throw new Error('Read/write permission for the selected installer folder was not granted.');
+  }
+
+  async function collectPackageIniPaths(directoryHandle, prefix, result, state, depth) {
+    if (depth > 20) throw new Error('The selected installer folder is nested too deeply.');
+    for await (var entry of directoryHandle.entries()) {
+      state.entries += 1;
+      if (state.entries > 20000) {
+        throw new Error('The selected installer folder contains too many entries to scan safely.');
+      }
+      var name = entry[0];
+      var handle = entry[1];
+      if (/[\u0000-\u001f\u007f]/.test(name)) continue;
+      var relative = prefix ? prefix + '/' + name : name;
+      if (handle.kind === 'file') {
+        if (/\.ini$/i.test(name)) result.push(relative);
+      } else if (handle.kind === 'directory') {
+        await collectPackageIniPaths(handle, relative, result, state, depth + 1);
+      }
+    }
+  }
+
+  async function findPackageChild(directoryHandle, requestedName, expectedKind) {
+    var exact = null;
+    try {
+      exact = expectedKind === 'directory'
+        ? await directoryHandle.getDirectoryHandle(requestedName, { create: false })
+        : await directoryHandle.getFileHandle(requestedName, { create: false });
+    } catch (error) {
+      if (!error || (error.name !== 'NotFoundError' && error.name !== 'TypeMismatchError')) throw error;
+    }
+    if (exact) return { name: requestedName, handle: exact };
+
+    var lower = requestedName.toLowerCase();
+    var match = null;
+    for await (var entry of directoryHandle.entries()) {
+      if (entry[0].toLowerCase() !== lower || entry[1].kind !== expectedKind) continue;
+      if (match) {
+        throw new Error('The package directory contains ambiguous case-insensitive names for ' + requestedName + '.');
+      }
+      match = { name: entry[0], handle: entry[1] };
+    }
+    return match;
+  }
+
+  async function resolvePackageFile(rootHandle, relativePath, createParents) {
+    var normalized = normalizePackageRelativePath(relativePath, false);
+    var components = normalized.split('/');
+    var directory = rootHandle;
+    var actualComponents = [];
+    for (var index = 0; index + 1 < components.length; ++index) {
+      var foundDirectory = await findPackageChild(directory, components[index], 'directory');
+      if (foundDirectory) {
+        directory = foundDirectory.handle;
+        actualComponents.push(foundDirectory.name);
+      } else if (createParents) {
+        directory = await directory.getDirectoryHandle(components[index], { create: true });
+        actualComponents.push(components[index]);
+      } else {
+        return {
+          exists: false,
+          parentHandle: null,
+          requestedName: components[components.length - 1],
+          actualPath: normalized,
+          relativePath: normalized
+        };
+      }
+    }
+
+    var requestedName = components[components.length - 1];
+    var foundFile = await findPackageChild(directory, requestedName, 'file');
+    if (!foundFile) {
+      return {
+        exists: false,
+        parentHandle: directory,
+        requestedName: requestedName,
+        actualPath: actualComponents.concat([requestedName]).join('/'),
+        relativePath: normalized
+      };
+    }
+    return {
+      exists: true,
+      parentHandle: directory,
+      fileHandle: foundFile.handle,
+      requestedName: requestedName,
+      actualName: foundFile.name,
+      actualPath: actualComponents.concat([foundFile.name]).join('/'),
+      relativePath: normalized
+    };
+  }
+
+  async function readPackageFile(rootHandle, relativePath) {
+    var resolved = await resolvePackageFile(rootHandle, relativePath, false);
+    if (!resolved.exists) {
+      resolved.bytes = null;
+      return resolved;
+    }
+    var file = await resolved.fileHandle.getFile();
+    resolved.bytes = new Uint8Array(await file.arrayBuffer());
+    return resolved;
+  }
+
+  function writePackageWorkspaceFile(workspaceRoot, relativePath, bytes) {
+    var normalized = normalizePackageRelativePath(relativePath, false);
+    var fullPath = workspaceRoot + '/' + normalized;
+    var slash = fullPath.lastIndexOf('/');
+    if (slash > 0) FS.mkdirTree(fullPath.substring(0, slash));
+    FS.writeFile(fullPath, bytes);
+    return fullPath;
+  }
+
+  async function writePackageHostFile(rootHandle, relativePath, bytes) {
+    var resolved = await resolvePackageFile(rootHandle, relativePath, true);
+    var existed = resolved.exists;
+    var handle = existed
+      ? resolved.fileHandle
+      : await resolved.parentHandle.getFileHandle(resolved.requestedName, { create: true });
+    var writable = null;
+    try {
+      writable = await handle.createWritable();
+      await writable.write(bytes);
+      await writable.close();
+    } catch (error) {
+      if (writable) {
+        try { await writable.abort(); } catch (_) {}
+      }
+      // getFileHandle({ create: true }) can create the directory entry before
+      // createWritable(), write(), or close() succeeds. Remove that partial
+      // entry immediately so the outer transaction can roll back cleanly.
+      if (!existed && resolved.parentHandle) {
+        try { await resolved.parentHandle.removeEntry(resolved.requestedName); } catch (_) {}
+      }
+      throw error;
+    }
+    return {
+      created: !existed,
+      parentHandle: resolved.parentHandle,
+      name: existed ? resolved.actualName : resolved.requestedName
+    };
+  }
+
+  async function removeCreatedPackageFiles(created) {
+    for (var index = created.length - 1; index >= 0; --index) {
+      try {
+        await created[index].parentHandle.removeEntry(created[index].name);
+      } catch (error) {
+        console.warn('[NeoTools] Unable to roll back package file ' + created[index].name + ':', error);
+      }
+    }
+  }
+
+  async function choosePackageDirectory() {
+    if (!packageDirectorySupported()) {
+      throw new Error('Writable installer-folder selection requires a browser with the File System Access API.');
+    }
+    var handle = await window.showDirectoryPicker({
+      id: 'neotools-tslpatcher-package',
+      mode: 'readwrite'
+    });
+    await ensurePackagePermission(handle);
+    var iniPaths = [];
+    await collectPackageIniPaths(handle, '', iniPaths, { entries: 0 }, 0);
+    iniPaths.sort(function(left, right) {
+      return left.localeCompare(right, undefined, { sensitivity: 'base', numeric: true });
+    });
+    packageDirectorySequence += 1;
+    var sessionId = packageDirectorySequence;
+    packageDirectorySessions.set(sessionId, {
+      handle: handle,
+      displayName: handle.name || 'installer folder',
+      transaction: null
+    });
+    return { sessionId: sessionId, displayName: handle.name || 'installer folder', iniPaths: iniPaths };
+  }
+
+  async function preparePackageWorkspace(sessionId, relativeIniPath, relativeFilesPayload) {
+    if (typeof FS === 'undefined') throw new Error('Emscripten filesystem is unavailable.');
+    var session = packageDirectorySessions.get(Number(sessionId));
+    if (!session) throw new Error('The selected installer-folder session has expired. Select it again.');
+    await ensurePackagePermission(session.handle);
+
+    var iniPath = normalizePackageRelativePath(relativeIniPath, true);
+    var paths = parsePackagePathPayload(relativeFilesPayload);
+    var iniKey = iniPath.toLowerCase();
+    if (!paths.some(function(path) { return path.toLowerCase() === iniKey; })) paths.push(iniPath);
+
+    var workspaceRoot = uniqueBrowserDirectory('package');
+    var baselines = new Map();
+    var seen = Object.create(null);
+    var iniExisted = false;
+    for (var index = 0; index < paths.length; ++index) {
+      var normalized = normalizePackageRelativePath(paths[index], false);
+      var key = normalized.toLowerCase();
+      if (seen[key]) continue;
+      seen[key] = true;
+      var host = await readPackageFile(session.handle, normalized);
+      var baseline = {
+        relativePath: normalized,
+        exists: !!host.exists,
+        actualPath: host.actualPath || normalized,
+        bytes: host.exists ? copyBytes(host.bytes) : null
+      };
+      baselines.set(key, baseline);
+      if (host.exists) writePackageWorkspaceFile(workspaceRoot, normalized, host.bytes);
+      if (key === iniKey) iniExisted = host.exists;
+    }
+
+    session.transaction = {
+      workspaceRoot: workspaceRoot,
+      relativeIniPath: iniPath,
+      baselines: baselines
+    };
+    return {
+      sessionId: Number(sessionId),
+      workspaceRoot: workspaceRoot,
+      iniPath: workspaceRoot + '/' + iniPath,
+      relativeIniPath: iniPath,
+      iniExisted: iniExisted
+    };
+  }
+
+  async function commitPackageWorkspace(sessionId, workspaceRoot, relativeIniPath, relativeFilesPayload) {
+    if (typeof FS === 'undefined') throw new Error('Emscripten filesystem is unavailable.');
+    var session = packageDirectorySessions.get(Number(sessionId));
+    if (!session || !session.transaction) {
+      throw new Error('The installer-package transaction has expired. Select the folder again.');
+    }
+    var transaction = session.transaction;
+    // Detach the transaction immediately so imported host-file baselines are
+    // released after this commit attempt, whether it succeeds or fails. A new
+    // export always performs a fresh preflight before writing anything.
+    session.transaction = null;
+    var normalizedRoot = String(workspaceRoot || '').replace(/\/+$/, '');
+    var iniPath = normalizePackageRelativePath(relativeIniPath, true);
+    if (normalizedRoot !== transaction.workspaceRoot || iniPath !== transaction.relativeIniPath) {
+      throw new Error('The installer-package transaction no longer matches the selected output.');
+    }
+    await ensurePackagePermission(session.handle);
+
+    var paths = parsePackagePathPayload(relativeFilesPayload);
+    var iniKey = iniPath.toLowerCase();
+    if (!paths.some(function(path) { return path.toLowerCase() === iniKey; })) paths.push(iniPath);
+
+    var plans = [];
+    var seen = Object.create(null);
+    for (var index = 0; index < paths.length; ++index) {
+      var relative = normalizePackageRelativePath(paths[index], false);
+      var key = relative.toLowerCase();
+      if (seen[key]) continue;
+      seen[key] = true;
+      var baseline = transaction.baselines.get(key);
+      if (!baseline) {
+        throw new Error('The package output was not included in the verified preflight: ' + relative);
+      }
+      var virtualPath = normalizedRoot + '/' + relative;
+      var generated;
+      try {
+        generated = FS.readFile(virtualPath, { encoding: 'binary' });
+      } catch (error) {
+        throw new Error('The generated package file is missing: ' + relative);
+      }
+      generated = copyBytes(generated);
+
+      var current = await readPackageFile(session.handle, relative);
+      if (baseline.exists) {
+        if (!current.exists || !bytesEqual(current.bytes, baseline.bytes)) {
+          throw new Error('The installer package changed while NeoTools was generating output: ' + relative);
+        }
+      } else if (current.exists) {
+        throw new Error('A new package file appeared while NeoTools was generating output: ' + relative);
+      }
+
+      var isIni = key === iniKey;
+      if (!isIni && current.exists && !bytesEqual(current.bytes, generated)) {
+        throw new Error('The package already contains a different payload named ' + relative + '.');
+      }
+      plans.push({
+        relativePath: relative,
+        key: key,
+        isIni: isIni,
+        generated: generated,
+        current: current
+      });
+    }
+
+    plans.sort(function(left, right) {
+      if (left.isIni === right.isIni) return left.relativePath.localeCompare(right.relativePath);
+      return left.isIni ? 1 : -1;
+    });
+
+    var filesWritten = 0;
+    var filesReused = 0;
+    var iniChanged = false;
+    var created = [];
+    try {
+      for (var planIndex = 0; planIndex < plans.length; ++planIndex) {
+        var plan = plans[planIndex];
+        if (plan.current.exists && bytesEqual(plan.current.bytes, plan.generated)) {
+          filesReused += 1;
+          continue;
+        }
+        var writeResult = await writePackageHostFile(
+          session.handle, plan.relativePath, plan.generated);
+        if (writeResult.created) created.push(writeResult);
+        filesWritten += 1;
+        if (plan.isIni) iniChanged = true;
+      }
+    } catch (error) {
+      await removeCreatedPackageFiles(created);
+      throw error;
+    }
+
+    for (var updateIndex = 0; updateIndex < plans.length; ++updateIndex) {
+      var updated = plans[updateIndex];
+      transaction.baselines.set(updated.key, {
+        relativePath: updated.relativePath,
+        exists: true,
+        actualPath: updated.relativePath,
+        bytes: copyBytes(updated.generated)
+      });
+    }
+    return {
+      filesWritten: filesWritten,
+      filesReused: filesReused,
+      iniChanged: iniChanged
+    };
+  }
+
 
 
   var activeDownloadEntries = [];
@@ -345,6 +811,89 @@
       var name = safeBrowserFileName(downloadName,
         safeBrowserFileName(String(path || '').split('/').pop(), 'download.bin'));
       return queueDownloadFromPath(path, name);
+    },
+
+    packageDirectorySupported: function() {
+      return packageDirectorySupported();
+    },
+
+    requestPackageDirectory: function(requestId) {
+      try {
+        var selectionPromise = choosePackageDirectory();
+        Promise.resolve(selectionPromise).then(
+          function(result) {
+            completePackageDirectoryRequest(
+              requestId, result.sessionId, result.displayName, result.iniPaths, '');
+          },
+          function(error) {
+            if (error && error.name === 'AbortError') {
+              completePackageDirectoryRequest(requestId, 0, '', [], '');
+              return;
+            }
+            var message = error && error.message
+              ? error.message
+              : String(error || 'Unknown installer-folder error.');
+            console.error('[NeoTools] Installer-folder selection failed:', error);
+            completePackageDirectoryRequest(requestId, 0, '', [], message);
+          });
+        return true;
+      } catch (error) {
+        var message = error && error.message
+          ? error.message
+          : String(error || 'Unknown installer-folder error.');
+        console.error('[NeoTools] Installer-folder request failed:', error);
+        completePackageDirectoryRequest(requestId, 0, '', [], message);
+        return true;
+      }
+    },
+
+    requestPackageWorkspace: function(requestId, sessionId, relativeIniPath, relativeFiles) {
+      try {
+        var workspacePromise = preparePackageWorkspace(
+          sessionId, relativeIniPath, relativeFiles);
+        Promise.resolve(workspacePromise).then(
+          function(result) { completePackageWorkspaceRequest(requestId, result, ''); },
+          function(error) {
+            var message = error && error.message
+              ? error.message
+              : String(error || 'Unknown installer-package preflight error.');
+            console.error('[NeoTools] Installer-package preflight failed:', error);
+            completePackageWorkspaceRequest(requestId, { sessionId: sessionId }, message);
+          });
+        return true;
+      } catch (error) {
+        var message = error && error.message
+          ? error.message
+          : String(error || 'Unknown installer-package preflight error.');
+        console.error('[NeoTools] Installer-package preflight request failed:', error);
+        completePackageWorkspaceRequest(requestId, { sessionId: sessionId }, message);
+        return true;
+      }
+    },
+
+    requestCommitPackageWorkspace: function(
+        requestId, sessionId, workspaceRoot, relativeIniPath, relativeFiles) {
+      try {
+        var commitPromise = commitPackageWorkspace(
+          sessionId, workspaceRoot, relativeIniPath, relativeFiles);
+        Promise.resolve(commitPromise).then(
+          function(result) { completePackageCommitRequest(requestId, result, ''); },
+          function(error) {
+            var message = error && error.message
+              ? error.message
+              : String(error || 'Unknown installer-package commit error.');
+            console.error('[NeoTools] Installer-package commit failed:', error);
+            completePackageCommitRequest(requestId, {}, message);
+          });
+        return true;
+      } catch (error) {
+        var message = error && error.message
+          ? error.message
+          : String(error || 'Unknown installer-package commit error.');
+        console.error('[NeoTools] Installer-package commit request failed:', error);
+        completePackageCommitRequest(requestId, {}, message);
+        return true;
+      }
     }
   };
 
