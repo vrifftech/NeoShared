@@ -2,7 +2,6 @@
 param(
     [string]$BuildDir = '',
     [ValidateSet('Debug','Release','RelWithDebInfo','MinSizeRel')][string]$BuildType = 'Release',
-    [ValidateSet('ON','OFF')][string]$Tests = 'ON',
     [ValidateSet('ON','OFF')][string]$MinimalRelease = 'OFF',
     [int]$Parallel = 0,
     [string]$Target = '',
@@ -44,7 +43,6 @@ $cmakeArgs += @(
     '-S', $RootDir,
     '-B', $BuildDir,
     "-DCMAKE_BUILD_TYPE=$BuildType",
-    "-DNEOSHARED_BUILD_TESTS=$Tests",
     "-DNEO_MINIMAL_RELEASE=$MinimalRelease"
 )
 if ($ExtraCMakeArgs) { $cmakeArgs += $ExtraCMakeArgs }

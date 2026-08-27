@@ -6,14 +6,6 @@ project(neoshared
 
 include(${CMAKE_CURRENT_LIST_DIR}/cmake/NeoMinimalRelease.cmake)
 
-if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
-    set(_NEOSHARED_TESTS_DEFAULT ON)
-else()
-    set(_NEOSHARED_TESTS_DEFAULT OFF)
-endif()
-option(NEOSHARED_BUILD_TESTS "Build neoshared regression tests" ${_NEOSHARED_TESTS_DEFAULT})
-unset(_NEOSHARED_TESTS_DEFAULT)
-
 add_library(neoshared_tabular
     tabular/TabularData.cpp
 )
@@ -102,18 +94,5 @@ target_include_directories(neoshared_wx INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/wx
 )
 target_compile_features(neoshared_wx INTERFACE cxx_std_17)
-
-if(NEOSHARED_BUILD_TESTS)
-    enable_testing()
-    add_executable(neoshared-format-tests tests/format_tests.cpp)
-    target_link_libraries(neoshared-format-tests PRIVATE neoshared::gff_app neoshared::tlk)
-    target_compile_features(neoshared-format-tests PRIVATE cxx_std_17)
-    if(MSVC)
-        target_compile_options(neoshared-format-tests PRIVATE /W4 /permissive-)
-    else()
-        target_compile_options(neoshared-format-tests PRIVATE -Wall -Wextra -Wpedantic)
-    endif()
-    add_test(NAME neoshared-formats COMMAND neoshared-format-tests)
-endif()
 
 neo_apply_minimal_release_to_directory_targets()

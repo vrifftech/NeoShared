@@ -22,6 +22,7 @@
 #include <wx/spinctrl.h>
 #include <wx/treectrl.h>
 #include <wx/wupdlock.h>
+#include <wx/weakref.h>
 
 #if defined(__WXMSW__) && !wxCHECK_VERSION(3, 3, 3)
 #error "Neo Tools Windows GUIs require wxWidgets 3.3.3 or newer. Use the neoshared vcpkg overlay."
@@ -551,15 +552,18 @@ inline void requestOpenFile(
     if (!callback) return;
 #if defined(__EMSCRIPTEN__)
     (void)initialDirectory;
+    wxWeakRef<wxWindow> weakParent(parent);
     neobrowser::requestOpenFiles(
         title,
         detail::wildcardToBrowserAccept(wildcard),
         false,
-        [parent, callback = std::move(callback)](neobrowser::OpenFilesResult result) mutable {
-            if (parent != nullptr && parent->IsBeingDeleted()) return;
+        [weakParent, hadParent = parent != nullptr,
+         callback = std::move(callback)](neobrowser::OpenFilesResult result) mutable {
+            if (hadParent && !weakParent) return;
+            wxWindow* owner = weakParent.get();
             if (!result.error.empty()) {
                 wxMessageBox(toWx(result.error), "File Open Error",
-                             wxOK | wxICON_ERROR, parent);
+                             wxOK | wxICON_ERROR, owner);
                 return;
             }
             if (result.paths.empty()) {
@@ -590,15 +594,18 @@ inline void requestOpenFiles(
     if (!callback) return;
 #if defined(__EMSCRIPTEN__)
     (void)initialDirectory;
+    wxWeakRef<wxWindow> weakParent(parent);
     neobrowser::requestOpenFiles(
         title,
         detail::wildcardToBrowserAccept(wildcard),
         true,
-        [parent, callback = std::move(callback)](neobrowser::OpenFilesResult result) mutable {
-            if (parent != nullptr && parent->IsBeingDeleted()) return;
+        [weakParent, hadParent = parent != nullptr,
+         callback = std::move(callback)](neobrowser::OpenFilesResult result) mutable {
+            if (hadParent && !weakParent) return;
+            wxWindow* owner = weakParent.get();
             if (!result.error.empty()) {
                 wxMessageBox(toWx(result.error), "File Open Error",
-                             wxOK | wxICON_ERROR, parent);
+                             wxOK | wxICON_ERROR, owner);
                 return;
             }
             callback(std::move(result.paths));
@@ -622,13 +629,10 @@ inline std::optional<std::filesystem::path> chooseSaveFile(wxWindow* parent,
                                                            const std::string& defaultFile = {}) {
 #if defined(__EMSCRIPTEN__)
     (void)parent;
+    const std::string extension = detail::firstWildcardExtension(wildcard);
     auto selected = neobrowser::chooseSaveFile(
-        title, defaultFile.empty() ? "download.bin" : defaultFile);
+        title, defaultFile.empty() ? "download.bin" : defaultFile, extension);
     if (!selected) return std::nullopt;
-    if (selected->extension().empty()) {
-        const std::string extension = detail::firstWildcardExtension(wildcard);
-        if (!extension.empty()) *selected += extension;
-    }
     return selected;
 #else
     wxFileDialog dialog(parent, toWx(title), wxEmptyString, toWx(defaultFile), toWx(wildcard),
@@ -646,7 +650,7 @@ inline std::optional<std::filesystem::path> choosePatcherIniFile(
 #if defined(__EMSCRIPTEN__)
     (void)initialDirectory;
     auto selected = neobrowser::chooseSaveFile(
-        title, defaultFile.empty() ? "changes.ini" : defaultFile);
+        title, defaultFile.empty() ? "changes.ini" : defaultFile, ".ini");
     if (!selected) return std::nullopt;
 #else
     wxFileDialog dialog(
@@ -658,8 +662,8 @@ inline std::optional<std::filesystem::path> choosePatcherIniFile(
         wxFD_SAVE);
     if (dialog.ShowModal() != wxID_OK) return std::nullopt;
     std::optional<std::filesystem::path> selected = neosettings::pathFromWx(dialog.GetPath());
-#endif
     if (selected->extension().empty()) *selected += ".ini";
+#endif
     std::string extension = neosettings::pathToUtf8(selected->extension());
     std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char ch) {
         return static_cast<char>(std::tolower(ch));

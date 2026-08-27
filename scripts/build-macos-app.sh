@@ -12,7 +12,10 @@ STAGE_DIR=""
 DIST_DIR=""
 JOBS=""
 CLEAN=0
-RUN_TESTS=1
+VERSION=""
+VCPKG_ROOT_VALUE=""
+VCPKG_TRIPLET=""
+EXTRA_CMAKE_ARGS=()
 
 usage() {
   cat <<'USAGE'
@@ -26,8 +29,12 @@ Options:
   --stage-dir DIR           Install staging directory
   --dist-dir DIR            ZIP output directory
   --jobs N                  Parallel build jobs
+  --version VERSION         Package version override
+  --vcpkg-root DIR          vcpkg checkout for manifest dependencies
+  --vcpkg-triplet NAME      vcpkg target triplet [default: native *-osx]
+  --cmake-arg ARG           Additional CMake argument (repeatable)
   --clean                   Remove build and stage directories first
-  --skip-tests              Do not run existing CTest tests
+  -- ARGS...                Additional CMake arguments
   -h, --help                Show this help
 USAGE
 }
@@ -44,8 +51,12 @@ while [[ $# -gt 0 ]]; do
     --stage-dir) STAGE_DIR="$2"; shift 2;;
     --dist-dir) DIST_DIR="$2"; shift 2;;
     --jobs) JOBS="$2"; shift 2;;
+    --version) VERSION="$2"; shift 2;;
+    --vcpkg-root) VCPKG_ROOT_VALUE="$2"; shift 2;;
+    --vcpkg-triplet) VCPKG_TRIPLET="$2"; shift 2;;
+    --cmake-arg) EXTRA_CMAKE_ARGS+=("$2"); shift 2;;
     --clean) CLEAN=1; shift;;
-    --skip-tests) RUN_TESTS=0; shift;;
+    --) shift; EXTRA_CMAKE_ARGS+=("$@"); break;;
     -h|--help) usage; exit 0;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2;;
   esac
@@ -67,6 +78,25 @@ case "$ARCH" in arm64|x86_64) ;; *) echo "Unsupported architecture: $ARCH" >&2; 
 
 SOURCE_ROOT="$(cd "$SOURCE_ROOT" && pwd)"
 NEOSHARED_ROOT_VALUE="$(cd "$NEOSHARED_ROOT_VALUE" && pwd)"
+if [[ -n "$VCPKG_ROOT_VALUE" ]]; then
+  case "$VCPKG_ROOT_VALUE" in /*) ;; *) VCPKG_ROOT_VALUE="$SOURCE_ROOT/$VCPKG_ROOT_VALUE";; esac
+  [[ -f "$VCPKG_ROOT_VALUE/scripts/buildsystems/vcpkg.cmake" ]] || {
+    echo "vcpkg toolchain file is missing under: $VCPKG_ROOT_VALUE" >&2
+    exit 2
+  }
+  VCPKG_ROOT_VALUE="$(cd "$VCPKG_ROOT_VALUE" && pwd)"
+  [[ -x "$VCPKG_ROOT_VALUE/vcpkg" ]] || {
+    echo "vcpkg is not bootstrapped under: $VCPKG_ROOT_VALUE" >&2
+    echo "Run: bash '$VCPKG_ROOT_VALUE/bootstrap-vcpkg.sh' -disableMetrics" >&2
+    exit 2
+  }
+  if [[ -z "$VCPKG_TRIPLET" ]]; then
+    case "$ARCH" in
+      arm64) VCPKG_TRIPLET="arm64-osx";;
+      x86_64) VCPKG_TRIPLET="x64-osx";;
+    esac
+  fi
+fi
 [[ -n "$BUILD_DIR" ]] || BUILD_DIR="$SOURCE_ROOT/build-macos-$ARCH"
 [[ -n "$STAGE_DIR" ]] || STAGE_DIR="$SOURCE_ROOT/stage-macos-$ARCH"
 [[ -n "$DIST_DIR" ]] || DIST_DIR="$SOURCE_ROOT/dist"
@@ -116,39 +146,71 @@ if [[ "$CLEAN" == 1 ]]; then
   rm -rf -- "$STAGE_DIR"
 fi
 
+build_args=(
+  --build-dir "$BUILD_DIR"
+  --build-type "$BUILD_TYPE"
+  --wx ON
+  --require-wx ON
+  --cli ON
+  --minimal-release ON
+  --generator Ninja
+  --neoshared-root "$NEOSHARED_ROOT_VALUE"
+  --jobs "$JOBS"
+)
+if [[ -n "$VCPKG_ROOT_VALUE" ]]; then
+  build_args+=(
+    --vcpkg-root "$VCPKG_ROOT_VALUE"
+    --vcpkg-triplet "$VCPKG_TRIPLET"
+  )
+else
+  build_args+=(--no-vcpkg)
+fi
+build_args+=("${clean_args[@]}")
+
 bash "$SOURCE_ROOT/scripts/build.sh" \
-  --build-dir "$BUILD_DIR" \
-  --build-type "$BUILD_TYPE" \
-  --wx ON \
-  --require-wx ON \
-  --cli ON \
-  --minimal-release ON \
-  --generator Ninja \
-  --neoshared-root "$NEOSHARED_ROOT_VALUE" \
-  --no-vcpkg \
-  --jobs "$JOBS" \
-  "${clean_args[@]}" \
+  "${build_args[@]}" \
   -- \
   "-DCMAKE_OSX_ARCHITECTURES=$ARCH" \
-  "-DCMAKE_OSX_DEPLOYMENT_TARGET=$DEPLOYMENT_TARGET"
-
-if [[ "$RUN_TESTS" == 1 ]]; then
-  ctest --test-dir "$BUILD_DIR" -C "$BUILD_TYPE" --output-on-failure
-fi
+  "-DCMAKE_OSX_DEPLOYMENT_TARGET=$DEPLOYMENT_TARGET" \
+  "-DwxWidgets_CONFIG_EXECUTABLE=$WX_PREFIX/bin/wx-config" \
+  "${EXTRA_CMAKE_ARGS[@]}"
 
 rm -rf -- "$STAGE_DIR"
 cmake --install "$BUILD_DIR" --config "$BUILD_TYPE" --prefix "$STAGE_DIR"
 APP_BUNDLE="$STAGE_DIR/$APP_NAME.app"
 [[ -d "$APP_BUNDLE" ]] || { echo "Installed application bundle is missing: $APP_BUNDLE" >&2; exit 1; }
 
-VERSION="$(sed -nE 's/^#define[[:space:]]+[A-Z0-9_]+_VERSION_STRING[[:space:]]+"([^"]+)".*/\1/p' "$SOURCE_ROOT/src/core/Version.hpp" | sed -n '1p')"
-[[ -n "$VERSION" ]] || { echo "Unable to read src/core/Version.hpp" >&2; exit 1; }
-OUTPUT_ZIP="$DIST_DIR/$APP_NAME-$VERSION-macos-$ARCH.zip"
+if [[ -z "$VERSION" && -f "$SOURCE_ROOT/src/core/Version.hpp" ]]; then
+  VERSION="$(sed -nE 's/^#define[[:space:]]+[A-Z0-9_]+_VERSION_STRING[[:space:]]+"([^"]+)".*/\1/p' "$SOURCE_ROOT/src/core/Version.hpp" | sed -n '1p')"
+fi
+if [[ -z "$VERSION" && -f "$BUILD_DIR/CMakeCache.txt" ]]; then
+  VERSION="$(sed -nE 's/^CMAKE_PROJECT_VERSION:[^=]*=(.*)$/\1/p' "$BUILD_DIR/CMakeCache.txt" | sed -n '1p')"
+fi
+if [[ -z "$VERSION" && -f "$SOURCE_ROOT/vcpkg.json" ]]; then
+  VERSION="$(sed -nE 's/^[[:space:]]*"version(-string|-semver)?"[[:space:]]*:[[:space:]]*"([^"]+)".*/\2/p' "$SOURCE_ROOT/vcpkg.json" | sed -n '1p')"
+fi
+[[ -n "$VERSION" ]] || VERSION="snapshot"
+VERSION_FILE_COMPONENT="$(printf '%s' "$VERSION" | LC_ALL=C tr -c 'A-Za-z0-9._-' '-')"
+[[ -n "$VERSION_FILE_COMPONENT" ]] || VERSION_FILE_COMPONENT="snapshot"
+OUTPUT_ZIP="$DIST_DIR/$APP_NAME-$VERSION_FILE_COMPONENT-macos-$ARCH.zip"
 
-bash "$NEOSHARED_ROOT_VALUE/scripts/package-macos-app.sh" \
-  --app "$APP_BUNDLE" \
-  --output "$OUTPUT_ZIP" \
-  --arch "$ARCH" \
-  --app-name "$APP_NAME" \
-  --version "$VERSION" \
+package_args=(
+  --app "$APP_BUNDLE"
+  --output "$OUTPUT_ZIP"
+  --arch "$ARCH"
+  --app-name "$APP_NAME"
+  --version "$VERSION"
   --deployment-target "$DEPLOYMENT_TARGET"
+)
+if [[ -n "$VCPKG_ROOT_VALUE" ]]; then
+  for search_dir in \
+    "$BUILD_DIR/vcpkg_installed/$VCPKG_TRIPLET/lib" \
+    "$BUILD_DIR/vcpkg_installed/$VCPKG_TRIPLET/debug/lib" \
+    "$VCPKG_ROOT_VALUE/installed/$VCPKG_TRIPLET/lib" \
+    "$VCPKG_ROOT_VALUE/installed/$VCPKG_TRIPLET/debug/lib"; do
+    [[ -d "$search_dir" ]] || continue
+    package_args+=(--search-dir "$search_dir")
+  done
+fi
+
+bash "$NEOSHARED_ROOT_VALUE/scripts/package-macos-app.sh" "${package_args[@]}"

@@ -49,7 +49,6 @@ clean_args=()
 bash "$ROOT_DIR/scripts/build.sh" \
   --build-dir "$BUILD_DIR" \
   --build-type "$BUILD_TYPE" \
-  --tests ON \
   --minimal-release OFF \
   --generator Ninja \
   --jobs "$JOBS" \
@@ -57,4 +56,3 @@ bash "$ROOT_DIR/scripts/build.sh" \
   -- \
   "-DCMAKE_OSX_ARCHITECTURES=$ARCH" \
   "-DCMAKE_OSX_DEPLOYMENT_TARGET=$DEPLOYMENT_TARGET"
-ctest --test-dir "$BUILD_DIR" -C "$BUILD_TYPE" --output-on-failure

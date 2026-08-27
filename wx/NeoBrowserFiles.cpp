@@ -64,7 +64,7 @@ EM_ASYNC_JS(char*, neo_browser_choose_open_files_js,
 });
 
 EM_JS(char*, neo_browser_choose_save_file_js,
-      (const char* title, const char* defaultFile), {
+      (const char* title, const char* defaultFile, const char* defaultExtension), {
     try {
         if (!Module.neoToolsBrowserFiles || !Module.neoToolsBrowserFiles.chooseSaveFile) {
             console.error('[NeoTools] Browser save bridge is unavailable.');
@@ -72,7 +72,8 @@ EM_JS(char*, neo_browser_choose_save_file_js,
         }
         const path = Module.neoToolsBrowserFiles.chooseSaveFile({
             title: UTF8ToString(title),
-            defaultFile: UTF8ToString(defaultFile)
+            defaultFile: UTF8ToString(defaultFile),
+            defaultExtension: UTF8ToString(defaultExtension)
         });
         if (!path) return 0;
         return stringToNewUTF8(path);
@@ -659,15 +660,18 @@ std::vector<std::filesystem::path> chooseOpenFiles(const std::string& title,
 }
 
 std::optional<std::filesystem::path> chooseSaveFile(const std::string& title,
-                                                    const std::string& defaultFile) {
+                                                    const std::string& defaultFile,
+                                                    const std::string& defaultExtension) {
 #if defined(__EMSCRIPTEN__)
     const std::string path = takeAllocatedString(
-        neo_browser_choose_save_file_js(title.c_str(), defaultFile.c_str()));
+        neo_browser_choose_save_file_js(
+            title.c_str(), defaultFile.c_str(), defaultExtension.c_str()));
     if (path.empty()) return std::nullopt;
     return std::filesystem::path(path);
 #else
     (void)title;
     (void)defaultFile;
+    (void)defaultExtension;
     return std::nullopt;
 #endif
 }

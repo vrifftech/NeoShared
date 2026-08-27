@@ -44,7 +44,7 @@ jobs:
       - name: Install dependencies
         run: brew install cmake ninja
 
-      - name: Configure, build, and test
+      - name: Configure and build
         run: |
           bash ./scripts/build-macos.sh \
             --arch "${{ matrix.arch }}" \

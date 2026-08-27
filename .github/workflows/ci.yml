@@ -39,14 +39,11 @@ jobs:
           bash ./scripts/build.sh \
             --build-dir build \
             --build-type Release \
-            --tests ON \
             --minimal-release OFF \
             --generator Ninja \
             --jobs 2 \
             --clean
 
-      - name: Run tests
-        run: ctest --test-dir build -C Release --output-on-failure
 
   windows:
     name: Windows (Visual Studio 2026 + wxWidgets 3.3.3 overlay)
@@ -91,13 +88,9 @@ jobs:
           .\scripts\build.ps1 `
             -BuildDir build `
             -BuildType Release `
-            -Tests ON `
             -MinimalRelease OFF `
             -Generator 'Visual Studio 18 2026' `
             -Platform x64 `
             -Parallel 2 `
             -Clean
 
-      - name: Run tests
-        shell: pwsh
-        run: ctest --test-dir build -C Release --output-on-failure

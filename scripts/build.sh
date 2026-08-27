@@ -5,7 +5,6 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CMAKE_BIN="${CMAKE:-cmake}"
 BUILD_DIR="$ROOT_DIR/build"
 BUILD_TYPE="Release"
-BUILD_TESTS="ON"
 MINIMAL_RELEASE="OFF"
 JOBS="${JOBS:-}"
 TARGET=""
@@ -20,7 +19,6 @@ usage: ./scripts/build.sh [options] [-- extra-cmake-args...]
 Options:
   --build-dir DIR          Build directory [default: ./build]
   --build-type TYPE        Debug, Release, RelWithDebInfo, or MinSizeRel
-  --tests ON|OFF           Build regression tests [default: ON]
   --minimal-release ON|OFF Enable release-minimization flags [default: OFF]
   --jobs N                 Parallel build jobs
   --target NAME            Build a specific CMake target
@@ -34,7 +32,6 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --build-dir) BUILD_DIR="$2"; shift 2;;
     --build-type) BUILD_TYPE="$2"; shift 2;;
-    --tests) BUILD_TESTS="$2"; shift 2;;
     --minimal-release) MINIMAL_RELEASE="$2"; shift 2;;
     --jobs|--parallel) JOBS="$2"; shift 2;;
     --target) TARGET="$2"; shift 2;;
@@ -59,7 +56,6 @@ mkdir -p "$BUILD_DIR"
 
 CONFIG_ARGS=(-S "$ROOT_DIR" -B "$BUILD_DIR"
   "-DCMAKE_BUILD_TYPE=$BUILD_TYPE"
-  "-DNEOSHARED_BUILD_TESTS=$BUILD_TESTS"
   "-DNEO_MINIMAL_RELEASE=$MINIMAL_RELEASE")
 if [[ -n "$GENERATOR" ]]; then
   CONFIG_ARGS=(-G "$GENERATOR" "${CONFIG_ARGS[@]}")

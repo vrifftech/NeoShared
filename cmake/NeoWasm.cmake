@@ -16,15 +16,16 @@ set(NEO_WX_WASM_BUILD "" CACHE PATH
 get_filename_component(_NEO_WASM_SHARED_ROOT "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
 
 # Register a narrow compatibility wrapper for CMake's stock FindwxWidgets.
-# This file is included before project(), so the Emscripten toolchain may not
-# have set EMSCRIPTEN/CMAKE_SYSTEM_NAME yet. Register the wrapper unconditionally;
-# it delegates unchanged on native builds and adjusts root-search modes only
-# after the toolchain identifies an Emscripten configure.
+# This file can be included before project(), so the Emscripten toolchain may
+# not have set EMSCRIPTEN/CMAKE_SYSTEM_NAME yet. Register the wrapper
+# unconditionally; it delegates unchanged on native builds and adjusts root
+# search modes only after the toolchain identifies an Emscripten configure.
 list(PREPEND CMAKE_MODULE_PATH "${_NEO_WASM_SHARED_ROOT}/cmake/wasm")
 
 function(neo_configure_wasm_target target_name)
-    set(_one_value_args NAME SLUG ICON)
-    cmake_parse_arguments(NEO_WASM "" "${_one_value_args}" "" ${ARGN})
+    set(_one_value_args NAME SLUG ICON VERSION)
+    set(_multi_value_args PRELOAD)
+    cmake_parse_arguments(NEO_WASM "" "${_one_value_args}" "${_multi_value_args}" ${ARGN})
 
     if(NOT EMSCRIPTEN)
         return()
@@ -60,9 +61,41 @@ function(neo_configure_wasm_target target_name)
         endif()
     endforeach()
 
-    set(NEO_WASM_PAGE_TITLE "${NEO_WASM_NAME} ${PROJECT_VERSION}")
+    set(_app_version "${NEO_WASM_VERSION}")
+    if(NOT _app_version)
+        set(_app_version "${PROJECT_VERSION}")
+    endif()
+    if(NOT _app_version)
+        set(_app_version "snapshot")
+    endif()
+
+    set(_preload_link_options)
+    foreach(_preload_entry IN LISTS NEO_WASM_PRELOAD)
+        string(FIND "${_preload_entry}" "@" _preload_separator)
+        if(_preload_separator LESS 1)
+            message(FATAL_ERROR
+                "WebAssembly PRELOAD entries must use source@/virtual/path syntax: ${_preload_entry}")
+        endif()
+        string(SUBSTRING "${_preload_entry}" 0 ${_preload_separator} _preload_source)
+        math(EXPR _preload_destination_begin "${_preload_separator} + 1")
+        string(SUBSTRING "${_preload_entry}" ${_preload_destination_begin} -1 _preload_destination)
+        if(NOT _preload_destination MATCHES "^/")
+            message(FATAL_ERROR
+                "WebAssembly PRELOAD destinations must be absolute virtual paths: ${_preload_entry}")
+        endif()
+        get_filename_component(_preload_source_absolute "${_preload_source}" ABSOLUTE
+            BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+        if(NOT EXISTS "${_preload_source_absolute}")
+            message(FATAL_ERROR
+                "WebAssembly preload source was not found: ${_preload_source_absolute}")
+        endif()
+        list(APPEND _preload_link_options
+            "SHELL:--preload-file ${_preload_source_absolute}@${_preload_destination}")
+    endforeach()
+
+    set(NEO_WASM_PAGE_TITLE "${NEO_WASM_NAME} ${_app_version}")
     set(NEO_WASM_APP_NAME "${NEO_WASM_NAME}")
-    set(NEO_WASM_APP_VERSION "${PROJECT_VERSION}")
+    set(NEO_WASM_APP_VERSION "${_app_version}")
     set(NEO_WASM_APP_SLUG "${NEO_WASM_SLUG}")
     set(_wasm_generated_dir "${CMAKE_CURRENT_BINARY_DIR}/wasm-generated/${target_name}")
     set(_wasm_output_dir "${CMAKE_BINARY_DIR}/wasm-output")
@@ -72,6 +105,11 @@ function(neo_configure_wasm_target target_name)
 
     target_sources(${target_name} PRIVATE
         "${_NEO_WASM_SHARED_ROOT}/wx/NeoBrowserFiles.cpp"
+        "${_NEO_WASM_SHARED_ROOT}/src/wasm_dialog_compat.cpp"
+    )
+
+    target_include_directories(${target_name} PRIVATE
+        "${_NEO_WASM_SHARED_ROOT}/include"
     )
 
     target_compile_definitions(${target_name} PRIVATE
@@ -98,9 +136,15 @@ function(neo_configure_wasm_target target_name)
         "SHELL:-sENVIRONMENT=web"
         "SHELL:-sFORCE_FILESYSTEM=1"
         "SHELL:-sUSE_ZLIB=1"
-        "SHELL:-sERROR_ON_UNDEFINED_SYMBOLS=0"
+        "SHELL:-sERROR_ON_UNDEFINED_SYMBOLS=1"
+        "SHELL:-Wl,--undefined=neo_wasm_dialog_compat_link_anchor"
+        "SHELL:-Wl,--undefined=neo_browser_open_files_completed"
+        "SHELL:-Wl,--undefined=neo_browser_download_completed"
+        "SHELL:-Wl,--undefined=neo_browser_package_directory_completed"
+        "SHELL:-Wl,--undefined=neo_browser_package_workspace_completed"
+        "SHELL:-Wl,--undefined=neo_browser_package_commit_completed"
         "SHELL:-sASYNCIFY=1"
-        "SHELL:-sASYNCIFY_STACK_SIZE=65536"
+        "SHELL:-sASYNCIFY_STACK_SIZE=1048576"
         "-sASYNCIFY_IMPORTS=startModal,js_writeTextToClipboard,js_readTextFromClipboard,js_clipboardHasText,js_clearClipboard,js_enumerateFonts"
         "-sEXPORTED_RUNTIME_METHODS=HEAPU8,HEAP8,HEAP32,ccall,FS"
         "SHELL:-lidbfs.js"
@@ -108,6 +152,7 @@ function(neo_configure_wasm_target target_name)
         "SHELL:--pre-js ${_wx_pre_js}"
         "SHELL:--pre-js ${_wx_dom_pre_js}"
         "SHELL:--shell-file ${_shell_file}"
+        ${_preload_link_options}
     )
 
     set_target_properties(${target_name} PROPERTIES

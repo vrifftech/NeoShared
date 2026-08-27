@@ -8,6 +8,7 @@ ARCH=""
 APP_NAME=""
 VERSION=""
 DEPLOYMENT_TARGET=""
+EXTRA_SEARCH_DIRS=()
 
 usage() {
   cat <<'USAGE'
@@ -20,6 +21,7 @@ Options:
   --app-name NAME            Application display name
   --version VERSION          Application semantic version
   --deployment-target VER    Requested minimum macOS version
+  --search-dir DIR           Additional dependency search directory (repeatable)
   -h, --help                 Show this help
 USAGE
 }
@@ -32,6 +34,7 @@ while [[ $# -gt 0 ]]; do
     --app-name) APP_NAME="$2"; shift 2;;
     --version) VERSION="$2"; shift 2;;
     --deployment-target) DEPLOYMENT_TARGET="$2"; shift 2;;
+    --search-dir) EXTRA_SEARCH_DIRS+=("$2"); shift 2;;
     -h|--help) usage; exit 0;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2;;
   esac
@@ -75,6 +78,18 @@ if command -v brew >/dev/null 2>&1; then
   [[ -z "$BREW_PREFIX" ]] || SEARCH_DIRS+=("$BREW_PREFIX/lib")
   [[ -z "$WX_PREFIX" ]] || SEARCH_DIRS+=("$WX_PREFIX/lib")
 fi
+for search_dir in "${EXTRA_SEARCH_DIRS[@]}"; do
+  [[ -d "$search_dir" ]] || continue
+  search_dir="$(cd "$search_dir" && pwd)"
+  already_present=0
+  for existing_dir in "${SEARCH_DIRS[@]}"; do
+    if [[ "$existing_dir" == "$search_dir" ]]; then
+      already_present=1
+      break
+    fi
+  done
+  [[ "$already_present" == 1 ]] || SEARCH_DIRS+=("$search_dir")
+done
 SEARCH_DIRS_JOINED="$(IFS='|'; printf '%s' "${SEARCH_DIRS[*]:-}")"
 
 cmake \

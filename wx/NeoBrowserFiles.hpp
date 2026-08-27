@@ -10,7 +10,7 @@
 
 namespace neobrowser {
 
-inline constexpr unsigned kBrowserFileApiVersion = 6u;
+inline constexpr unsigned kBrowserFileApiVersion = 7u;
 
 struct OpenFilesResult {
     std::vector<std::filesystem::path> paths;
@@ -41,7 +41,8 @@ std::vector<std::filesystem::path> chooseOpenFiles(const std::string& title,
 // Requests a download filename and returns a unique process-local path where
 // the application can write the result before calling downloadFile().
 std::optional<std::filesystem::path> chooseSaveFile(const std::string& title,
-                                                    const std::string& defaultFile);
+                                                    const std::string& defaultFile,
+                                                    const std::string& defaultExtension = {});
 
 // Creates a unique process-local path suitable for preparing a browser
 // download. This does not prompt the user and does not start a download.

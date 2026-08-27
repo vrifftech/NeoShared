@@ -9,11 +9,30 @@
   var browserFileSequence = 0;
   var packageDirectorySequence = 0;
   var packageDirectorySessions = new Map();
+  var browserWritableFiles = new Map();
+  var browserWritableTimers = new Map();
+  var browserWriteHooksInstalled = false;
 
   function safeBrowserFileName(name, fallback) {
     var value = String(name || '').replace(/[\\/\u0000-\u001f\u007f]/g, '_').trim();
     if (!value || value === '.' || value === '..') value = fallback || 'download.bin';
     return value;
+  }
+
+  function normalizedBrowserExtension(extension) {
+    var value = String(extension || '').trim().toLowerCase();
+    while (value.charAt(0) === '*') value = value.substring(1);
+    if (value && value.charAt(0) !== '.') value = '.' + value;
+    return /^\.[a-z0-9_+-]+$/.test(value) ? value : '';
+  }
+
+  function appendDefaultBrowserExtension(name, extension) {
+    var safeName = safeBrowserFileName(name, 'download.bin');
+    var normalized = normalizedBrowserExtension(extension);
+    if (!normalized) return safeName;
+    var dot = safeName.lastIndexOf('.');
+    if (dot > 0 && dot + 1 < safeName.length) return safeName;
+    return safeName + normalized;
   }
 
   function uniqueBrowserDirectory(kind) {
@@ -22,6 +41,84 @@
       Date.now().toString(36) + '-' + browserFileSequence.toString(36);
     FS.mkdirTree(directory);
     return directory;
+  }
+
+  function cancelScheduledBrowserDownload(path) {
+    var timer = browserWritableTimers.get(path);
+    if (timer) window.clearTimeout(timer);
+    browserWritableTimers.delete(path);
+  }
+
+  function scheduleBrowserWritableDownload(path) {
+    if (!browserWritableFiles.has(path)) return;
+    cancelScheduledBrowserDownload(path);
+    browserWritableTimers.set(path, window.setTimeout(function() {
+      browserWritableTimers.delete(path);
+      var name = browserWritableFiles.get(path);
+      if (!name) return;
+      try {
+        queueDownloadFromPath(path, name);
+      } catch (error) {
+        console.error('[NeoTools] Unable to publish the browser-written file:', error);
+      }
+    }, 30));
+  }
+
+  function installBrowserWriteHooks() {
+    if (browserWriteHooksInstalled || typeof FS === 'undefined') return;
+    browserWriteHooksInstalled = true;
+
+    var originalClose = FS.close.bind(FS);
+    FS.close = function(stream) {
+      var path = '';
+      var writable = false;
+      try {
+        path = stream.path || (stream.node ? FS.getPath(stream.node) : '');
+        writable = ((stream.flags || 0) & 3) !== 0;
+      } catch (_) {}
+      var result = originalClose(stream);
+      if (path && writable) scheduleBrowserWritableDownload(path);
+      return result;
+    };
+
+    var originalRename = FS.rename.bind(FS);
+    FS.rename = function(oldPath, newPath) {
+      var oldName = browserWritableFiles.get(oldPath) || '';
+      var newName = browserWritableFiles.get(newPath) || '';
+      var result = originalRename(oldPath, newPath);
+      cancelScheduledBrowserDownload(oldPath);
+      if (oldName && !newName) {
+        browserWritableFiles.delete(oldPath);
+        browserWritableFiles.set(newPath, oldName);
+      }
+      if (browserWritableFiles.has(newPath)) scheduleBrowserWritableDownload(newPath);
+      return result;
+    };
+
+    if (typeof FS.unlink === 'function') {
+      var originalUnlink = FS.unlink.bind(FS);
+      FS.unlink = function(path) {
+        cancelScheduledBrowserDownload(path);
+        browserWritableFiles.delete(path);
+        return originalUnlink(path);
+      };
+    }
+  }
+
+  function registerBrowserWritablePath(path, name) {
+    if (!path) return;
+    installBrowserWriteHooks();
+    browserWritableFiles.set(path, safeBrowserFileName(name, 'download.bin'));
+  }
+
+  function consumeScheduledBrowserDownload(path) {
+    cancelScheduledBrowserDownload(path);
+    try {
+      if (globalThis.NeoWasmIO &&
+          typeof globalThis.NeoWasmIO.consume === 'function') {
+        globalThis.NeoWasmIO.consume(path);
+      }
+    } catch (_) {}
   }
 
   function chooseHostFiles(options) {
@@ -97,6 +194,7 @@
       var bytes = new Uint8Array(await file.arrayBuffer());
       var path = directory + '/' + candidate;
       FS.writeFile(path, bytes);
+      registerBrowserWritablePath(path, candidate);
       paths.push(path);
     }
     return paths;
@@ -396,14 +494,41 @@
     };
   }
 
-  async function removeCreatedPackageFiles(created) {
-    for (var index = created.length - 1; index >= 0; --index) {
+  async function rollbackPackageHostWrites(rootHandle, journal) {
+    var failures = [];
+    for (var index = journal.length - 1; index >= 0; --index) {
+      var entry = journal[index];
       try {
-        await created[index].parentHandle.removeEntry(created[index].name);
+        if (entry.existed) {
+          // A later write failed after this destination had already been
+          // replaced. Restore the exact bytes observed during preflight rather
+          // than leaving the installer folder partially updated.
+          await writePackageHostFile(
+            rootHandle, entry.relativePath, entry.previousBytes);
+          continue;
+        }
+
+        // The transaction created this file. Resolve it again so rollback also
+        // works when the original write failed after creating the directory
+        // entry but before returning its handle to the caller.
+        var resolved = await resolvePackageFile(
+          rootHandle, entry.relativePath, false);
+        if (resolved.exists && resolved.parentHandle) {
+          await resolved.parentHandle.removeEntry(
+            resolved.actualName || resolved.requestedName);
+        }
       } catch (error) {
-        console.warn('[NeoTools] Unable to roll back package file ' + created[index].name + ':', error);
+        var message = error && error.message
+          ? error.message
+          : String(error || 'Unknown rollback error.');
+        failures.push(entry.relativePath + ': ' + message);
+        console.warn(
+          '[NeoTools] Unable to roll back package file ' +
+            entry.relativePath + ':',
+          error);
       }
     }
+    return failures;
   }
 
   async function choosePackageDirectory() {
@@ -548,7 +673,7 @@
     var filesWritten = 0;
     var filesReused = 0;
     var iniChanged = false;
-    var created = [];
+    var rollbackJournal = [];
     try {
       for (var planIndex = 0; planIndex < plans.length; ++planIndex) {
         var plan = plans[planIndex];
@@ -556,14 +681,32 @@
           filesReused += 1;
           continue;
         }
-        var writeResult = await writePackageHostFile(
+        // Journal the destination before starting the write. This also covers
+        // a close() failure whose browser implementation may already have
+        // replaced the destination before reporting the error.
+        rollbackJournal.push({
+          relativePath: plan.relativePath,
+          existed: !!plan.current.exists,
+          previousBytes: plan.current.exists
+            ? copyBytes(plan.current.bytes)
+            : null
+        });
+        await writePackageHostFile(
           session.handle, plan.relativePath, plan.generated);
-        if (writeResult.created) created.push(writeResult);
         filesWritten += 1;
         if (plan.isIni) iniChanged = true;
       }
     } catch (error) {
-      await removeCreatedPackageFiles(created);
+      var rollbackFailures = await rollbackPackageHostWrites(
+        session.handle, rollbackJournal);
+      if (rollbackFailures.length) {
+        var originalMessage = error && error.message
+          ? error.message
+          : String(error || 'Unknown installer-package commit error.');
+        throw new Error(
+          originalMessage + ' Rollback was incomplete: ' +
+            rollbackFailures.join('; '));
+      }
       throw error;
     }
 
@@ -726,11 +869,6 @@
     item.appendChild(close);
     host.prepend(item);
     activeDownloadEntries.push({ item: item, url: url, anchor: anchor });
-    while (activeDownloadEntries.length > 6) {
-      var oldest = activeDownloadEntries[0];
-      removeDownloadItem(oldest.item, oldest.url);
-    }
-
     // Do not synthesize a click and do not invoke a native save picker here.
     // The next click is a normal browser DOM activation on this visible link,
     // outside wxWidgets-WASM's synchronous event-dispatch interlock.
@@ -780,14 +918,18 @@
     chooseSaveFile: function(options) {
       if (typeof FS === 'undefined') throw new Error('Emscripten filesystem is unavailable.');
       options = options || {};
-      var fallback = safeBrowserFileName(options.defaultFile, 'download.bin');
+      var fallback = appendDefaultBrowserExtension(
+        options.defaultFile, options.defaultExtension);
       var chosen = window.prompt(options.title || 'Download file as', fallback);
       if (chosen === null) return null;
-      chosen = safeBrowserFileName(chosen, fallback);
-      return uniqueBrowserDirectory('export') + '/' + chosen;
+      chosen = appendDefaultBrowserExtension(chosen || fallback, options.defaultExtension);
+      var path = uniqueBrowserDirectory('export') + '/' + chosen;
+      registerBrowserWritablePath(path, chosen);
+      return path;
     },
 
     requestDownloadFile: function(requestId, path, downloadName) {
+      consumeScheduledBrowserDownload(path);
       var name = safeBrowserFileName(downloadName,
         safeBrowserFileName(String(path || '').split('/').pop(), 'download.bin'));
       try {
@@ -808,6 +950,7 @@
     },
 
     downloadFile: function(path, downloadName) {
+      consumeScheduledBrowserDownload(path);
       var name = safeBrowserFileName(downloadName,
         safeBrowserFileName(String(path || '').split('/').pop(), 'download.bin'));
       return queueDownloadFromPath(path, name);

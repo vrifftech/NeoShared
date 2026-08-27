@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="NeoTools">
+  <rect width="64" height="64" rx="12" fill="#20242b"/>
+  <path d="M14 48V16h8l20 21V16h8v32h-8L22 27v21z" fill="#e8ebef"/>
+  <path d="M14 52h36" stroke="#72a7e7" stroke-width="4" stroke-linecap="round"/>
+</svg>

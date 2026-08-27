@@ -1,0 +1,49 @@
+name: WebAssembly
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NEO_WASM_EMSCRIPTEN_VERSION: '4.0.2'
+
+jobs:
+  wasm:
+    name: Emscripten core build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out neoshared
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+
+      - name: Install build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y build-essential cmake ninja-build python3 git
+
+      - name: Restore Emscripten cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            .neo-wasm-deps/emsdk
+            .neo-wasm-deps/neo-wasm-versions.env
+          key: neoshared-wasm-${{ runner.os }}-${{ env.NEO_WASM_EMSCRIPTEN_VERSION }}-${{ hashFiles('scripts/setup-wasm.sh', 'scripts/build-wasm.sh') }}
+
+      - name: Configure and build
+        run: |
+          bash ./scripts/build-wasm.sh \
+            --deps-root .neo-wasm-deps \
+            --jobs 2 \
+            --clean
