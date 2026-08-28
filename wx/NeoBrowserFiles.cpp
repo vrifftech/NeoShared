@@ -56,7 +56,7 @@ EM_ASYNC_JS(char*, neo_browser_choose_open_files_js,
             multiple: multiple !== 0
         });
         if (!paths || paths.length === 0) return 0;
-        return stringToNewUTF8(paths.join('\n'));
+        return stringToNewUTF8(paths.join(String.fromCharCode(10)));
     } catch (error) {
         console.error('[NeoTools] Browser file picker failed:', error);
         return 0;

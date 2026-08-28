@@ -13,6 +13,7 @@
 #include <cstring>
 #include <iomanip>
 #include <limits>
+#include <locale>
 #include <map>
 #include <mutex>
 #include <random>
@@ -114,17 +115,57 @@ T parseIntegralDecimal(const std::string& text) {
     return value;
 }
 
+bool isDecimalFloatingText(const std::string& text) {
+    if (text.empty()) return false;
+
+    std::size_t index = 0;
+    if (text[index] == '+' || text[index] == '-') {
+        ++index;
+        if (index == text.size()) return false;
+    }
+
+    bool sawDigit = false;
+    bool sawPoint = false;
+    bool sawExponent = false;
+    for (; index < text.size(); ++index) {
+        const char ch = text[index];
+        if (ch >= '0' && ch <= '9') {
+            sawDigit = true;
+            continue;
+        }
+        if (ch == '.') {
+            if (sawPoint || sawExponent) return false;
+            sawPoint = true;
+            continue;
+        }
+        if (ch == 'e' || ch == 'E') {
+            if (sawExponent || !sawDigit) return false;
+            sawExponent = true;
+            if (index + 1u < text.size() &&
+                (text[index + 1u] == '+' || text[index + 1u] == '-')) {
+                ++index;
+            }
+            if (index + 1u == text.size()) return false;
+            continue;
+        }
+        return false;
+    }
+    return sawDigit;
+}
+
 template <typename T>
 T parseFloatingDecimal(const std::string& text) {
-    if (text.empty()) {
+    if (!isDecimalFloatingText(text)) {
         throw invalidFloat(text);
     }
 
+    std::istringstream input(text);
+    input.imbue(std::locale::classic());
+    input >> std::noskipws;
+
     T value{};
-    const char* first = text.data();
-    const char* last = text.data() + text.size();
-    const auto [ptr, ec] = std::from_chars(first, last, value, std::chars_format::general);
-    if (ec != std::errc{} || ptr != last || !std::isfinite(static_cast<double>(value))) {
+    input >> value;
+    if (!input || !input.eof() || !std::isfinite(static_cast<double>(value))) {
         throw invalidFloat(text);
     }
     return value;
@@ -132,17 +173,10 @@ T parseFloatingDecimal(const std::string& text) {
 
 template <typename T>
 std::string formatFloating(T value) {
-    if (!std::isfinite(static_cast<double>(value))) {
-        return std::to_string(static_cast<double>(value));
-    }
-
-    std::array<char, 64> buffer{};
-    const auto [ptr, ec] = std::to_chars(buffer.data(), buffer.data() + buffer.size(), value, std::chars_format::general);
-    if (ec == std::errc{}) {
-        return std::string(buffer.data(), ptr);
-    }
-
-    return std::to_string(static_cast<double>(value));
+    std::ostringstream output;
+    output.imbue(std::locale::classic());
+    output << std::setprecision(std::numeric_limits<T>::max_digits10) << value;
+    return output.str();
 }
 
 std::string trimAscii(std::string value) {

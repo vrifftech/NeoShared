@@ -60,7 +60,7 @@ CONFIG_ARGS=(-S "$ROOT_DIR" -B "$BUILD_DIR"
 if [[ -n "$GENERATOR" ]]; then
   CONFIG_ARGS=(-G "$GENERATOR" "${CONFIG_ARGS[@]}")
 fi
-CONFIG_ARGS+=("${EXTRA[@]}")
+CONFIG_ARGS+=("${EXTRA[@]+"${EXTRA[@]}"}")
 
 "$CMAKE_BIN" "${CONFIG_ARGS[@]}"
 BUILD_ARGS=(--build "$BUILD_DIR" --config "$BUILD_TYPE")

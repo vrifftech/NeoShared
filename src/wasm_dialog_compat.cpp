@@ -52,7 +52,13 @@ EM_JS(void, neo_wasm_io_init, (), {
         sequence: 0,
 
         cleanName(name) {
-            const cleaned = String(name || 'download.bin').replace(/[\\/\r\n\0]/g, '_');
+            const source = String(name || 'download.bin');
+            let cleaned = '';
+            for (let index = 0; index < source.length; ++index) {
+                const code = source.charCodeAt(index);
+                cleaned += (code === 0 || code === 10 || code === 13 ||
+                            code === 47 || code === 92) ? '_' : source[index];
+            }
             return cleaned || 'download.bin';
         },
 
@@ -74,7 +80,11 @@ EM_JS(void, neo_wasm_io_init, (), {
         },
 
         registerDirectory(root, handle) {
-            root = String(root || '').replace(/\/+$/, '') || '/';
+            root = String(root || '');
+            while (root.length > 1 && root.charCodeAt(root.length - 1) === 47) {
+                root = root.slice(0, -1);
+            }
+            if (!root) root = '/';
             const existing = this.directories.find(entry => entry.root === root);
             this.directories = this.directories.filter(entry => entry.root !== root);
             this.directories.push({ root, handle: handle || (existing ? existing.handle : null) });
@@ -144,7 +154,10 @@ EM_JS(void, neo_wasm_io_init, (), {
 
             const directory = this.matchDirectory(path);
             if (directory) {
-                const relative = path.slice(directory.root.length).replace(/^\/+/, '');
+                let relative = path.slice(directory.root.length);
+                while (relative.length && relative.charCodeAt(0) === 47) {
+                    relative = relative.slice(1);
+                }
                 if (!relative) return;
                 if (directory.handle) {
                     try {
@@ -214,7 +227,7 @@ EM_ASYNC_JS(char*, neo_wasm_pick_files, (const char* wildcardPtr, int multiple),
     const wildcard = UTF8ToString(wildcardPtr || 0);
 
     function resultString(paths) {
-        const text = paths.join('\n');
+        const text = paths.join(String.fromCharCode(10));
         const size = lengthBytesUTF8(text) + 1;
         const ptr = _malloc(size);
         stringToUTF8(text, ptr, size);
@@ -223,7 +236,7 @@ EM_ASYNC_JS(char*, neo_wasm_pick_files, (const char* wildcardPtr, int multiple),
 
     function pickerTypes() {
         const extensions = [];
-        const regex = /\*\.([A-Za-z0-9_+-]+)/g;
+        const regex = new RegExp('[*][.]([A-Za-z0-9_+-]+)', 'g');
         let match;
         while ((match = regex.exec(wildcard)) !== null) {
             const extension = '.' + match[1].toLowerCase();
@@ -259,7 +272,7 @@ EM_ASYNC_JS(char*, neo_wasm_pick_files, (const char* wildcardPtr, int multiple),
         input.type = 'file';
         input.multiple = !!multiple;
         const extensions = [];
-        const regex = /\*\.([A-Za-z0-9_+-]+)/g;
+        const regex = new RegExp('[*][.]([A-Za-z0-9_+-]+)', 'g');
         let match;
         while ((match = regex.exec(wildcard)) !== null) extensions.push('.' + match[1]);
         if (extensions.length) input.accept = extensions.join(',');
@@ -305,7 +318,7 @@ EM_ASYNC_JS(char*, neo_wasm_pick_save, (const char* suggestedPtr, const char* wi
     }
 
     const extensions = [];
-    const regex = /\*\.([A-Za-z0-9_+-]+)/g;
+    const regex = new RegExp('[*][.]([A-Za-z0-9_+-]+)', 'g');
     let match;
     while ((match = regex.exec(wildcard)) !== null) {
         const extension = '.' + match[1].toLowerCase();

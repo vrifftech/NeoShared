@@ -165,7 +165,7 @@ if [[ -n "$VCPKG_ROOT_VALUE" ]]; then
 else
   build_args+=(--no-vcpkg)
 fi
-build_args+=("${clean_args[@]}")
+build_args+=("${clean_args[@]+"${clean_args[@]}"}")
 
 bash "$SOURCE_ROOT/scripts/build.sh" \
   "${build_args[@]}" \
@@ -173,7 +173,7 @@ bash "$SOURCE_ROOT/scripts/build.sh" \
   "-DCMAKE_OSX_ARCHITECTURES=$ARCH" \
   "-DCMAKE_OSX_DEPLOYMENT_TARGET=$DEPLOYMENT_TARGET" \
   "-DwxWidgets_CONFIG_EXECUTABLE=$WX_PREFIX/bin/wx-config" \
-  "${EXTRA_CMAKE_ARGS[@]}"
+  "${EXTRA_CMAKE_ARGS[@]+"${EXTRA_CMAKE_ARGS[@]}"}"
 
 rm -rf -- "$STAGE_DIR"
 cmake --install "$BUILD_DIR" --config "$BUILD_TYPE" --prefix "$STAGE_DIR"

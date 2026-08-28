@@ -20,6 +20,6 @@ if [[ "${1:-}" == *config.sub ]]; then
       normalized+=("$argument")
     fi
   done
-  exec "$NEO_WASM_CONFIG_SUB" "${normalized[@]}"
+  exec "$NEO_WASM_CONFIG_SUB" "${normalized[@]+"${normalized[@]}"}"
 fi
 exec /bin/bash "$@"

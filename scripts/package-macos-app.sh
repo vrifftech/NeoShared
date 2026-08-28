@@ -78,11 +78,11 @@ if command -v brew >/dev/null 2>&1; then
   [[ -z "$BREW_PREFIX" ]] || SEARCH_DIRS+=("$BREW_PREFIX/lib")
   [[ -z "$WX_PREFIX" ]] || SEARCH_DIRS+=("$WX_PREFIX/lib")
 fi
-for search_dir in "${EXTRA_SEARCH_DIRS[@]}"; do
+for search_dir in "${EXTRA_SEARCH_DIRS[@]+"${EXTRA_SEARCH_DIRS[@]}"}"; do
   [[ -d "$search_dir" ]] || continue
   search_dir="$(cd "$search_dir" && pwd)"
   already_present=0
-  for existing_dir in "${SEARCH_DIRS[@]}"; do
+  for existing_dir in "${SEARCH_DIRS[@]+"${SEARCH_DIRS[@]}"}"; do
     if [[ "$existing_dir" == "$search_dir" ]]; then
       already_present=1
       break

@@ -68,5 +68,5 @@ emcmake cmake \
   -G Ninja \
   -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
   -DNEO_MINIMAL_RELEASE=OFF \
-  "${EXTRA_CMAKE_ARGS[@]}"
+  "${EXTRA_CMAKE_ARGS[@]+"${EXTRA_CMAKE_ARGS[@]}"}"
 cmake --build "$BUILD_DIR" --parallel "$JOBS"

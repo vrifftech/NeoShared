@@ -157,7 +157,7 @@ if [[ -n "$VCPKG_ROOT_VALUE" ]]; then
     -DVCPKG_INSTALLED_DIR="$VCPKG_INSTALLED_DIR"
   )
 fi
-cmake_args+=("${EXTRA_CMAKE_ARGS[@]}")
+cmake_args+=("${EXTRA_CMAKE_ARGS[@]+"${EXTRA_CMAKE_ARGS[@]}"}")
 
 embuilder build zlib
 "${configure_command[@]}" "${cmake_args[@]}"

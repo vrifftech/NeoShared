@@ -52,7 +52,7 @@ bash "$ROOT_DIR/scripts/build.sh" \
   --minimal-release OFF \
   --generator Ninja \
   --jobs "$JOBS" \
-  "${clean_args[@]}" \
+  "${clean_args[@]+"${clean_args[@]}"}" \
   -- \
   "-DCMAKE_OSX_ARCHITECTURES=$ARCH" \
   "-DCMAKE_OSX_DEPLOYMENT_TARGET=$DEPLOYMENT_TARGET"
