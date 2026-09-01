@@ -46,7 +46,7 @@ EM_JS(int, neo_browser_request_open_files_js,
 EM_JS(void, neo_browser_release_imported_files_js, (const char* payload), {
     try {
         if (!Module.neoToolsBrowserFiles || !Module.neoToolsBrowserFiles.releaseImportedFiles) return;
-        var value = payload ? UTF8ToString(payload) : '';
+        var value = payload ? UTF8ToString(payload) : String();
         var paths = value ? value.split(String.fromCharCode(10)) : [];
         Module.neoToolsBrowserFiles.releaseImportedFiles(paths);
     } catch (error) {

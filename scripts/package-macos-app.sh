@@ -45,7 +45,7 @@ done
 [[ -n "$OUTPUT_ZIP" ]] || { echo "--output is required" >&2; exit 2; }
 case "$ARCH" in arm64|x86_64) ;; *) echo "--arch must be arm64 or x86_64" >&2; exit 2;; esac
 
-for command_name in cmake codesign ditto find lipo od otool plutil readlink shasum sort tr; do
+for command_name in awk cmake codesign ditto find grep lipo mktemp otool plutil readlink sed shasum sort xattr; do
   command -v "$command_name" >/dev/null 2>&1 || {
     echo "Required command is unavailable: $command_name" >&2
     exit 2
@@ -108,12 +108,7 @@ check_arch() {
 }
 
 is_macho_file() {
-  local magic
-  magic="$(od -An -tx1 -N4 "$1" 2>/dev/null | tr -d '[:space:]')"
-  case "$magic" in
-    feedface|cefaedfe|feedfacf|cffaedfe|cafebabe|bebafeca|cafebabf|bfbafeca) return 0;;
-    *) return 1;;
-  esac
+  otool -hv "$1" >/dev/null 2>&1
 }
 
 resolve_bundle_file() {
@@ -250,6 +245,12 @@ done < <(find "$APP_BUNDLE/Contents" -depth -type d \
 sign_file "$EXECUTABLE_RESOLVED"
 printf 'Signing application bundle: %s\n' "$APP_BUNDLE"
 codesign --force --sign - --timestamp=none "$APP_BUNDLE" </dev/null
+
+# Finish with a recursive ad-hoc signing pass. This covers versioned Homebrew
+# dylibs and nested code containers even when aliases resolve to a path that
+# was not represented independently in the first canonical inventory.
+printf 'Finalizing nested code signatures: %s\n' "$APP_BUNDLE"
+codesign --force --deep --sign - --timestamp=none "$APP_BUNDLE" </dev/null
 
 # Verify each concrete Mach-O independently before the recursive app check so
 # an unsigned Intel/Homebrew dylib is reported by its exact path.

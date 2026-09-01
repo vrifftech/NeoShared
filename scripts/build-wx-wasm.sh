@@ -41,7 +41,7 @@ WX_BUILD="$DEPS_ROOT/wxwidgets-wasm-build"
 [[ -n "$JOBS" ]] || JOBS="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)"
 [[ "$CLEAN" == 0 ]] || rm -rf "$WX_BUILD"
 
-for cmd in emcc em++ emconfigure emmake emar embuilder autoconf autoreconf automake make install; do
+for cmd in emcc em++ emconfigure emmake emar embuilder autoconf autoreconf automake make install python3; do
   command -v "$cmd" >/dev/null || { echo "Missing command: $cmd" >&2; exit 2; }
 done
 
@@ -73,6 +73,7 @@ export AUTOM4TE="$WRAPPER_DIR/wasm-autom4te-wrapper.sh"
 BUILD_INPUT_HASH="$(python3 - \
   "$SCRIPT_DIR/../wasm/versions.env" \
   "$SCRIPT_DIR/build-wx-wasm.sh" \
+  "$SCRIPT_DIR/patch-wx-wasm-no-pthreads.py" \
   "$SCRIPT_DIR/wasm-config-sub-wrapper.sh" \
   "$SCRIPT_DIR/wasm-autom4te-wrapper.sh" <<'PY'
 import hashlib
@@ -98,6 +99,9 @@ fi
 rm -rf "$WX_BUILD"
 mkdir -p "$WX_BUILD"
 embuilder build zlib
+
+python3 "$SCRIPT_DIR/patch-wx-wasm-no-pthreads.py" \
+  "$WX_SOURCE/src/wasm/utils.cpp"
 
 if [[ ! -x "$WX_SOURCE/configure" || "$WX_SOURCE/configure.in" -nt "$WX_SOURCE/configure" ||
       ( -f "$WX_SOURCE/autoconf_inc.m4" && "$WX_SOURCE/autoconf_inc.m4" -nt "$WX_SOURCE/configure" ) ]]; then

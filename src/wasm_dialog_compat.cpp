@@ -97,7 +97,7 @@ EM_ASYNC_JS(char*, neo_wasm_pick_save,
     const wildcard = UTF8ToString(wildcardPtr || 0);
 
     function resultString(path) {
-        const text = String(path || '');
+        const text = String(path || String());
         const size = lengthBytesUTF8(text) + 1;
         const ptr = _malloc(size);
         stringToUTF8(text, ptr, size);
@@ -120,7 +120,7 @@ EM_ASYNC_JS(char*, neo_wasm_pick_save,
 
     if (!state || typeof state.createWritableFile !== 'function') {
         console.error('[NeoTools] Shared save-file bridge is unavailable.');
-        return resultString('');
+        return resultString(String());
     }
 
     let handle = null;
@@ -133,13 +133,13 @@ EM_ASYNC_JS(char*, neo_wasm_pick_save,
             handle = await window.showSaveFilePicker(options);
             chosenName = handle.name || suggested;
         } catch (error) {
-            if (error && error.name === 'AbortError') return resultString('');
+            if (error && error.name === 'AbortError') return resultString(String());
             console.warn('[NeoTools] Native save picker failed; using a download name prompt.', error);
         }
     }
     if (!handle) {
         const response = window.prompt('Save file as', chosenName);
-        if (response === null) return resultString('');
+        if (response === null) return resultString(String());
         chosenName = response || chosenName;
     }
 
@@ -147,7 +147,7 @@ EM_ASYNC_JS(char*, neo_wasm_pick_save,
         return resultString(state.createWritableFile(chosenName, handle));
     } catch (error) {
         console.error('[NeoTools] Unable to prepare the browser output file:', error);
-        return resultString('');
+        return resultString(String());
     }
 });
 
@@ -157,7 +157,7 @@ EM_ASYNC_JS(char*, neo_wasm_pick_directory, (const char* messagePtr, int allowCr
     const message = UTF8ToString(messagePtr || 0);
 
     function resultString(path) {
-        const text = String(path || '');
+        const text = String(path || String());
         const size = lengthBytesUTF8(text) + 1;
         const ptr = _malloc(size);
         stringToUTF8(text, ptr, size);
@@ -166,17 +166,17 @@ EM_ASYNC_JS(char*, neo_wasm_pick_directory, (const char* messagePtr, int allowCr
 
     if (!state || typeof state.chooseAndImportDirectory !== 'function') {
         console.error('[NeoTools] Shared directory picker is unavailable.');
-        return resultString('');
+        return resultString(String());
     }
     try {
         const path = await state.chooseAndImportDirectory({
             title: message,
             allowCreate: allowCreate !== 0
         });
-        return resultString(path || '');
+        return resultString(path || String());
     } catch (error) {
         console.error('[NeoTools] Browser directory selection failed:', error);
-        return resultString('');
+        return resultString(String());
     }
 });
 

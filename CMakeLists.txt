@@ -92,6 +92,7 @@ add_library(neoshared_wx INTERFACE)
 add_library(neoshared::wx ALIAS neoshared_wx)
 target_include_directories(neoshared_wx INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/wx
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 target_compile_features(neoshared_wx INTERFACE cxx_std_17)
 

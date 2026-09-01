@@ -210,6 +210,37 @@ void ReleaseDirectory(const wxString& path);
 }  // namespace neoshared::wasm
 
 #ifndef NEOSHARED_WASM_DIALOG_NO_REMAP
+// Some wxWidgets ports provide aliases such as wxDirDialog before this
+// compatibility layer is included. Remove those aliases explicitly so Clang
+// does not diagnose macro redefinition and every call resolves to the browser
+// implementation below.
+#ifdef wxFileDialog
+#undef wxFileDialog
+#endif
+#ifdef wxDirDialog
+#undef wxDirDialog
+#endif
+#ifdef wxFilePickerCtrl
+#undef wxFilePickerCtrl
+#endif
+#ifdef wxDirPickerCtrl
+#undef wxDirPickerCtrl
+#endif
+#ifdef wxFileSelector
+#undef wxFileSelector
+#endif
+#ifdef wxFileSelectorEx
+#undef wxFileSelectorEx
+#endif
+#ifdef wxLoadFileSelector
+#undef wxLoadFileSelector
+#endif
+#ifdef wxSaveFileSelector
+#undef wxSaveFileSelector
+#endif
+#ifdef wxDirSelector
+#undef wxDirSelector
+#endif
 #define wxFileDialog ::neoshared::wasm::FileDialog
 #define wxDirDialog ::neoshared::wasm::DirDialog
 #define wxFilePickerCtrl ::neoshared::wasm::FilePickerCtrl
