@@ -63,20 +63,6 @@ cat > "$DIST_DIR/site.webmanifest" <<EOF_MANIFEST
 }
 EOF_MANIFEST
 
-cat > "$DIST_DIR/THIRD_PARTY_NOTICES.txt" <<EOF_NOTICES
-$APP_NAME $VERSION WebAssembly build
-
-wxWidgets-WASM
-Source: $NEO_WASM_WX_REPOSITORY
-Pinned commit: $NEO_WASM_WX_COMMIT
-The WebAssembly-specific wxWidgets port sources identify LGPL-2.0 terms.
-The remainder of wxWidgets retains its upstream licensing terms.
-
-Emscripten SDK
-Source: https://github.com/emscripten-core/emsdk
-Version: $NEO_WASM_EMSCRIPTEN_VERSION
-EOF_NOTICES
-
 cat > "$DIST_DIR/404.html" <<'EOF_404'
 <!doctype html><meta charset="utf-8"><title>Not found</title><script>location.replace('./');</script>
 EOF_404
