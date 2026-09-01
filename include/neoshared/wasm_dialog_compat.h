@@ -31,7 +31,7 @@ public:
                const wxPoint& pos = wxDefaultPosition,
                const wxSize& size = wxDefaultSize,
                const wxString& name = wxFileDialogNameStr);
-    ~FileDialog() override;
+    ~FileDialog() override = default;
 
     int ShowModal() override;
 
@@ -57,7 +57,6 @@ private:
     long style_{wxFD_DEFAULT_STYLE};
     int filterIndex_{0};
     wxArrayString paths_;
-    bool publishOnDestroy_{false};
 };
 
 class DirDialog final : public wxDialog {
@@ -201,6 +200,12 @@ void PublishFile(const wxString& path);
 void RegisterOutputFile(const wxString& path,
                         const wxString& downloadName = wxEmptyString);
 void RegisterOutputDirectory(const wxString& path);
+
+// Releases compatibility-dialog state. Releasing an imported path removes its
+// complete picker session from MEMFS; releasing an output path only removes its
+// browser destination binding. Directory release follows the same rule.
+void ReleasePath(const wxString& path);
+void ReleaseDirectory(const wxString& path);
 
 }  // namespace neoshared::wasm
 

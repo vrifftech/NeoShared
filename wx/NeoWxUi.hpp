@@ -559,9 +559,13 @@ inline void requestOpenFile(
         false,
         [weakParent, hadParent = parent != nullptr,
          callback = std::move(callback)](neobrowser::OpenFilesResult result) mutable {
-            if (hadParent && !weakParent) return;
+            if (hadParent && !weakParent) {
+                neobrowser::releaseImportedFiles(result.paths);
+                return;
+            }
             wxWindow* owner = weakParent.get();
             if (!result.error.empty()) {
+                neobrowser::releaseImportedFiles(result.paths);
                 wxMessageBox(toWx(result.error), "File Open Error",
                              wxOK | wxICON_ERROR, owner);
                 return;
@@ -601,9 +605,13 @@ inline void requestOpenFiles(
         true,
         [weakParent, hadParent = parent != nullptr,
          callback = std::move(callback)](neobrowser::OpenFilesResult result) mutable {
-            if (hadParent && !weakParent) return;
+            if (hadParent && !weakParent) {
+                neobrowser::releaseImportedFiles(result.paths);
+                return;
+            }
             wxWindow* owner = weakParent.get();
             if (!result.error.empty()) {
+                neobrowser::releaseImportedFiles(result.paths);
                 wxMessageBox(toWx(result.error), "File Open Error",
                              wxOK | wxICON_ERROR, owner);
                 return;

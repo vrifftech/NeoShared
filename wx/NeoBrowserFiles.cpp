@@ -7,8 +7,10 @@
 #include <cstdlib>
 #include <exception>
 #include <limits>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
+#include <string_view>
 #include <system_error>
 #include <unordered_map>
 #include <utility>
@@ -36,6 +38,117 @@ EM_JS(int, neo_browser_request_open_files_js,
         }) ? 1 : 0;
     } catch (error) {
         console.error('[NeoTools] Browser file picker request failed:', error);
+        return 0;
+    }
+});
+
+
+EM_JS(void, neo_browser_release_imported_files_js, (const char* payload), {
+    try {
+        if (!Module.neoToolsBrowserFiles || !Module.neoToolsBrowserFiles.releaseImportedFiles) return;
+        var value = payload ? UTF8ToString(payload) : '';
+        var paths = value ? value.split(String.fromCharCode(10)) : [];
+        Module.neoToolsBrowserFiles.releaseImportedFiles(paths);
+    } catch (error) {
+        console.error('[NeoTools] Unable to release imported browser files:', error);
+    }
+});
+
+EM_JS(int, neo_browser_request_retained_files_js,
+      (unsigned int requestId, const char* title, const char* accept, int multiple), {
+    try {
+        if (!Module.neoToolsBrowserFiles || !Module.neoToolsBrowserFiles.requestRetainedFiles) {
+            console.error('[NeoTools] Retained browser-file bridge is unavailable.');
+            return 0;
+        }
+        return Module.neoToolsBrowserFiles.requestRetainedFiles(requestId, {
+            title: UTF8ToString(title),
+            accept: UTF8ToString(accept),
+            multiple: multiple !== 0
+        }) ? 1 : 0;
+    } catch (error) {
+        console.error('[NeoTools] Retained browser-file request failed:', error);
+        return 0;
+    }
+});
+
+EM_JS(int, neo_browser_request_retained_directory_js,
+      (unsigned int requestId, const char* title, const char* accept), {
+    try {
+        if (!Module.neoToolsBrowserFiles || !Module.neoToolsBrowserFiles.requestRetainedDirectory) {
+            console.error('[NeoTools] Retained browser-directory bridge is unavailable.');
+            return 0;
+        }
+        return Module.neoToolsBrowserFiles.requestRetainedDirectory(requestId, {
+            title: UTF8ToString(title),
+            accept: UTF8ToString(accept)
+        }) ? 1 : 0;
+    } catch (error) {
+        console.error('[NeoTools] Retained browser-directory request failed:', error);
+        return 0;
+    }
+});
+
+EM_JS(void, neo_browser_release_retained_file_set_js, (unsigned int sessionId), {
+    try {
+        if (Module.neoToolsBrowserFiles && Module.neoToolsBrowserFiles.releaseRetainedFileSet) {
+            Module.neoToolsBrowserFiles.releaseRetainedFileSet(sessionId);
+        }
+    } catch (error) {
+        console.error('[NeoTools] Unable to release retained browser files:', error);
+    }
+});
+
+EM_JS(void, neo_browser_retain_only_retained_files_js,
+      (unsigned int sessionId, const char* payload), {
+    try {
+        if (Module.neoToolsBrowserFiles && Module.neoToolsBrowserFiles.retainOnlyRetainedFiles) {
+            Module.neoToolsBrowserFiles.retainOnlyRetainedFiles(
+                sessionId, UTF8ToString(payload));
+        }
+    } catch (error) {
+        console.error('[NeoTools] Unable to prune retained browser files:', error);
+    }
+});
+
+EM_ASYNC_JS(char*, neo_browser_read_retained_file_range_js,
+            (unsigned int sessionId, unsigned int fileId, double offset,
+             size_t length, void* destination), {
+    try {
+        if (!Module.neoToolsBrowserFiles || !Module.neoToolsBrowserFiles.readRetainedFileRange) {
+            throw new Error('Retained browser-file range bridge is unavailable.');
+        }
+        await Module.neoToolsBrowserFiles.readRetainedFileRange(
+            sessionId, fileId, offset, Number(length), Number(destination));
+        return 0;
+    } catch (error) {
+        var message = error && error.message ? error.message : String(error || 'Unknown browser range-read error.');
+        return stringToNewUTF8(message);
+    }
+});
+
+EM_JS(int, neo_browser_request_retained_export_js,
+      (unsigned int requestId, int mode, const char* defaultName, const char* payload), {
+    try {
+        if (!Module.neoToolsBrowserFiles || !Module.neoToolsBrowserFiles.requestExportRetainedFiles) {
+            console.error('[NeoTools] Retained browser-file export bridge is unavailable.');
+            return 0;
+        }
+        return Module.neoToolsBrowserFiles.requestExportRetainedFiles(
+            requestId, mode, UTF8ToString(defaultName), UTF8ToString(payload)) ? 1 : 0;
+    } catch (error) {
+        console.error('[NeoTools] Retained browser-file export request failed:', error);
+        return 0;
+    }
+});
+
+EM_JS(int, neo_browser_retained_directory_write_supported_js, (), {
+    try {
+        return Module.neoToolsBrowserFiles &&
+               Module.neoToolsBrowserFiles.retainedDirectoryWriteSupported &&
+               Module.neoToolsBrowserFiles.retainedDirectoryWriteSupported() ? 1 : 0;
+    } catch (error) {
+        console.error('[NeoTools] Unable to query retained directory-write support:', error);
         return 0;
     }
 });
@@ -234,7 +347,11 @@ std::uint64_t nextDownloadPathId() {
 #if defined(__EMSCRIPTEN__)
 
 using OpenCallbackMap = std::unordered_map<std::uint32_t, neobrowser::OpenFilesCallback>;
+using RetainedFileSetCallbackMap =
+    std::unordered_map<std::uint32_t, neobrowser::RetainedFileSetCallback>;
 using DownloadCallbackMap = std::unordered_map<std::uint32_t, neobrowser::DownloadCallback>;
+using RetainedExportCallbackMap =
+    std::unordered_map<std::uint32_t, neobrowser::RetainedExportCallback>;
 using PackageDirectoryCallbackMap =
     std::unordered_map<std::uint32_t, neobrowser::PackageDirectoryCallback>;
 using PackageWorkspaceCallbackMap =
@@ -247,8 +364,18 @@ OpenCallbackMap& openFileCallbacks() {
     return callbacks;
 }
 
+RetainedFileSetCallbackMap& retainedFileSetCallbacks() {
+    static RetainedFileSetCallbackMap callbacks;
+    return callbacks;
+}
+
 DownloadCallbackMap& downloadCallbacks() {
     static DownloadCallbackMap callbacks;
+    return callbacks;
+}
+
+RetainedExportCallbackMap& retainedExportCallbacks() {
+    static RetainedExportCallbackMap callbacks;
     return callbacks;
 }
 
@@ -311,6 +438,124 @@ std::vector<std::string> parseStringPayload(const char* payload) {
     return values;
 }
 
+
+int hexDigitValue(char ch) {
+    if (ch >= '0' && ch <= '9') return ch - '0';
+    if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+    if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+    return -1;
+}
+
+std::string percentDecode(std::string_view value) {
+    std::string result;
+    result.reserve(value.size());
+    for (std::size_t index = 0; index < value.size(); ++index) {
+        if (value[index] != '%') {
+            result.push_back(value[index]);
+            continue;
+        }
+        if (index + 2u >= value.size()) {
+            throw std::runtime_error("Invalid percent-encoded browser path.");
+        }
+        const int high = hexDigitValue(value[index + 1u]);
+        const int low = hexDigitValue(value[index + 2u]);
+        if (high < 0 || low < 0) {
+            throw std::runtime_error("Invalid percent-encoded browser path.");
+        }
+        result.push_back(static_cast<char>((high << 4) | low));
+        index += 2u;
+    }
+    return result;
+}
+
+std::string percentEncode(std::string_view value) {
+    static constexpr char kHex[] = "0123456789ABCDEF";
+    std::string result;
+    result.reserve(value.size());
+    for (const unsigned char ch : value) {
+        const bool safe = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+                          (ch >= '0' && ch <= '9') || ch == '-' || ch == '_' ||
+                          ch == '.' || ch == '~' || ch == '/';
+        if (safe) {
+            result.push_back(static_cast<char>(ch));
+        } else {
+            result.push_back('%');
+            result.push_back(kHex[(ch >> 4u) & 0x0Fu]);
+            result.push_back(kHex[ch & 0x0Fu]);
+        }
+    }
+    return result;
+}
+
+std::uint64_t parseUnsigned64(std::string_view text, const char* fieldName) {
+    if (text.empty()) throw std::runtime_error(std::string("Missing ") + fieldName + '.');
+    std::uint64_t value = 0;
+    for (const char ch : text) {
+        if (ch < '0' || ch > '9') {
+            throw std::runtime_error(std::string("Invalid ") + fieldName + '.');
+        }
+        const std::uint64_t digit = static_cast<std::uint64_t>(ch - '0');
+        if (value > (std::numeric_limits<std::uint64_t>::max() - digit) / 10u) {
+            throw std::runtime_error(std::string(fieldName) + " is too large.");
+        }
+        value = value * 10u + digit;
+    }
+    return value;
+}
+
+std::vector<neobrowser::RetainedFileInfo> parseRetainedFilePayload(const char* payload) {
+    std::vector<neobrowser::RetainedFileInfo> files;
+    if (payload == nullptr || *payload == '\0') return files;
+    const std::string source(payload);
+    std::size_t begin = 0;
+    while (begin <= source.size()) {
+        const std::size_t end = source.find('\n', begin);
+        const std::string_view line(source.data() + begin,
+            (end == std::string::npos ? source.size() : end) - begin);
+        if (!line.empty()) {
+            const std::size_t first = line.find('\t');
+            const std::size_t second = first == std::string_view::npos
+                ? std::string_view::npos : line.find('\t', first + 1u);
+            if (first == std::string_view::npos || second == std::string_view::npos) {
+                throw std::runtime_error("Invalid retained browser-file metadata.");
+            }
+            const std::uint64_t fileId = parseUnsigned64(line.substr(0, first), "browser file ID");
+            const std::uint64_t size = parseUnsigned64(
+                line.substr(first + 1u, second - first - 1u), "browser file size");
+            if (fileId == 0 || fileId > std::numeric_limits<std::uint32_t>::max()) {
+                throw std::runtime_error("Browser file ID is out of range.");
+            }
+            neobrowser::RetainedFileInfo file;
+            file.fileId = static_cast<std::uint32_t>(fileId);
+            file.size = size;
+            file.relativePath = percentDecode(line.substr(second + 1u));
+            if (file.relativePath.empty()) {
+                throw std::runtime_error("Browser file path must not be empty.");
+            }
+            files.push_back(std::move(file));
+        }
+        if (end == std::string::npos) break;
+        begin = end + 1u;
+    }
+    return files;
+}
+
+std::string serializeRetainedExportPayload(
+    const std::vector<neobrowser::RetainedExportEntry>& entries) {
+    std::ostringstream output;
+    for (std::size_t index = 0; index < entries.size(); ++index) {
+        const auto& entry = entries[index];
+        if (index != 0u) output << '\n';
+        output << entry.sessionId << '\t'
+               << entry.fileId << '\t'
+               << entry.offset << '\t'
+               << entry.size << '\t'
+               << percentEncode(entry.outputPath);
+    }
+    return output.str();
+}
+
+
 std::string serializeStringPayload(const std::vector<std::string>& values) {
     std::ostringstream output;
     for (std::size_t index = 0; index < values.size(); ++index) {
@@ -329,12 +574,33 @@ std::string takeAllocatedString(char* value) {
 
 void runOpenFilesCallback(neobrowser::OpenFilesCallback callback,
                           neobrowser::OpenFilesResult result) noexcept {
+    // A callback that throws has not established a reliable owner for the
+    // imported MEMFS session. Keep a release copy until delivery succeeds.
+    std::vector<std::filesystem::path> releaseOnFailure;
+    try {
+        releaseOnFailure = result.paths;
+        callback(std::move(result));
+    } catch (const std::exception& exception) {
+        neobrowser::releaseImportedFiles(
+            releaseOnFailure.empty() ? result.paths : releaseOnFailure);
+        std::fprintf(stderr, "[NeoTools] Browser file completion failed: %s\n", exception.what());
+    } catch (...) {
+        neobrowser::releaseImportedFiles(
+            releaseOnFailure.empty() ? result.paths : releaseOnFailure);
+        std::fprintf(stderr, "[NeoTools] Browser file completion failed with an unknown exception.\n");
+    }
+}
+
+void runRetainedFileSetCallback(neobrowser::RetainedFileSetCallback callback,
+                                neobrowser::RetainedFileSetResult result) noexcept {
     try {
         callback(std::move(result));
     } catch (const std::exception& exception) {
-        std::fprintf(stderr, "[NeoTools] Browser file completion failed: %s\n", exception.what());
+        std::fprintf(stderr, "[NeoTools] Retained browser-file completion failed: %s\n",
+                     exception.what());
     } catch (...) {
-        std::fprintf(stderr, "[NeoTools] Browser file completion failed with an unknown exception.\n");
+        std::fprintf(stderr,
+                     "[NeoTools] Retained browser-file completion failed with an unknown exception.\n");
     }
 }
 
@@ -346,6 +612,19 @@ void runDownloadCallback(neobrowser::DownloadCallback callback,
         std::fprintf(stderr, "[NeoTools] Browser download completion failed: %s\n", exception.what());
     } catch (...) {
         std::fprintf(stderr, "[NeoTools] Browser download completion failed with an unknown exception.\n");
+    }
+}
+
+void runRetainedExportCallback(neobrowser::RetainedExportCallback callback,
+                               neobrowser::RetainedExportResult result) noexcept {
+    try {
+        callback(std::move(result));
+    } catch (const std::exception& exception) {
+        std::fprintf(stderr, "[NeoTools] Retained browser-file export completion failed: %s\n",
+                     exception.what());
+    } catch (...) {
+        std::fprintf(stderr,
+                     "[NeoTools] Retained browser-file export completion failed with an unknown exception.\n");
     }
 }
 
@@ -388,13 +667,29 @@ void runPackageCommitCallback(neobrowser::PackageCommitCallback callback,
     }
 }
 
+struct PendingOpenFilesDelivery {
+    neobrowser::OpenFilesCallback callback;
+    neobrowser::OpenFilesResult result;
+    bool delivered = false;
+
+    ~PendingOpenFilesDelivery() {
+        // wx may destroy queued CallAfter functors while the application is
+        // shutting down. Release the import if the callback never ran.
+        if (!delivered) neobrowser::releaseImportedFiles(result.paths);
+    }
+};
+
 void scheduleOpenFilesCallback(neobrowser::OpenFilesCallback callback,
                                neobrowser::OpenFilesResult result) noexcept {
     if (wxTheApp != nullptr) {
-        wxTheApp->CallAfter(
-            [callback = std::move(callback), result = std::move(result)]() mutable {
-                runOpenFilesCallback(std::move(callback), std::move(result));
-            });
+        auto delivery = std::make_shared<PendingOpenFilesDelivery>();
+        delivery->callback = std::move(callback);
+        delivery->result = std::move(result);
+        wxTheApp->CallAfter([delivery]() mutable {
+            delivery->delivered = true;
+            runOpenFilesCallback(
+                std::move(delivery->callback), std::move(delivery->result));
+        });
         return;
     }
     runOpenFilesCallback(std::move(callback), std::move(result));
@@ -410,6 +705,18 @@ void scheduleDownloadCallback(neobrowser::DownloadCallback callback,
         return;
     }
     runDownloadCallback(std::move(callback), std::move(result));
+}
+
+void scheduleRetainedExportCallback(neobrowser::RetainedExportCallback callback,
+                                    neobrowser::RetainedExportResult result) noexcept {
+    if (wxTheApp != nullptr) {
+        wxTheApp->CallAfter(
+            [callback = std::move(callback), result = std::move(result)]() mutable {
+                runRetainedExportCallback(std::move(callback), std::move(result));
+            });
+        return;
+    }
+    runRetainedExportCallback(std::move(callback), std::move(result));
 }
 
 void schedulePackageDirectoryCallback(neobrowser::PackageDirectoryCallback callback,
@@ -448,12 +755,34 @@ void schedulePackageCommitCallback(neobrowser::PackageCommitCallback callback,
     runPackageCommitCallback(std::move(callback), std::move(result));
 }
 
+void invokeRetainedFileSetCallback(std::uint32_t requestId,
+                                   std::uint32_t sessionId,
+                                   std::string displayName,
+                                   std::vector<neobrowser::RetainedFileInfo> files,
+                                   std::string error) noexcept {
+    auto& callbacks = retainedFileSetCallbacks();
+    const auto found = callbacks.find(requestId);
+    if (found == callbacks.end()) return;
+    neobrowser::RetainedFileSetCallback callback = std::move(found->second);
+    callbacks.erase(found);
+    // Deliberately invoke inline. JavaScript calls this export through
+    // ccall(..., {async:true}), allowing the callback to perform bounded
+    // Asyncify-backed range reads while parsing an archive index.
+    runRetainedFileSetCallback(
+        std::move(callback),
+        neobrowser::RetainedFileSetResult{
+            sessionId, std::move(displayName), std::move(files), std::move(error)});
+}
+
 void invokeOpenFilesCallback(std::uint32_t requestId,
                              std::vector<std::filesystem::path> paths,
                              std::string error) noexcept {
     auto& callbacks = openFileCallbacks();
     const auto found = callbacks.find(requestId);
-    if (found == callbacks.end()) return;
+    if (found == callbacks.end()) {
+        neobrowser::releaseImportedFiles(paths);
+        return;
+    }
 
     neobrowser::OpenFilesCallback callback = std::move(found->second);
     callbacks.erase(found);
@@ -484,6 +813,24 @@ void invokeDownloadCallback(std::uint32_t requestId,
     scheduleDownloadCallback(
         std::move(callback),
         neobrowser::DownloadResult{downloadDispositionFromInt(disposition), std::move(error)});
+}
+
+void invokeRetainedExportCallback(std::uint32_t requestId,
+                                 int disposition,
+                                 std::size_t filesWritten,
+                                 std::uint64_t bytesWritten,
+                                 bool usedDirectory,
+                                 std::string error) noexcept {
+    auto& callbacks = retainedExportCallbacks();
+    const auto found = callbacks.find(requestId);
+    if (found == callbacks.end()) return;
+    neobrowser::RetainedExportCallback callback = std::move(found->second);
+    callbacks.erase(found);
+    scheduleRetainedExportCallback(
+        std::move(callback),
+        neobrowser::RetainedExportResult{
+            downloadDispositionFromInt(disposition), filesWritten, bytesWritten,
+            usedDirectory, std::move(error)});
 }
 
 void invokePackageDirectoryCallback(std::uint32_t requestId,
@@ -549,6 +896,50 @@ void invokePackageCommitCallback(std::uint32_t requestId,
 } // namespace
 
 #if defined(__EMSCRIPTEN__)
+
+extern "C" EMSCRIPTEN_KEEPALIVE void neo_browser_retained_file_set_completed(
+    unsigned int requestId,
+    unsigned int sessionId,
+    const char* displayName,
+    const char* payload,
+    const char* error) {
+    try {
+        invokeRetainedFileSetCallback(
+            requestId,
+            sessionId,
+            displayName == nullptr ? std::string{} : std::string(displayName),
+            parseRetainedFilePayload(payload),
+            error == nullptr ? std::string{} : std::string(error));
+    } catch (const std::exception& exception) {
+        invokeRetainedFileSetCallback(
+            requestId, sessionId, {}, {}, exception.what());
+    }
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE void neo_browser_retained_export_completed(
+    unsigned int requestId,
+    int disposition,
+    unsigned int filesWritten,
+    const char* bytesWritten,
+    int usedDirectory,
+    const char* error) {
+    std::uint64_t parsedBytes = 0;
+    std::string parsedError = error == nullptr ? std::string{} : std::string(error);
+    try {
+        parsedBytes = parseUnsigned64(
+            bytesWritten == nullptr ? std::string_view{"0"} : std::string_view{bytesWritten},
+            "browser export byte count");
+    } catch (const std::exception& exception) {
+        if (parsedError.empty()) parsedError = exception.what();
+    }
+    invokeRetainedExportCallback(
+        requestId,
+        disposition,
+        static_cast<std::size_t>(filesWritten),
+        parsedBytes,
+        usedDirectory != 0,
+        std::move(parsedError));
+}
 
 extern "C" EMSCRIPTEN_KEEPALIVE void neo_browser_open_files_completed(
     unsigned int requestId,
@@ -620,6 +1011,161 @@ extern "C" EMSCRIPTEN_KEEPALIVE void neo_browser_package_commit_completed(
 
 namespace neobrowser {
 
+BrowserImportLease::BrowserImportLease(std::vector<std::filesystem::path> paths)
+    : paths_(std::move(paths)) {}
+
+BrowserImportLease::~BrowserImportLease() noexcept { reset(); }
+
+BrowserImportLease::BrowserImportLease(BrowserImportLease&& other) noexcept
+    : paths_(std::move(other.paths_)) {
+    other.paths_.clear();
+}
+
+BrowserImportLease& BrowserImportLease::operator=(BrowserImportLease&& other) noexcept {
+    if (this != &other) {
+        reset();
+        paths_ = std::move(other.paths_);
+        other.paths_.clear();
+    }
+    return *this;
+}
+
+void BrowserImportLease::reset(std::vector<std::filesystem::path> paths) {
+    if (!paths_.empty()) releaseImportedFiles(paths_);
+    paths_ = std::move(paths);
+}
+
+std::vector<std::filesystem::path> BrowserImportLease::detach() noexcept {
+    std::vector<std::filesystem::path> result = std::move(paths_);
+    paths_.clear();
+    return result;
+}
+
+void requestRetainedFiles(const std::string& title,
+                          const std::string& accept,
+                          bool multiple,
+                          RetainedFileSetCallback callback) {
+    if (!callback) return;
+#if defined(__EMSCRIPTEN__)
+    auto& callbacks = retainedFileSetCallbacks();
+    const std::uint32_t requestId = nextRequestId(callbacks);
+    callbacks.emplace(requestId, std::move(callback));
+    if (neo_browser_request_retained_files_js(
+            requestId, title.c_str(), accept.c_str(), multiple ? 1 : 0) == 0) {
+        invokeRetainedFileSetCallback(
+            requestId, 0, {}, {}, "The retained browser-file picker is unavailable.");
+    }
+#else
+    (void)title;
+    (void)accept;
+    (void)multiple;
+    callback(RetainedFileSetResult{
+        0, {}, {}, "Retained browser-file selection is unavailable in this build."});
+#endif
+}
+
+void requestRetainedDirectory(const std::string& title,
+                              const std::string& accept,
+                              RetainedFileSetCallback callback) {
+    if (!callback) return;
+#if defined(__EMSCRIPTEN__)
+    auto& callbacks = retainedFileSetCallbacks();
+    const std::uint32_t requestId = nextRequestId(callbacks);
+    callbacks.emplace(requestId, std::move(callback));
+    if (neo_browser_request_retained_directory_js(
+            requestId, title.c_str(), accept.c_str()) == 0) {
+        invokeRetainedFileSetCallback(
+            requestId, 0, {}, {}, "The retained browser-directory picker is unavailable.");
+    }
+#else
+    (void)title;
+    (void)accept;
+    callback(RetainedFileSetResult{
+        0, {}, {}, "Retained browser-directory selection is unavailable in this build."});
+#endif
+}
+
+void releaseRetainedFileSet(std::uint32_t sessionId) {
+#if defined(__EMSCRIPTEN__)
+    if (sessionId != 0) neo_browser_release_retained_file_set_js(sessionId);
+#else
+    (void)sessionId;
+#endif
+}
+
+void retainOnlyRetainedFiles(std::uint32_t sessionId,
+                             const std::vector<std::uint32_t>& fileIds) {
+#if defined(__EMSCRIPTEN__)
+    if (sessionId == 0) return;
+    std::ostringstream payload;
+    for (std::size_t index = 0; index < fileIds.size(); ++index) {
+        if (index != 0u) payload << ',';
+        payload << fileIds[index];
+    }
+    const std::string encoded = payload.str();
+    neo_browser_retain_only_retained_files_js(sessionId, encoded.c_str());
+#else
+    (void)sessionId;
+    (void)fileIds;
+#endif
+}
+
+bool readRetainedFileRange(std::uint32_t sessionId,
+                           std::uint32_t fileId,
+                           std::uint64_t offset,
+                           std::size_t length,
+                           std::vector<std::uint8_t>& bytes,
+                           std::string& error) {
+    bytes.clear();
+    error.clear();
+#if defined(__EMSCRIPTEN__)
+    constexpr std::size_t kMaximumIndexRange = 64u * 1024u * 1024u;
+    if (sessionId == 0 || fileId == 0) {
+        error = "Retained browser-file identity is invalid.";
+        return false;
+    }
+    if (length > kMaximumIndexRange) {
+        error = "Requested browser index range exceeds the 64 MiB safety limit.";
+        return false;
+    }
+    if (offset > 9007199254740991ULL ||
+        static_cast<std::uint64_t>(length) > 9007199254740991ULL - offset) {
+        error = "Requested browser-file range exceeds JavaScript's exact integer range.";
+        return false;
+    }
+    try {
+        bytes.resize(length);
+    } catch (const std::exception& exception) {
+        error = std::string("Unable to allocate browser index range: ") + exception.what();
+        return false;
+    }
+    char* jsError = neo_browser_read_retained_file_range_js(
+        sessionId, fileId, static_cast<double>(offset), length,
+        bytes.empty() ? nullptr : bytes.data());
+    error = takeAllocatedString(jsError);
+    if (!error.empty()) {
+        bytes.clear();
+        return false;
+    }
+    return true;
+#else
+    (void)sessionId;
+    (void)fileId;
+    (void)offset;
+    (void)length;
+    error = "Retained browser-file range access is unavailable in this build.";
+    return false;
+#endif
+}
+
+bool retainedDirectoryWriteSupported() {
+#if defined(__EMSCRIPTEN__)
+    return neo_browser_retained_directory_write_supported_js() != 0;
+#else
+    return false;
+#endif
+}
+
 void requestOpenFiles(const std::string& title,
                       const std::string& accept,
                       bool multiple,
@@ -641,6 +1187,41 @@ void requestOpenFiles(const std::string& title,
     (void)accept;
     (void)multiple;
     callback(OpenFilesResult{{}, "Browser file selection is unavailable in this build."});
+#endif
+}
+
+void requestOpenFilesOwned(const std::string& title,
+                           const std::string& accept,
+                           bool multiple,
+                           OwnedOpenFilesCallback callback) {
+    if (!callback) return;
+    requestOpenFiles(
+        title, accept, multiple,
+        [callback = std::move(callback)](OpenFilesResult result) mutable {
+            OwnedOpenFilesResult owned{
+                BrowserImportLease(std::move(result.paths)), std::move(result.error)};
+            callback(std::move(owned));
+        });
+}
+
+void releaseImportedFiles(const std::vector<std::filesystem::path>& paths) noexcept {
+#if defined(__EMSCRIPTEN__)
+    if (paths.empty()) return;
+    try {
+        std::ostringstream payload;
+        for (std::size_t index = 0; index < paths.size(); ++index) {
+            if (index != 0u) payload << '\n';
+            payload << paths[index].generic_string();
+        }
+        const std::string encoded = payload.str();
+        neo_browser_release_imported_files_js(encoded.c_str());
+    } catch (const std::exception& exception) {
+        std::fprintf(stderr, "[NeoTools] Unable to release browser imports: %s\n", exception.what());
+    } catch (...) {
+        std::fprintf(stderr, "[NeoTools] Unable to release browser imports.\n");
+    }
+#else
+    (void)paths;
 #endif
 }
 
@@ -759,6 +1340,64 @@ bool downloadFile(const std::filesystem::path& virtualPath,
     (void)virtualPath;
     (void)downloadName;
     return false;
+#endif
+}
+
+void requestExportRetainedFiles(RetainedExportMode mode,
+                                const std::string& defaultName,
+                                const std::vector<RetainedExportEntry>& entries,
+                                RetainedExportCallback callback) {
+    if (!callback) return;
+#if defined(__EMSCRIPTEN__)
+    if (entries.empty()) {
+        callback(RetainedExportResult{
+            DownloadDisposition::Cancelled, 0, 0, false,
+            "No retained browser-file ranges were selected for export."});
+        return;
+    }
+    constexpr std::uint64_t kMaximumExactJavaScriptInteger = 9007199254740991ULL;
+    for (const auto& entry : entries) {
+        if (entry.sessionId == 0 || entry.fileId == 0 || entry.outputPath.empty() ||
+            entry.outputPath.find('\n') != std::string::npos ||
+            entry.outputPath.find('\r') != std::string::npos ||
+            entry.outputPath.find('\t') != std::string::npos) {
+            callback(RetainedExportResult{
+                DownloadDisposition::Cancelled, 0, 0, false,
+                "A retained browser-file export entry is invalid."});
+            return;
+        }
+        if (entry.offset > std::numeric_limits<std::uint64_t>::max() - entry.size) {
+            callback(RetainedExportResult{
+                DownloadDisposition::Cancelled, 0, 0, false,
+                "A retained browser-file export range overflows."});
+            return;
+        }
+        if (entry.offset > kMaximumExactJavaScriptInteger ||
+            entry.size > kMaximumExactJavaScriptInteger - entry.offset) {
+            callback(RetainedExportResult{
+                DownloadDisposition::Cancelled, 0, 0, false,
+                "A retained browser-file export range exceeds JavaScript's exact integer range."});
+            return;
+        }
+    }
+    const std::string payload = serializeRetainedExportPayload(entries);
+    auto& callbacks = retainedExportCallbacks();
+    const std::uint32_t requestId = nextRequestId(callbacks);
+    callbacks.emplace(requestId, std::move(callback));
+    if (neo_browser_request_retained_export_js(
+            requestId, static_cast<int>(mode),
+            safeDownloadName(defaultName).c_str(), payload.c_str()) == 0) {
+        invokeRetainedExportCallback(
+            requestId, 0, 0, 0, false,
+            "The retained browser-file export bridge is unavailable.");
+    }
+#else
+    (void)mode;
+    (void)defaultName;
+    (void)entries;
+    callback(RetainedExportResult{
+        DownloadDisposition::Cancelled, 0, 0, false,
+        "Retained browser-file export is unavailable in this build."});
 #endif
 }
 

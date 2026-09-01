@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VERSIONS_FILE="$SCRIPT_DIR/../wasm/versions.env"
+[[ -f "$VERSIONS_FILE" ]] || { echo "Missing WebAssembly version manifest: $VERSIONS_FILE" >&2; exit 2; }
+# shellcheck disable=SC1090
+source "$VERSIONS_FILE"
+
 INPUT_DIR=""
 DIST_DIR=""
 APP_NAME=""
@@ -61,14 +67,14 @@ cat > "$DIST_DIR/THIRD_PARTY_NOTICES.txt" <<EOF_NOTICES
 $APP_NAME $VERSION WebAssembly build
 
 wxWidgets-WASM
-Source: https://github.com/PCBJam/wxWidgets
-Pinned commit: bca69b9fddc88adec57b05e6809467ef9f5158c8
+Source: $NEO_WASM_WX_REPOSITORY
+Pinned commit: $NEO_WASM_WX_COMMIT
 The WebAssembly-specific wxWidgets port sources identify LGPL-2.0 terms.
 The remainder of wxWidgets retains its upstream licensing terms.
 
 Emscripten SDK
 Source: https://github.com/emscripten-core/emsdk
-Version: 4.0.2
+Version: $NEO_WASM_EMSCRIPTEN_VERSION
 EOF_NOTICES
 
 cat > "$DIST_DIR/404.html" <<'EOF_404'

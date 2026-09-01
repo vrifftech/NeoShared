@@ -4,6 +4,7 @@ set -euo pipefail
 DEPS_ROOT=""
 JOBS=""
 CLEAN=0
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
   cat <<'USAGE'
@@ -30,6 +31,11 @@ DEPS_ROOT="$(cd "$DEPS_ROOT" && pwd)"
 source "$DEPS_ROOT/neo-wasm-versions.env"
 # shellcheck disable=SC1090
 source "$NEO_WASM_EMSDK_ROOT/emsdk_env.sh" >/dev/null
+EMCC_VERSION_OUTPUT="$(emcc --version)"
+grep -F "$NEO_WASM_EMSCRIPTEN_VERSION" <<<"$EMCC_VERSION_OUTPUT" >/dev/null || {
+  echo "Active emcc does not match the pinned version $NEO_WASM_EMSCRIPTEN_VERSION" >&2
+  exit 2
+}
 WX_SOURCE="$NEO_WASM_WX_SOURCE"
 WX_BUILD="$DEPS_ROOT/wxwidgets-wasm-build"
 [[ -n "$JOBS" ]] || JOBS="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)"
@@ -52,7 +58,6 @@ export NEO_WASM_CONFIG_SUB
 # committed from a filesystem that does not preserve Unix modes. Install
 # private executable copies in the dependency cache instead of relying on the
 # mode of the checked-out neoshared scripts.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WRAPPER_DIR="$DEPS_ROOT/autoconf-wrappers"
 mkdir -p "$WRAPPER_DIR"
 install -m 0755 \
@@ -65,7 +70,25 @@ export SHELL="$WRAPPER_DIR/wasm-config-sub-wrapper.sh"
 export CONFIG_SHELL="$WRAPPER_DIR/wasm-config-sub-wrapper.sh"
 export AUTOM4TE="$WRAPPER_DIR/wasm-autom4te-wrapper.sh"
 
-MARKER_TEXT="emscripten=$NEO_WASM_EMSCRIPTEN_VERSION wx=$NEO_WASM_WX_COMMIT model=js-exceptions-no-pthreads-v3"
+BUILD_INPUT_HASH="$(python3 - \
+  "$SCRIPT_DIR/../wasm/versions.env" \
+  "$SCRIPT_DIR/build-wx-wasm.sh" \
+  "$SCRIPT_DIR/wasm-config-sub-wrapper.sh" \
+  "$SCRIPT_DIR/wasm-autom4te-wrapper.sh" <<'PY'
+import hashlib
+import pathlib
+import sys
+h = hashlib.sha256()
+for value in sys.argv[1:]:
+    path = pathlib.Path(value)
+    h.update(path.name.encode('utf-8'))
+    h.update(b'\0')
+    h.update(path.read_bytes())
+    h.update(b'\0')
+print(h.hexdigest())
+PY
+)"
+MARKER_TEXT="emscripten=$NEO_WASM_EMSCRIPTEN_VERSION wx=$NEO_WASM_WX_COMMIT model=$NEO_WASM_BUILD_MODEL inputs=$BUILD_INPUT_HASH"
 if [[ -x "$WX_BUILD/wx-config" && -f "$WX_BUILD/.neo-wasm-build" ]] &&
    [[ "$(cat "$WX_BUILD/.neo-wasm-build")" == "$MARKER_TEXT" ]]; then
   echo "wxWidgets-WASM is already built at $WX_BUILD"
@@ -86,9 +109,19 @@ fi
 
 EM_CACHE_SYSROOT="$(em-config CACHE)/sysroot"
 PCRE2_INCLUDE="$WX_BUILD/3rdparty/pcre/src"
-export CFLAGS="-O2 -DNDEBUG -fexceptions -DZ_HAVE_UNISTD_H=1 -I$EM_CACHE_SYSROOT/include"
-export CXXFLAGS="-O2 -DNDEBUG -fexceptions -DZ_HAVE_UNISTD_H=1 -I$EM_CACHE_SYSROOT/include -I$PCRE2_INCLUDE"
-export LDFLAGS="-fexceptions -sUSE_ZLIB=1 -L$EM_CACHE_SYSROOT/lib/wasm32-emscripten"
+shell_quote() {
+  python3 - "$1" <<'PY_QUOTE'
+import shlex
+import sys
+print(shlex.quote(sys.argv[1]))
+PY_QUOTE
+}
+EM_CACHE_INCLUDE_ESCAPED="$(shell_quote "$EM_CACHE_SYSROOT/include")"
+PCRE2_INCLUDE_ESCAPED="$(shell_quote "$PCRE2_INCLUDE")"
+EM_CACHE_LIBRARY_ESCAPED="$(shell_quote "$EM_CACHE_SYSROOT/lib/wasm32-emscripten")"
+export CFLAGS="-O2 -DNDEBUG -fexceptions -DZ_HAVE_UNISTD_H=1 -I$EM_CACHE_INCLUDE_ESCAPED"
+export CXXFLAGS="-O2 -DNDEBUG -fexceptions -DZ_HAVE_UNISTD_H=1 -I$EM_CACHE_INCLUDE_ESCAPED -I$PCRE2_INCLUDE_ESCAPED"
+export LDFLAGS="-fexceptions -sUSE_ZLIB=1 -L$EM_CACHE_LIBRARY_ESCAPED"
 
 cd "$WX_BUILD"
 emconfigure "$WX_SOURCE/configure" \

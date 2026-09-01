@@ -4,10 +4,37 @@ include_guard(GLOBAL)
 # The wxWidgets DOM port and Emscripten SDK are external build dependencies;
 # application repositories continue to depend only on neoshared source targets.
 
-set(NEO_WASM_EMSCRIPTEN_VERSION "4.0.2" CACHE STRING
+set(_NEO_WASM_VERSIONS_FILE "${CMAKE_CURRENT_LIST_DIR}/../wasm/versions.env")
+if(NOT EXISTS "${_NEO_WASM_VERSIONS_FILE}")
+    message(FATAL_ERROR "NeoTools WebAssembly version manifest is missing: ${_NEO_WASM_VERSIONS_FILE}")
+endif()
+
+function(_neo_wasm_read_version key output)
+    file(STRINGS "${_NEO_WASM_VERSIONS_FILE}" _matches REGEX "^${key}=")
+    list(LENGTH _matches _match_count)
+    if(NOT _match_count EQUAL 1)
+        message(FATAL_ERROR "Expected exactly one ${key}= entry in ${_NEO_WASM_VERSIONS_FILE}")
+    endif()
+    list(GET _matches 0 _line)
+    string(REGEX REPLACE "^[^=]+=" "" _value "${_line}")
+    if(_value STREQUAL "")
+        message(FATAL_ERROR "${key} is empty in ${_NEO_WASM_VERSIONS_FILE}")
+    endif()
+    set(${output} "${_value}" PARENT_SCOPE)
+endfunction()
+
+_neo_wasm_read_version(NEO_WASM_EMSCRIPTEN_VERSION _neo_wasm_pinned_emscripten)
+_neo_wasm_read_version(NEO_WASM_WX_COMMIT _neo_wasm_pinned_wx_commit)
+
+set(NEO_WASM_EMSCRIPTEN_VERSION "${_neo_wasm_pinned_emscripten}" CACHE STRING
     "Pinned Emscripten SDK version used by the NeoTools browser builds")
-set(NEO_WASM_WX_COMMIT "bca69b9fddc88adec57b05e6809467ef9f5158c8" CACHE STRING
+set(NEO_WASM_WX_COMMIT "${_neo_wasm_pinned_wx_commit}" CACHE STRING
     "Pinned PCBJam/wxWidgets wasm-port commit")
+if(NOT "${NEO_WASM_EMSCRIPTEN_VERSION}" STREQUAL "${_neo_wasm_pinned_emscripten}" OR
+   NOT "${NEO_WASM_WX_COMMIT}" STREQUAL "${_neo_wasm_pinned_wx_commit}")
+    message(FATAL_ERROR
+        "WebAssembly dependency overrides do not match neoshared/wasm/versions.env")
+endif()
 set(NEO_WX_WASM_SOURCE "" CACHE PATH
     "Path to the pinned PCBJam/wxWidgets wasm-port checkout")
 set(NEO_WX_WASM_BUILD "" CACHE PATH
@@ -90,7 +117,7 @@ function(neo_configure_wasm_target target_name)
                 "WebAssembly preload source was not found: ${_preload_source_absolute}")
         endif()
         list(APPEND _preload_link_options
-            "SHELL:--preload-file ${_preload_source_absolute}@${_preload_destination}")
+            "SHELL:--preload-file \"${_preload_source_absolute}@${_preload_destination}\"")
     endforeach()
 
     set(NEO_WASM_PAGE_TITLE "${NEO_WASM_NAME} ${_app_version}")
@@ -139,6 +166,8 @@ function(neo_configure_wasm_target target_name)
         "SHELL:-sERROR_ON_UNDEFINED_SYMBOLS=1"
         "SHELL:-Wl,--undefined=neo_wasm_dialog_compat_link_anchor"
         "SHELL:-Wl,--undefined=neo_browser_open_files_completed"
+        "SHELL:-Wl,--undefined=neo_browser_retained_file_set_completed"
+        "SHELL:-Wl,--undefined=neo_browser_retained_export_completed"
         "SHELL:-Wl,--undefined=neo_browser_download_completed"
         "SHELL:-Wl,--undefined=neo_browser_package_directory_completed"
         "SHELL:-Wl,--undefined=neo_browser_package_workspace_completed"
@@ -148,10 +177,10 @@ function(neo_configure_wasm_target target_name)
         "-sASYNCIFY_IMPORTS=startModal,js_writeTextToClipboard,js_readTextFromClipboard,js_clipboardHasText,js_clearClipboard,js_enumerateFonts"
         "-sEXPORTED_RUNTIME_METHODS=HEAPU8,HEAP8,HEAP32,ccall,FS"
         "SHELL:-lidbfs.js"
-        "SHELL:--pre-js ${_neo_pre_js}"
-        "SHELL:--pre-js ${_wx_pre_js}"
-        "SHELL:--pre-js ${_wx_dom_pre_js}"
-        "SHELL:--shell-file ${_shell_file}"
+        "SHELL:--pre-js \"${_neo_pre_js}\""
+        "SHELL:--pre-js \"${_wx_pre_js}\""
+        "SHELL:--pre-js \"${_wx_dom_pre_js}\""
+        "SHELL:--shell-file \"${_shell_file}\""
         ${_preload_link_options}
     )
 

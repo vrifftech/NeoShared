@@ -45,14 +45,14 @@ done
 [[ -n "$OUTPUT_ZIP" ]] || { echo "--output is required" >&2; exit 2; }
 case "$ARCH" in arm64|x86_64) ;; *) echo "--arch must be arm64 or x86_64" >&2; exit 2;; esac
 
-for command_name in cmake codesign ditto file lipo otool plutil shasum; do
+for command_name in cmake codesign ditto find lipo od otool plutil readlink shasum sort tr; do
   command -v "$command_name" >/dev/null 2>&1 || {
     echo "Required command is unavailable: $command_name" >&2
     exit 2
   }
 done
 
-APP_BUNDLE="$(cd "$(dirname "$APP_BUNDLE")" && pwd)/$(basename "$APP_BUNDLE")"
+APP_BUNDLE="$(cd -P "$APP_BUNDLE" && pwd)"
 PLIST="$APP_BUNDLE/Contents/Info.plist"
 [[ -f "$PLIST" ]] || { echo "Bundle Info.plist is missing: $PLIST" >&2; exit 2; }
 PLIST_BUDDY=/usr/libexec/PlistBuddy
@@ -107,14 +107,88 @@ check_arch() {
   esac
 }
 
-check_arch "$EXECUTABLE"
-while IFS= read -r -d '' candidate; do
-  if file "$candidate" | grep -q 'Mach-O'; then
-    check_arch "$candidate"
-  fi
-done < <(find "$APP_BUNDLE" -type f -print0)
+is_macho_file() {
+  local magic
+  magic="$(od -An -tx1 -N4 "$1" 2>/dev/null | tr -d '[:space:]')"
+  case "$magic" in
+    feedface|cefaedfe|feedfacf|cffaedfe|cafebabe|bebafeca|cafebabf|bfbafeca) return 0;;
+    *) return 1;;
+  esac
+}
 
+resolve_bundle_file() {
+  local path="$1"
+  local directory
+  local link_target
+  local hops=0
+
+  while [[ -L "$path" ]]; do
+    hops=$((hops + 1))
+    if [[ "$hops" -gt 64 ]]; then
+      echo "Too many symbolic-link hops inside the application bundle: $1" >&2
+      return 1
+    fi
+    directory="$(cd -P "$(dirname "$path")" && pwd)"
+    link_target="$(readlink "$path")"
+    case "$link_target" in
+      /*) path="$link_target";;
+      *) path="$directory/$link_target";;
+    esac
+  done
+
+  directory="$(cd -P "$(dirname "$path")" && pwd)"
+  printf '%s/%s\n' "$directory" "$(basename "$path")"
+}
+
+EXECUTABLE_RESOLVED="$(resolve_bundle_file "$EXECUTABLE")"
+[[ -f "$EXECUTABLE_RESOLVED" ]] || {
+  echo "Bundle executable resolves to a missing file: $EXECUTABLE -> $EXECUTABLE_RESOLVED" >&2
+  exit 1
+}
+
+MACHO_PATHS="$(mktemp)"
 BAD_DEPS="$(mktemp)"
+cleanup_temporary_files() {
+  rm -f "$MACHO_PATHS" "$BAD_DEPS"
+}
+trap cleanup_temporary_files EXIT
+
+# Build one canonical Mach-O inventory and reuse it for architecture,
+# dependency, signing, and verification checks. Include symbolic links so
+# Homebrew's versioned Intel dylib layouts cannot bypass the signing pass.
+while IFS= read -r -d '' candidate; do
+  resolved_candidate="$(resolve_bundle_file "$candidate")"
+  case "$resolved_candidate" in
+    "$APP_BUNDLE"/*) ;;
+    *)
+      echo "Bundle symbolic link resolves outside the application: $candidate -> $resolved_candidate" >&2
+      exit 1
+      ;;
+  esac
+  if [[ -d "$resolved_candidate" ]]; then
+    continue
+  fi
+  [[ -f "$resolved_candidate" ]] || {
+    echo "Bundle entry resolves to a missing file: $candidate -> $resolved_candidate" >&2
+    exit 1
+  }
+  if is_macho_file "$resolved_candidate"; then
+    printf '%s\n' "$resolved_candidate" >> "$MACHO_PATHS"
+  fi
+done < <(find "$APP_BUNDLE/Contents" \
+  \( -type f -o -type l \) -print0)
+LC_ALL=C sort -u -o "$MACHO_PATHS" "$MACHO_PATHS"
+
+if ! grep -Fqx -- "$EXECUTABLE_RESOLVED" "$MACHO_PATHS"; then
+  echo "The main executable was not identified as Mach-O: $EXECUTABLE_RESOLVED" >&2
+  exit 1
+fi
+
+while IFS= read -r candidate; do
+  [[ -n "$candidate" ]] || continue
+  check_arch "$candidate"
+done < "$MACHO_PATHS"
+
 inspect_deps() {
   local binary="$1"
   local dependency
@@ -125,29 +199,65 @@ inspect_deps() {
     esac
   done < <(otool -L "$binary" | sed -n '2,$s/^[[:space:]]*\([^[:space:]]*\).*/\1/p')
 }
-inspect_deps "$EXECUTABLE"
-while IFS= read -r -d '' candidate; do
-  if file "$candidate" | grep -q 'Mach-O'; then
-    inspect_deps "$candidate"
-  fi
-done < <(find "$APP_BUNDLE" -type f -print0)
+while IFS= read -r candidate; do
+  [[ -n "$candidate" ]] || continue
+  inspect_deps "$candidate"
+done < "$MACHO_PATHS"
 if [[ -s "$BAD_DEPS" ]]; then
   echo "The bundle still contains non-system absolute library references:" >&2
   cat "$BAD_DEPS" >&2
-  rm -f "$BAD_DEPS"
   exit 1
 fi
-rm -f "$BAD_DEPS"
+
+sign_file() {
+  local candidate="$1"
+  printf 'Signing Mach-O: %s\n' "$candidate"
+  codesign --force --sign - --timestamp=none "$candidate" </dev/null
+  codesign --verify --strict --verbose=2 "$candidate" </dev/null
+}
+
+sign_bundle() {
+  local candidate="$1"
+  printf 'Signing nested bundle: %s\n' "$candidate"
+  codesign --force --sign - --timestamp=none "$candidate" </dev/null
+  codesign --verify --deep --strict --verbose=2 "$candidate" </dev/null
+}
 
 xattr -cr "$APP_BUNDLE" 2>/dev/null || true
-rm -rf "$APP_BUNDLE/Contents/_CodeSignature"
-while IFS= read -r -d '' candidate; do
-  if file "$candidate" | grep -q 'Mach-O'; then
-    codesign --force --sign - --timestamp=none "$candidate"
+find "$APP_BUNDLE" -type d -name _CodeSignature -prune -exec rm -rf {} +
+
+# Sign all embedded Mach-O code first. Redirect stdin so codesign cannot
+# consume the path inventory used by the surrounding loop on Bash 3.2.
+# The main executable is signed after nested bundles, immediately before the
+# outer application bundle.
+while IFS= read -r candidate; do
+  [[ -n "$candidate" ]] || continue
+  [[ "$candidate" == "$EXECUTABLE_RESOLVED" ]] && continue
+  sign_file "$candidate"
+done < "$MACHO_PATHS"
+
+# Sign nested code containers from the deepest level outward, as required by
+# Apple's manual-signing model. Plain dylibs in Contents/Frameworks were
+# already signed by the Mach-O pass above.
+while IFS= read -r -d '' nested_bundle; do
+  if grep -Fq -- "$nested_bundle/" "$MACHO_PATHS"; then
+    sign_bundle "$nested_bundle"
   fi
-done < <(find "$APP_BUNDLE/Contents" -type f -print0)
-codesign --force --sign - --timestamp=none "$APP_BUNDLE"
-codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
+done < <(find "$APP_BUNDLE/Contents" -depth -type d \
+  \( -name '*.app' -o -name '*.framework' -o -name '*.xpc' \
+     -o -name '*.appex' -o -name '*.plugin' -o -name '*.bundle' \) -print0)
+
+sign_file "$EXECUTABLE_RESOLVED"
+printf 'Signing application bundle: %s\n' "$APP_BUNDLE"
+codesign --force --sign - --timestamp=none "$APP_BUNDLE" </dev/null
+
+# Verify each concrete Mach-O independently before the recursive app check so
+# an unsigned Intel/Homebrew dylib is reported by its exact path.
+while IFS= read -r candidate; do
+  [[ -n "$candidate" ]] || continue
+  codesign --verify --strict --verbose=2 "$candidate" </dev/null
+done < "$MACHO_PATHS"
+codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE" </dev/null
 plutil -lint "$PLIST"
 
 mkdir -p "$(dirname "$OUTPUT_ZIP")"

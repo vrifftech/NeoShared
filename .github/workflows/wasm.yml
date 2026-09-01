@@ -12,9 +12,6 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  NEO_WASM_EMSCRIPTEN_VERSION: '4.0.2'
-
 jobs:
   wasm:
     name: Emscripten core build
@@ -39,7 +36,16 @@ jobs:
           path: |
             .neo-wasm-deps/emsdk
             .neo-wasm-deps/neo-wasm-versions.env
-          key: neoshared-wasm-${{ runner.os }}-${{ env.NEO_WASM_EMSCRIPTEN_VERSION }}-${{ hashFiles('scripts/setup-wasm.sh', 'scripts/build-wasm.sh') }}
+          key: neoshared-wasm-${{ runner.os }}-${{ hashFiles('wasm/versions.env', 'cmake/NeoWasm.cmake', 'scripts/setup-wasm.sh', 'scripts/build-wasm.sh') }}
+
+      - name: Validate shared browser sources
+        run: |
+          node --check wasm/neo-pre.js
+          node tests/wasm-browser-files-test.mjs
+          python3 tests/wasm-shared-static-regressions.py
+          python3 tests/wasm-cmake-space-paths.py --neoshared-root .
+          c++ -std=c++17 -Wall -Wextra -Wpedantic -Werror \
+            -Iwx -c wx/NeoBrowserFiles.cpp -o /tmp/NeoBrowserFiles.o
 
       - name: Configure and build
         run: |

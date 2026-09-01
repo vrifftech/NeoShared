@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-EMSCRIPTEN_VERSION="4.0.2"
-WX_WASM_REPOSITORY="https://github.com/PCBJam/wxWidgets.git"
-WX_WASM_COMMIT="bca69b9fddc88adec57b05e6809467ef9f5158c8"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VERSIONS_FILE="$SCRIPT_DIR/../wasm/versions.env"
+[[ -f "$VERSIONS_FILE" ]] || { echo "Missing WebAssembly version manifest: $VERSIONS_FILE" >&2; exit 2; }
+# shellcheck disable=SC1090
+source "$VERSIONS_FILE"
+EMSCRIPTEN_VERSION="$NEO_WASM_EMSCRIPTEN_VERSION"
+WX_WASM_REPOSITORY="$NEO_WASM_WX_REPOSITORY"
+WX_WASM_COMMIT="$NEO_WASM_WX_COMMIT"
 DEPS_ROOT=""
 FORCE=0
 INSTALL_WX=1
@@ -44,6 +49,13 @@ if [[ ! -d "$EMSDK_ROOT/.git" ]]; then
 fi
 "$EMSDK_ROOT/emsdk" install "$EMSCRIPTEN_VERSION"
 "$EMSDK_ROOT/emsdk" activate "$EMSCRIPTEN_VERSION"
+# shellcheck disable=SC1091
+source "$EMSDK_ROOT/emsdk_env.sh" >/dev/null
+EMCC_VERSION_OUTPUT="$(emcc --version)"
+grep -F "$EMSCRIPTEN_VERSION" <<<"$EMCC_VERSION_OUTPUT" >/dev/null || {
+  echo "Activated emcc does not match the pinned version $EMSCRIPTEN_VERSION" >&2
+  exit 2
+}
 
 if [[ "$INSTALL_WX" == 1 ]]; then
   if [[ ! -d "$WX_SOURCE/.git" ]]; then
@@ -56,11 +68,18 @@ if [[ "$INSTALL_WX" == 1 ]]; then
     git -C "$WX_SOURCE" checkout --detach FETCH_HEAD
   fi
   git -C "$WX_SOURCE" submodule update --init --recursive
+  [[ "$(git -C "$WX_SOURCE" rev-parse HEAD)" == "$WX_WASM_COMMIT" ]] || {
+    echo "wxWidgets checkout does not match the pinned commit $WX_WASM_COMMIT" >&2
+    exit 2
+  }
 fi
 
 cat > "$DEPS_ROOT/neo-wasm-versions.env" <<EOF_ENV
 export NEO_WASM_EMSCRIPTEN_VERSION='$EMSCRIPTEN_VERSION'
 export NEO_WASM_WX_COMMIT='$WX_WASM_COMMIT'
+export NEO_WASM_WX_REPOSITORY='$WX_WASM_REPOSITORY'
+export NEO_WASM_BUILD_MODEL='$NEO_WASM_BUILD_MODEL'
+export NEO_WASM_VERSION_MANIFEST='$VERSIONS_FILE'
 export NEO_WASM_EMSDK_ROOT='$EMSDK_ROOT'
 export NEO_WASM_WX_SOURCE='$WX_SOURCE'
 EOF_ENV
