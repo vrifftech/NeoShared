@@ -45,7 +45,7 @@ done
 [[ -n "$OUTPUT_ZIP" ]] || { echo "--output is required" >&2; exit 2; }
 case "$ARCH" in arm64|x86_64) ;; *) echo "--arch must be arm64 or x86_64" >&2; exit 2;; esac
 
-for command_name in awk cmake codesign ditto find grep lipo mktemp otool plutil readlink sed shasum sort xattr; do
+for command_name in awk cmake codesign ditto file find grep lipo mktemp otool plutil readlink sed shasum sort xattr; do
   command -v "$command_name" >/dev/null 2>&1 || {
     echo "Required command is unavailable: $command_name" >&2
     exit 2
@@ -97,10 +97,19 @@ cmake \
   "-DSEARCH_DIRS=$SEARCH_DIRS_JOINED" \
   -P "$ROOT_DIR/cmake/NeoMacOSFixupBundle.cmake"
 
+macho_architectures() {
+  local binary="$1"
+  LC_ALL=C lipo -archs "$binary" 2>/dev/null || true
+}
+
 check_arch() {
   local binary="$1"
   local architectures
-  architectures="$(lipo -archs "$binary" 2>/dev/null || true)"
+  architectures="$(macho_architectures "$binary")"
+  if [[ -z "$architectures" ]]; then
+    echo "Architecture check received a non-Mach-O file: $binary" >&2
+    return 1
+  fi
   case " $architectures " in
     *" $ARCH "*) ;;
     *) echo "Required architecture $ARCH is missing: $binary ($architectures)" >&2; return 1;;
@@ -108,7 +117,16 @@ check_arch() {
 }
 
 is_macho_file() {
-  otool -hv "$1" >/dev/null 2>&1
+  local description
+
+  # Do not use the exit status of `otool -hv` as a file-type predicate. Some
+  # Xcode/macOS combinations return success for non-code bundle resources,
+  # which previously admitted Contents/Info.plist to the architecture loop.
+  description="$(LC_ALL=C file -b "$1" 2>/dev/null || true)"
+  case "$description" in
+    Mach-O*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 resolve_bundle_file() {

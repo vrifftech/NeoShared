@@ -11,8 +11,9 @@ usage() {
 usage: build-wx-wasm.sh --deps-root DIR [--jobs N] [--clean]
 
 Builds the pinned PCBJam wxWidgets DOM/WebAssembly port as static libraries.
-The build intentionally uses Emscripten's JavaScript exception model and no
-pthreads, allowing deployment on ordinary GitHub Pages without COOP/COEP.
+The build uses Emscripten's JavaScript exception model and no pthreads, allowing
+ordinary GitHub Pages deployment without COOP/COEP. The upstream checkout is
+not edited or patched.
 USAGE
 }
 while [[ $# -gt 0 ]]; do
@@ -38,10 +39,15 @@ grep -F "$NEO_WASM_EMSCRIPTEN_VERSION" <<<"$EMCC_VERSION_OUTPUT" >/dev/null || {
 }
 WX_SOURCE="$NEO_WASM_WX_SOURCE"
 WX_BUILD="$DEPS_ROOT/wxwidgets-wasm-build"
+NO_PTHREADS_COMPAT="$SCRIPT_DIR/../wasm/wx-no-pthreads-compat.h"
+[[ -f "$NO_PTHREADS_COMPAT" ]] || {
+  echo "Missing wxWidgets no-pthreads compatibility header: $NO_PTHREADS_COMPAT" >&2
+  exit 2
+}
 [[ -n "$JOBS" ]] || JOBS="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)"
 [[ "$CLEAN" == 0 ]] || rm -rf "$WX_BUILD"
 
-for cmd in emcc em++ emconfigure emmake emar embuilder autoconf autoreconf automake make install python3; do
+for cmd in emcc em++ emconfigure emmake emar embuilder autoconf autoreconf automake make install sha256sum awk; do
   command -v "$cmd" >/dev/null || { echo "Missing command: $cmd" >&2; exit 2; }
 done
 
@@ -53,11 +59,9 @@ NEO_WASM_CONFIG_SUB="$GNU_CONFIG_DIR/config.sub"
   exit 2
 }
 export NEO_WASM_CONFIG_SUB
-# Autoconf executes AUTOM4TE, SHELL, and CONFIG_SHELL directly. Git's
-# executable bit can be lost when a repository is populated from a ZIP or
-# committed from a filesystem that does not preserve Unix modes. Install
-# private executable copies in the dependency cache instead of relying on the
-# mode of the checked-out neoshared scripts.
+
+# Autoconf executes AUTOM4TE, SHELL, and CONFIG_SHELL directly. Install private
+# executable copies so ZIP extraction or a non-POSIX checkout cannot break them.
 WRAPPER_DIR="$DEPS_ROOT/autoconf-wrappers"
 mkdir -p "$WRAPPER_DIR"
 install -m 0755 \
@@ -66,29 +70,29 @@ install -m 0755 \
 install -m 0755 \
   "$SCRIPT_DIR/wasm-autom4te-wrapper.sh" \
   "$WRAPPER_DIR/wasm-autom4te-wrapper.sh"
+install -m 0644 "$NO_PTHREADS_COMPAT" "$WRAPPER_DIR/wx-no-pthreads-compat.h"
+NO_PTHREADS_COMPAT="$WRAPPER_DIR/wx-no-pthreads-compat.h"
 export SHELL="$WRAPPER_DIR/wasm-config-sub-wrapper.sh"
 export CONFIG_SHELL="$WRAPPER_DIR/wasm-config-sub-wrapper.sh"
 export AUTOM4TE="$WRAPPER_DIR/wasm-autom4te-wrapper.sh"
 
-BUILD_INPUT_HASH="$(python3 - \
-  "$SCRIPT_DIR/../wasm/versions.env" \
-  "$SCRIPT_DIR/build-wx-wasm.sh" \
-  "$SCRIPT_DIR/patch-wx-wasm-no-pthreads.py" \
-  "$SCRIPT_DIR/wasm-config-sub-wrapper.sh" \
-  "$SCRIPT_DIR/wasm-autom4te-wrapper.sh" <<'PY'
-import hashlib
-import pathlib
-import sys
-h = hashlib.sha256()
-for value in sys.argv[1:]:
-    path = pathlib.Path(value)
-    h.update(path.name.encode('utf-8'))
-    h.update(b'\0')
-    h.update(path.read_bytes())
-    h.update(b'\0')
-print(h.hexdigest())
-PY
-)"
+hash_inputs=(
+  "$SCRIPT_DIR/../wasm/versions.env"
+  "$SCRIPT_DIR/../wasm/wx-no-pthreads-compat.h"
+  "$SCRIPT_DIR/build-wx-wasm.sh"
+  "$SCRIPT_DIR/wasm-config-sub-wrapper.sh"
+  "$SCRIPT_DIR/wasm-autom4te-wrapper.sh"
+)
+for input in "${hash_inputs[@]}"; do
+  [[ -f "$input" ]] || { echo "Missing wxWidgets build input: $input" >&2; exit 2; }
+done
+BUILD_INPUT_HASH="$({
+  for input in "${hash_inputs[@]}"; do
+    printf '%s\0' "$(basename "$input")"
+    cat "$input"
+    printf '\0'
+  done
+} | sha256sum | awk '{print $1}')"
 MARKER_TEXT="emscripten=$NEO_WASM_EMSCRIPTEN_VERSION wx=$NEO_WASM_WX_COMMIT model=$NEO_WASM_BUILD_MODEL inputs=$BUILD_INPUT_HASH"
 if [[ -x "$WX_BUILD/wx-config" && -f "$WX_BUILD/.neo-wasm-build" ]] &&
    [[ "$(cat "$WX_BUILD/.neo-wasm-build")" == "$MARKER_TEXT" ]]; then
@@ -100,8 +104,31 @@ rm -rf "$WX_BUILD"
 mkdir -p "$WX_BUILD"
 embuilder build zlib
 
-python3 "$SCRIPT_DIR/patch-wx-wasm-no-pthreads.py" \
-  "$WX_SOURCE/src/wasm/utils.cpp"
+# Prove against the active Emscripten headers that the forced compatibility
+# header eliminates the legacy pthread symbols before spending time on wxWidgets.
+PROBE_SOURCE="$WRAPPER_DIR/wx-no-pthreads-probe.cpp"
+PROBE_OBJECT="$WRAPPER_DIR/wx-no-pthreads-probe.o"
+cat > "$PROBE_SOURCE" <<'EOF_PROBE'
+#include <emscripten/threading.h>
+static void neo_probe_callback(void*) {}
+int neo_probe_no_pthreads()
+{
+    if (emscripten_is_main_runtime_thread())
+        return 1;
+    emscripten_async_run_in_main_runtime_thread(
+        EM_FUNC_SIG_VI, &neo_probe_callback, nullptr);
+    return 0;
+}
+EOF_PROBE
+em++ -std=c++17 -O0 -include "$NO_PTHREADS_COMPAT" -c "$PROBE_SOURCE" -o "$PROBE_OBJECT"
+LLVM_NM="$NEO_WASM_EMSDK_ROOT/upstream/bin/llvm-nm"
+if [[ -x "$LLVM_NM" ]] &&
+   "$LLVM_NM" -u "$PROBE_OBJECT" 2>/dev/null |
+     grep -E 'emscripten_(is_main_runtime_thread|async_run_in_main_runtime_thread_)' >/dev/null; then
+  echo "The wxWidgets no-pthreads compatibility header did not remove pthread-only references." >&2
+  exit 2
+fi
+rm -f "$PROBE_SOURCE" "$PROBE_OBJECT"
 
 if [[ ! -x "$WX_SOURCE/configure" || "$WX_SOURCE/configure.in" -nt "$WX_SOURCE/configure" ||
       ( -f "$WX_SOURCE/autoconf_inc.m4" && "$WX_SOURCE/autoconf_inc.m4" -nt "$WX_SOURCE/configure" ) ]]; then
@@ -111,20 +138,17 @@ if [[ -d "$WX_SOURCE/3rdparty/pcre" ]]; then
   (cd "$WX_SOURCE/3rdparty/pcre" && autoreconf -fi >/dev/null 2>&1 || true)
 fi
 
+shell_quote() {
+  printf '%q' "$1"
+}
 EM_CACHE_SYSROOT="$(em-config CACHE)/sysroot"
 PCRE2_INCLUDE="$WX_BUILD/3rdparty/pcre/src"
-shell_quote() {
-  python3 - "$1" <<'PY_QUOTE'
-import shlex
-import sys
-print(shlex.quote(sys.argv[1]))
-PY_QUOTE
-}
 EM_CACHE_INCLUDE_ESCAPED="$(shell_quote "$EM_CACHE_SYSROOT/include")"
 PCRE2_INCLUDE_ESCAPED="$(shell_quote "$PCRE2_INCLUDE")"
 EM_CACHE_LIBRARY_ESCAPED="$(shell_quote "$EM_CACHE_SYSROOT/lib/wasm32-emscripten")"
+NO_PTHREADS_COMPAT_ESCAPED="$(shell_quote "$NO_PTHREADS_COMPAT")"
 export CFLAGS="-O2 -DNDEBUG -fexceptions -DZ_HAVE_UNISTD_H=1 -I$EM_CACHE_INCLUDE_ESCAPED"
-export CXXFLAGS="-O2 -DNDEBUG -fexceptions -DZ_HAVE_UNISTD_H=1 -I$EM_CACHE_INCLUDE_ESCAPED -I$PCRE2_INCLUDE_ESCAPED"
+export CXXFLAGS="-O2 -DNDEBUG -fexceptions -DZ_HAVE_UNISTD_H=1 -include $NO_PTHREADS_COMPAT_ESCAPED -I$EM_CACHE_INCLUDE_ESCAPED -I$PCRE2_INCLUDE_ESCAPED"
 export LDFLAGS="-fexceptions -sUSE_ZLIB=1 -L$EM_CACHE_LIBRARY_ESCAPED"
 
 cd "$WX_BUILD"
@@ -165,5 +189,16 @@ for stub in richtext webview; do
   emar rcs "libwx_wasmu_${stub}-3.2.a"
   ln -s "libwx_wasmu_${stub}-3.2.a" "libwx_wasmu_${stub}-3.2-emscripten.a"
 done
+
+# Catch any regression in the pinned source or compiler flags before an
+# application reaches the final link step.
+if [[ -x "$LLVM_NM" ]]; then
+  if "$LLVM_NM" -u ./*.a 2>/dev/null |
+       grep -E 'emscripten_(is_main_runtime_thread|async_run_in_main_runtime_thread_)' >/dev/null; then
+    echo "wxWidgets archives still reference Emscripten pthread-only APIs." >&2
+    exit 1
+  fi
+fi
+
 printf '%s' "$MARKER_TEXT" > "$WX_BUILD/.neo-wasm-build"
 "$WX_BUILD/wx-config" --version

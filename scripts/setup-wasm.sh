@@ -18,8 +18,9 @@ usage() {
 usage: setup-wasm.sh --deps-root DIR [--force] [--skip-wx]
 
 Installs the pinned Emscripten SDK and, unless --skip-wx is supplied, checks
-out the pinned PCBJam/wxWidgets wasm-port commit under DIR. Nothing is
-installed globally.
+out the pinned wxWidgets WASM-port commit under DIR. Nothing is installed
+globally. The wxWidgets checkout is reset to the pinned commit on every run so
+stale source edits cannot leak in through the Actions cache.
 USAGE
 }
 
@@ -33,7 +34,9 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 [[ -n "$DEPS_ROOT" ]] || { echo "--deps-root is required" >&2; exit 2; }
-for cmd in git python3; do command -v "$cmd" >/dev/null || { echo "Missing command: $cmd" >&2; exit 2; }; done
+for cmd in git python3; do
+  command -v "$cmd" >/dev/null || { echo "Missing command: $cmd" >&2; exit 2; }
+done
 mkdir -p "$DEPS_ROOT"
 DEPS_ROOT="$(cd "$DEPS_ROOT" && pwd)"
 EMSDK_ROOT="$DEPS_ROOT/emsdk"
@@ -58,18 +61,38 @@ grep -F "$EMSCRIPTEN_VERSION" <<<"$EMCC_VERSION_OUTPUT" >/dev/null || {
 }
 
 if [[ "$INSTALL_WX" == 1 ]]; then
+  if [[ -e "$WX_SOURCE" && ! -d "$WX_SOURCE/.git" ]]; then
+    echo "Removing an invalid cached wxWidgets checkout: $WX_SOURCE" >&2
+    rm -rf "$WX_SOURCE"
+  fi
   if [[ ! -d "$WX_SOURCE/.git" ]]; then
     git init "$WX_SOURCE"
     git -C "$WX_SOURCE" remote add origin "$WX_WASM_REPOSITORY"
+  else
+    if git -C "$WX_SOURCE" remote get-url origin >/dev/null 2>&1; then
+      git -C "$WX_SOURCE" remote set-url origin "$WX_WASM_REPOSITORY"
+    else
+      git -C "$WX_SOURCE" remote add origin "$WX_WASM_REPOSITORY"
+    fi
   fi
-  CURRENT_WX="$(git -C "$WX_SOURCE" rev-parse HEAD 2>/dev/null || true)"
-  if [[ "$CURRENT_WX" != "$WX_WASM_COMMIT" ]]; then
+
+  if ! git -C "$WX_SOURCE" cat-file -e "$WX_WASM_COMMIT^{commit}" 2>/dev/null; then
     git -C "$WX_SOURCE" fetch --depth 1 origin "$WX_WASM_COMMIT"
-    git -C "$WX_SOURCE" checkout --detach FETCH_HEAD
   fi
-  git -C "$WX_SOURCE" submodule update --init --recursive
+  git -C "$WX_SOURCE" checkout --detach --force "$WX_WASM_COMMIT"
+  git -C "$WX_SOURCE" reset --hard "$WX_WASM_COMMIT"
+  git -C "$WX_SOURCE" clean -ffd
+  git -C "$WX_SOURCE" submodule sync --recursive
+  git -C "$WX_SOURCE" submodule update --init --recursive --force
+  git -C "$WX_SOURCE" submodule foreach --quiet --recursive \
+    'git reset --hard >/dev/null && git clean -ffd >/dev/null'
+
   [[ "$(git -C "$WX_SOURCE" rev-parse HEAD)" == "$WX_WASM_COMMIT" ]] || {
     echo "wxWidgets checkout does not match the pinned commit $WX_WASM_COMMIT" >&2
+    exit 2
+  }
+  git -C "$WX_SOURCE" diff --quiet --ignore-submodules=none || {
+    echo "wxWidgets checkout is unexpectedly modified after reset" >&2
     exit 2
   }
 fi
