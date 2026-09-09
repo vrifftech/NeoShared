@@ -162,51 +162,6 @@ std::vector<std::uint32_t> decodeUtf8CodePoints(std::string_view text) {
     return result;
 }
 
-int centralEuropeanEvidence(std::string_view bytes) noexcept {
-    int score = 0;
-    for (const char rawByte : bytes) {
-        const unsigned char byte = static_cast<unsigned char>(rawByte);
-        switch (byte) {
-        // Highly distinctive Polish letters in Windows-1250. Their
-        // Windows-1252 interpretations are uncommon symbols in normal prose.
-        case 0xA3u: case 0xB3u: // Ł ł
-        case 0xA5u: case 0xB9u: // Ą ą
-        case 0xC6u: case 0xE6u: // Ć ć
-        case 0x8Fu: case 0x9Fu: // Ź ź
-        case 0xAFu: case 0xBFu: // Ż ż
-            score += 4;
-            break;
-        // Useful but individually ambiguous with Western-European letters.
-        case 0x8Cu: case 0x9Cu: // Ś ś / Œ œ
-        case 0xD1u: case 0xF1u: // Ń ń / Ñ ñ
-            score += 2;
-            break;
-        case 0xCAu: case 0xEAu: // Ę ę / Ê ê
-            score += 1;
-            break;
-        default:
-            break;
-        }
-    }
-    return score;
-}
-
-TextEncoding legacyEncodingFor(std::string_view rawPayload,
-                               TextEncoding preferredEncoding,
-                               std::uint32_t languageId) noexcept {
-    if (languageId == 5u) {
-        return TextEncoding::Windows1250;
-    }
-    const int evidence = centralEuropeanEvidence(rawPayload);
-    if (evidence >= 4) {
-        return TextEncoding::Windows1250;
-    }
-    if (preferredEncoding == TextEncoding::Windows1250) {
-        return TextEncoding::Windows1250;
-    }
-    return TextEncoding::Windows1252;
-}
-
 } // namespace
 
 std::string textEncodingName(TextEncoding encoding) {
@@ -305,7 +260,7 @@ std::string encodeTextBytes(std::string_view utf8, TextEncoding encoding) {
         if (!found) {
             throw std::invalid_argument(
                 "Edited TLK text contains a character that cannot be represented in " +
-                textEncodingName(encoding) + ". Convert the file/entry to UTF-8 or use a representable character.");
+                textEncodingName(encoding) + ". Choose a compatible table code page or use a representable character. UTF-8 interchange does not establish native game compatibility.");
         }
     }
     return output;
@@ -313,44 +268,18 @@ std::string encodeTextBytes(std::string_view utf8, TextEncoding encoding) {
 
 TextEncoding detectClassicPreferredEncoding(std::uint32_t languageId,
                                             bool jadeV40,
-                                            const std::vector<std::string>& rawPayloads) {
-    if (jadeV40 || languageId >= 10u) {
-        return TextEncoding::Utf8;
-    }
-
-    std::size_t validUtf8NonAsciiBytes = 0;
-    std::size_t legacyNonAsciiBytes = 0;
-    int centralEvidence = 0;
-    for (const std::string& payload : rawPayloads) {
-        if (payload.empty() || isAsciiText(payload)) continue;
-        if (isValidUtf8(payload)) {
-            validUtf8NonAsciiBytes += payload.size();
-        } else {
-            legacyNonAsciiBytes += payload.size();
-            centralEvidence += centralEuropeanEvidence(payload);
-        }
-    }
-
-    if (validUtf8NonAsciiBytes != 0u &&
-        (legacyNonAsciiBytes == 0u || validUtf8NonAsciiBytes >= legacyNonAsciiBytes)) {
-        return TextEncoding::Utf8;
-    }
-    if (languageId == 5u || centralEvidence >= 8) {
-        return TextEncoding::Windows1250;
-    }
-    return TextEncoding::Windows1252;
+                                            const std::vector<std::string>& /*rawPayloads*/) {
+    // V3 has no per-entry encoding tag. In the supported Western/Polish
+    // language set, use one policy for the whole table. Byte patterns are not
+    // evidence: e.g. CP1252 pound signs and Spanish enye also occur in CP1250.
+    if (jadeV40) return TextEncoding::Utf8;
+    return languageId == 5u ? TextEncoding::Windows1250 : TextEncoding::Windows1252;
 }
 
-TextEncoding detectClassicEntryEncoding(std::string_view rawPayload,
+TextEncoding detectClassicEntryEncoding(std::string_view /*rawPayload*/,
                                         TextEncoding preferredEncoding,
-                                        std::uint32_t languageId) {
-    if (rawPayload.empty() || isAsciiText(rawPayload)) {
-        return preferredEncoding;
-    }
-    if (isValidUtf8(rawPayload)) {
-        return TextEncoding::Utf8;
-    }
-    return legacyEncodingFor(rawPayload, preferredEncoding, languageId);
+                                        std::uint32_t /*languageId*/) {
+    return preferredEncoding;
 }
 
 } // namespace neotlk

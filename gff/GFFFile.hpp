@@ -351,6 +351,7 @@ public:
 
     void NewFile(const std::string& type, const std::filesystem::path& filename = {});
     void LoadFile(const std::filesystem::path& filename);
+    void LoadBytes(const std::vector<std::uint8_t>& bytes);
     void SaveFile(const std::filesystem::path& filename = {});
 
     GffField* GetFieldByLabel(const std::string& fieldPath);
@@ -433,7 +434,8 @@ private:
     std::string GetVersion() const;
 
     void ValidateCanonicalLayout(std::uint64_t fileSize) const;
-    void LoadGff4File(const std::filesystem::path& filename);
+    void LoadData(const std::string& data, const std::filesystem::path& filename);
+    void LoadGff4Data(const std::string& data, const std::filesystem::path& filename);
     void SaveGff4File(const std::filesystem::path& outFilename);
     std::unique_ptr<GffStruct> LoadGff4Struct(UInt32 templateIndex, UInt32 dataOffset, const std::string& label);
     std::unique_ptr<GffField> LoadGff4Field(const Gff4FieldTemplate& fieldTemplate, UInt32 structDataOffset);
@@ -458,6 +460,7 @@ private:
     FourChar fileversionRaw_{};
     std::filesystem::path filename_;
     std::unique_ptr<GffStruct> rootStruct_;
+    std::vector<UInt32> loadingStructs_; // Active path, not a global visited set.
     std::size_t currField_ = 0;
     bool isLoaded_ = false;
     bool isDirty_ = false;

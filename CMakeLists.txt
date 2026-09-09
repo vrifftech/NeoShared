@@ -74,6 +74,13 @@ target_include_directories(neoshared_tlk PUBLIC
 target_link_libraries(neoshared_tlk PRIVATE neoshared::gff)
 target_compile_features(neoshared_tlk PUBLIC cxx_std_17)
 
+# Read-only dialogue semantics; all binary parsing stays in the shared cores.
+add_library(neoshared_dlg dlg/Dialogue.cpp)
+add_library(neoshared::dlg ALIAS neoshared_dlg)
+target_include_directories(neoshared_dlg PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(neoshared_dlg PUBLIC neoshared::gff neoshared::tlk)
+target_compile_features(neoshared_dlg PUBLIC cxx_std_17)
+
 add_library(neoshared_gff_app
     gff/AppModel.cpp
 )
@@ -87,6 +94,33 @@ target_link_libraries(neoshared_gff_app PUBLIC
     neoshared::tlk
 )
 target_compile_features(neoshared_gff_app PUBLIC cxx_std_17)
+
+
+option(NEOSHARED_ENABLE_ERF
+    "Build the shared ERF/MOD/SAV/HAK/NWM/RIM archive core" OFF)
+
+if(NEOSHARED_ENABLE_ERF)
+    find_package(ZLIB REQUIRED)
+
+    add_library(neoshared_erf
+        erf/Archive.cpp
+        erf/Utils.cpp
+    )
+    add_library(neoshared::erf ALIAS neoshared_erf)
+    target_include_directories(neoshared_erf PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    target_link_libraries(neoshared_erf PUBLIC ZLIB::ZLIB)
+    target_compile_features(neoshared_erf PUBLIC cxx_std_17)
+    if(EMSCRIPTEN)
+        target_compile_options(neoshared_erf PRIVATE -fexceptions)
+    endif()
+    if(MSVC)
+        target_compile_options(neoshared_erf PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(neoshared_erf PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+endif()
 
 add_library(neoshared_wx INTERFACE)
 add_library(neoshared::wx ALIAS neoshared_wx)

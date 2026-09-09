@@ -820,7 +820,8 @@ void invokeRetainedExportCallback(std::uint32_t requestId,
                                  std::size_t filesWritten,
                                  std::uint64_t bytesWritten,
                                  bool usedDirectory,
-                                 std::string error) noexcept {
+                                 std::string error,
+                                 std::size_t filesSkipped=0, bool stopped=false, std::string details={}) noexcept {
     auto& callbacks = retainedExportCallbacks();
     const auto found = callbacks.find(requestId);
     if (found == callbacks.end()) return;
@@ -830,7 +831,7 @@ void invokeRetainedExportCallback(std::uint32_t requestId,
         std::move(callback),
         neobrowser::RetainedExportResult{
             downloadDispositionFromInt(disposition), filesWritten, bytesWritten,
-            usedDirectory, std::move(error)});
+            usedDirectory, std::move(error), filesSkipped, stopped, std::move(details)});
 }
 
 void invokePackageDirectoryCallback(std::uint32_t requestId,
@@ -922,7 +923,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE void neo_browser_retained_export_completed(
     unsigned int filesWritten,
     const char* bytesWritten,
     int usedDirectory,
-    const char* error) {
+    const char* error, unsigned int filesSkipped, int stopped, const char* details) {
     std::uint64_t parsedBytes = 0;
     std::string parsedError = error == nullptr ? std::string{} : std::string(error);
     try {
@@ -938,7 +939,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE void neo_browser_retained_export_completed(
         static_cast<std::size_t>(filesWritten),
         parsedBytes,
         usedDirectory != 0,
-        std::move(parsedError));
+        std::move(parsedError), filesSkipped, stopped != 0, details ? details : "");
 }
 
 extern "C" EMSCRIPTEN_KEEPALIVE void neo_browser_open_files_completed(

@@ -528,6 +528,9 @@ public:
         }
     }
 
+    explicit BinaryReader(const std::string& bytes)
+        : data(bytes), stream(data, std::ios::in | std::ios::binary) {}
+
     void seek(UInt32 offset) {
         stream.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
         if (!stream) {
@@ -1336,6 +1339,14 @@ void GffFile::LoadFile(const std::filesystem::path& filename) {
         throw GffError("Specified file " + filename.string() + " could not be found to be opened!");
     }
 
+    LoadData(ReadRegularFileBytes(filename), filename);
+}
+
+void GffFile::LoadBytes(const std::vector<std::uint8_t>& bytes) {
+    LoadData(std::string(bytes.begin(), bytes.end()), {});
+}
+
+void GffFile::LoadData(const std::string& data, const std::filesystem::path& filename) {
     // Load transactionally. A bad or truncated file should not erase the current
     // in-memory GFF object, because callers may use this backend object for
     // unsaved edits or a currently displayed file.
@@ -1376,7 +1387,7 @@ void GffFile::LoadFile(const std::filesystem::path& filename) {
     try {
         ResetAll();
         currField_ = previousCurrField;
-        reader_ = std::make_unique<BinaryReader>(filename);
+        reader_ = std::make_unique<BinaryReader>(data);
 
         reader_->readBytes(header_.filetype.data(), 4);
         reader_->readBytes(header_.fileversion.data(), 4);
@@ -1384,7 +1395,7 @@ void GffFile::LoadFile(const std::filesystem::path& filename) {
         if (fixedToString(header_.filetype.data(), 4) == "GFF " &&
             (fixedToString(header_.fileversion.data(), 4) == "V4.0" || fixedToString(header_.fileversion.data(), 4) == "V4.1")) {
             reader_.reset();
-            LoadGff4File(filename);
+            LoadGff4Data(data, filename);
             return;
         }
 
@@ -1654,6 +1665,11 @@ std::unique_ptr<GffField> GffFile::LoadFileField(UInt32 offset) {
 }
 
 std::unique_ptr<GffStruct> GffFile::LoadFileStruct(UInt32 offset) {
+    if (loadingStructs_.size() >= 256 ||
+        std::find(loadingStructs_.begin(), loadingStructs_.end(), offset) != loadingStructs_.end())
+        throw GffError("Malformed GFF: cyclic or excessively nested structure references.");
+    loadingStructs_.push_back(offset);
+    struct PopStructure { std::vector<UInt32>& stack; ~PopStructure() { stack.pop_back(); } } pop{loadingStructs_};
     reader_->seek(offset);
     const UInt32 type = reader_->read<UInt32>();
     const UInt32 dataOrOffset = reader_->read<UInt32>();
@@ -1679,9 +1695,8 @@ std::unique_ptr<GffStruct> GffFile::LoadFileStruct(UInt32 offset) {
     return structure;
 }
 
-void GffFile::LoadGff4File(const std::filesystem::path& filename) {
+void GffFile::LoadGff4Data(const std::string& raw, const std::filesystem::path& filename) {
     ResetAll();
-    const std::string raw = ReadRegularFileBytes(filename);
     std::vector<std::uint8_t> data(raw.begin(), raw.end());
     if (data.size() < 28u) {
         throw GffError("Specified file is not a valid GFF V4 file.");
@@ -1750,7 +1765,7 @@ void GffFile::LoadGff4File(const std::filesystem::path& filename) {
         gff4Templates_.push_back(std::move(tmpl));
     }
 
-    reader_ = std::make_unique<BinaryReader>(filename);
+    reader_ = std::make_unique<BinaryReader>(raw);
     rootStruct_ = LoadGff4Struct(0u, gff4DataOffset_, "");
     reader_.reset();
     filename_ = filename;

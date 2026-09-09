@@ -1010,6 +1010,33 @@ void TalkString::cloneFrom(const TalkString& other) {
     custom = other.custom;
 }
 
+bool TalkString::sameContent(const TalkString& other) const noexcept {
+    return strRef == other.strRef && flags == other.flags && soundResref == other.soundResref &&
+        volumeVariance == other.volumeVariance && pitchVariance == other.pitchVariance &&
+        std::memcmp(&soundLength, &other.soundLength, sizeof(soundLength)) == 0 &&
+        soundId == other.soundId && text == other.text && textEncoding == other.textEncoding;
+}
+
+std::uint64_t TalkTable::modelHash() const noexcept {
+    // Semantic snapshot, paired with the existing on-disk content signature.
+    // Not cryptographic authentication. Includes source float bits, not display text.
+    std::uint64_t hash = 14695981039346656037ull;
+    const auto bytes = [&](const void* ptr, std::size_t count) {
+        const auto* p = static_cast<const unsigned char*>(ptr);
+        for (std::size_t i = 0; i < count; ++i) { hash ^= p[i]; hash *= 1099511628211ull; }
+    };
+    const auto value = [&](const auto& v) { bytes(&v, sizeof(v)); };
+    value(storageFormat_); value(languageId_); value(preferredTextEncoding_);
+    bytes(fileType_.data(), fileType_.size()); bytes(fileVersion_.data(), fileVersion_.size());
+    value(entries_.size());
+    for (const auto& e : entries_) {
+        value(e.strRef); value(e.flags); bytes(e.soundResref.bytes.data(), e.soundResref.bytes.size());
+        value(e.volumeVariance); value(e.pitchVariance); value(e.soundLength); value(e.soundId);
+        value(e.textEncoding); value(e.text.size()); bytes(e.text.data(), e.text.size());
+    }
+    return hash;
+}
+
 TalkTable::TalkTable() {
     reset();
 }
@@ -1134,18 +1161,80 @@ void TalkTable::setLanguage(UInt32 languageId) {
     if (!supportsLanguageId()) {
         throw NeoTLKError("Dragon Age TLK V0.2 files do not store a classic TLK language ID.");
     }
-    if (languageId_ != languageId) {
-        languageId_ = languageId;
-        if (languageId == 5u) preferredTextEncoding_ = TextEncoding::Windows1250;
-        if (fileOpen_) modified_ = true;
+    if (languageId_ == languageId) return;
+    if (storageFormat_ == TlkStorageFormat::ClassicV30 && !encodingOverride_) {
+        const auto encoding = detectClassicPreferredEncoding(languageId, false, {});
+        // Validate before mutating either language or entries. This is a
+        // conversion of the same Unicode text, never a reinterpretation.
+        for (const auto& e : entries_) (void)encodeTextBytes(e.text, encoding);
+        for (auto& e : entries_) e.textEncoding = encoding;
+        preferredTextEncoding_ = encoding;
     }
+    languageId_ = languageId;
+    if (fileOpen_) modified_ = true;
+}
+
+void TalkTable::reinterpretTextEncoding(TextEncoding encoding) {
+    if (storageFormat_ != TlkStorageFormat::ClassicV30 || (!hasSaveTarget_ && !originalSnapshot_) ||
+        !savedModelHashValid_ || modelHash() != savedModelHash_) {
+        throw NeoTLKError("Text interpretation can only be changed on an unchanged TLK V3.0 file. Save or reload first.");
+    }
+    const FileSignature signature{saveTargetSnapshotValid_, saveTargetSize_, saveTargetWriteTime_, saveTargetContentHash_};
+    if (!originalSnapshot_ && !existingRegularFileSignatureMatches(userPathFromString(saveTargetFilename_), signature))
+        throw NeoTLKError("The TLK changed on disk. Reload before changing its interpretation.");
+    auto next = entries_;
+    for (auto& e : next) {
+        e.text = decodeTextBytes(encodeTextBytes(e.text, e.textEncoding), encoding);
+        e.textEncoding = encoding;
+    }
+    entries_.swap(next);
+    preferredTextEncoding_ = encoding;
+    encodingOverride_ = true;
+    savedModelHash_ = modelHash();
+    modified_ = false; // View policy only. Source representation is untouched.
+}
+
+void TalkTable::setTextEncoding(TextEncoding encoding) {
+    if (storageFormat_ != TlkStorageFormat::ClassicV30 || encoding == TextEncoding::Utf8)
+        throw NeoTLKError("Native V3 output requires one supported code page (Windows-1252 or Windows-1250). Unicode formats and interchange remain UTF-8.");
+    for (const auto& e : entries_) (void)encodeTextBytes(e.text, encoding);
+    const auto before = modelHash();
+    for (auto& e : entries_) e.textEncoding = encoding;
+    preferredTextEncoding_ = encoding;
+    encodingOverride_ = true;
+    if (fileOpen_ && before != modelHash()) modified_ = true;
+}
+
+std::vector<std::string> TalkTable::nativeCompatibilityIssues() const {
+    std::vector<std::string> issues;
+    if (storageFormat_ != TlkStorageFormat::ClassicV30) return issues;
+    if (preferredTextEncoding_ == TextEncoding::Utf8)
+        issues.push_back("UTF-8 interpretation is for inspection/interchange; edited native V3 output must use a supported code page.");
+    if (languageId_ > 5u && !encodingOverride_)
+        issues.push_back("This native language has no verified default code page here. Select a supported interpretation explicitly; UTF-8 is not inferred from the language ID.");
+    for (const auto& e : entries_) {
+        if (e.text.find('\0') != std::string::npos)
+            issues.push_back("StrRef " + std::to_string(e.strRef) + " contains an embedded NUL. Native string handling hides the suffix. Remove it deliberately before edited native output.");
+        if (e.textEncoding != preferredTextEncoding_)
+            issues.push_back("StrRef " + std::to_string(e.strRef) + " has a different code page. Select a single table-wide native encoding.");
+    }
+    return issues;
+}
+
+void TalkTable::validateNativeOutput() const {
+    const auto issues = nativeCompatibilityIssues();
+    if (!issues.empty()) throw NeoTLKError(issues.front() + " Unchanged source copying and Unicode interchange remain available for inspection.");
 }
 
 void TalkTable::setVersion30() {
     if (isDragonAgeV02()) {
         throw NeoTLKError("Dragon Age TLK V0.2 cannot be converted to classic TLK V3.0 by changing the version field.");
     }
+    const auto encoding = detectClassicPreferredEncoding(languageId_, false, {});
+    for (const auto& e : entries_) (void)encodeTextBytes(e.text, encoding);
     storageFormat_ = TlkStorageFormat::ClassicV30;
+    preferredTextEncoding_ = encoding; encodingOverride_ = false;
+    for (auto& e : entries_) e.textEncoding = encoding;
     if (!isFourChar(fileVersion_, "V3.0")) {
         fileVersion_ = makeFourChar("V3.0");
         if (fileOpen_) modified_ = true;
@@ -1157,6 +1246,7 @@ void TalkTable::setVersion40() {
         throw NeoTLKError("Dragon Age TLK V0.2 cannot be converted to Jade Empire TLK V4.0 by changing the version field.");
     }
     storageFormat_ = TlkStorageFormat::JadeV40;
+    encodingOverride_ = false;
     preferredTextEncoding_ = TextEncoding::Utf8;
     for (TalkString& entry : entries_) entry.textEncoding = TextEncoding::Utf8;
     if (!isFourChar(fileVersion_, "V4.0")) {
@@ -1203,9 +1293,8 @@ void prepareAddedEntry(TalkString& entry, UInt32 strRef, TextEncoding preferredE
     normalizeEntryForSave(entry);
     entry.custom = true;
     entry.strRef = strRef;
-    if (entry.text.empty() || entry.textEncoding == TextEncoding::Utf8) {
-        entry.textEncoding = preferredEncoding;
-    }
+    // Imported per-entry labels are descriptive, not on-disk native tags.
+    entry.textEncoding = preferredEncoding;
 }
 
 } // namespace
@@ -1259,10 +1348,13 @@ void TalkTable::replaceEntry(TalkString& entry) {
     }
 
     TalkString replacement = entry;
+    const TalkString& original = static_cast<const TalkTable&>(*this).entryAtStrRef(replacement.strRef);
+    replacement.textEncoding = preferredTextEncoding_;
+    if (original.sameContent(replacement)) return;
     TalkString& destination = entryAtStrRef(replacement.strRef);
     replacement.strRef = destination.strRef;
     replacement.offsetToString = destination.offsetToString;
-    replacement.textEncoding = destination.textEncoding;
+    replacement.textEncoding = preferredTextEncoding_;
     normalizeEntryForSave(replacement);
     replacement.custom = true;
     destination = std::move(replacement);
@@ -1314,6 +1406,7 @@ void TalkTable::replaceAllEntries(std::vector<TalkString> entries) {
         normalizeEntryForSave(entry);
         entry.custom = true;
         if (storageFormat_ == TlkStorageFormat::ClassicV30) {
+            entry.textEncoding = preferredTextEncoding_;
             entry.soundId = 0xffffffffu;
         } else if (storageFormat_ == TlkStorageFormat::JadeV40) {
             entry.textEncoding = TextEncoding::Utf8;
@@ -1336,6 +1429,15 @@ void TalkTable::replaceAllEntries(std::vector<TalkString> entries) {
     entries_.swap(entries);
     synchronizeCount();
     modified_ = true;
+}
+
+void TalkTable::clearEntry(UInt32 strRef) {
+    const auto& source = static_cast<const TalkTable&>(*this).entryAtStrRef(strRef);
+    TalkString cleared;
+    cleared.strRef = strRef;
+    cleared.flags = source.flags & ~(TEXT_PRESENT | SND_PRESENT | SNDLENGTH_PRESENT);
+    cleared.textEncoding = preferredTextEncoding_;
+    replaceEntry(strRef, cleared);
 }
 
 void TalkTable::deleteEntry(UInt32 strRef) {
@@ -1414,6 +1516,44 @@ void TalkTable::load(const std::string& filename) {
         }
     }
 
+    TalkTable parsed;
+    parsed.loadClassicStream(input, fileSize);
+    if (!existingRegularFileSignatureMatches(loadedSaveTargetPath, initialLoadSignature))
+        throw NeoTLKError("The source TLK changed while it was being read.");
+    parsed.filename_ = filename;
+    parsed.saveTargetFilename_ = stableAbsolutePathString(loadedSaveTargetPath);
+    parsed.hasSaveTarget_ = true;
+    parsed.saveTargetSnapshotValid_ = initialLoadSignature.valid;
+    parsed.saveTargetSize_ = initialLoadSignature.size;
+    parsed.saveTargetWriteTime_ = initialLoadSignature.writeTime;
+    parsed.saveTargetContentHash_ = initialLoadSignature.contentHash;
+    *this = std::move(parsed);
+}
+
+void TalkTable::loadBytes(const std::vector<std::uint8_t>& bytes, const std::string& displayName) {
+    if (bytes.size() > static_cast<std::size_t>(std::numeric_limits<std::streamoff>::max()))
+        throw NeoTLKError("TLK snapshot is too large.");
+    TalkTable parsed;
+    const std::string raw(bytes.begin(), bytes.end());
+    if (raw.size() >= 20 && raw.compare(0, 8, "GFF V4.0") == 0 &&
+        raw.compare(12, 8, "TLK V0.2") == 0) {
+        auto backing = std::make_unique<neogff::GffFile>();
+        backing->LoadBytes(bytes);
+        parsed.loadDragonAgeBacking(std::move(backing));
+    } else {
+        std::istringstream input(raw, std::ios::in | std::ios::binary);
+        parsed.loadClassicStream(input, static_cast<std::streamoff>(bytes.size()));
+    }
+    parsed.filename_ = displayName;
+    parsed.saveTargetFilename_.clear(); parsed.hasSaveTarget_ = false;
+    parsed.saveTargetSnapshotValid_ = false;
+    parsed.originalSnapshot_ = std::make_shared<const std::vector<std::uint8_t>>(bytes);
+    parsed.savedModelHash_ = parsed.modelHash(); parsed.savedModelHashValid_ = true;
+    parsed.modified_ = false;
+    *this = std::move(parsed);
+}
+
+void TalkTable::loadClassicStream(std::istream& input, std::streamoff fileSize) {
     std::array<char, 4> loadedFileType{};
     std::array<char, 4> loadedFileVersion{};
     UInt32 loadedLanguageId = 0;
@@ -1516,10 +1656,7 @@ void TalkTable::load(const std::string& filename) {
 
         validateStringPayloadRanges(loadedEntries, loadedStringEntriesOffset, fileSize);
 
-        std::vector<std::string> rawPayloads;
-        rawPayloads.reserve(loadedEntries.size());
-        for (const TalkString& entry : loadedEntries) rawPayloads.push_back(entry.text);
-        loadedPreferredEncoding = detectClassicPreferredEncoding(loadedLanguageId, false, rawPayloads);
+        loadedPreferredEncoding = detectClassicPreferredEncoding(loadedLanguageId, false, {});
         for (TalkString& entry : loadedEntries) {
             const std::string raw = std::move(entry.text);
             entry.textEncoding = detectClassicEntryEncoding(raw, loadedPreferredEncoding, loadedLanguageId);
@@ -1595,13 +1732,8 @@ void TalkTable::load(const std::string& filename) {
         loadedPreferredEncoding = TextEncoding::Utf8;
     }
 
-    const std::string loadedSaveTargetFilename = stableAbsolutePathString(loadedSaveTargetPath);
-    if (!existingRegularFileSignatureMatches(loadedSaveTargetPath, initialLoadSignature)) {
-        throw NeoTLKError("Unable to load TLK file safely because the source file changed while it was being read!");
-    }
-    const FileSignature loadedSaveTargetSignature = initialLoadSignature;
-
     storageFormat_ = isV40 ? TlkStorageFormat::JadeV40 : TlkStorageFormat::ClassicV30;
+    encodingOverride_ = false;
     preferredTextEncoding_ = loadedPreferredEncoding;
     dragonAgeBacking_.reset();
     dragonAgeEntryPrototype_.reset();
@@ -1612,15 +1744,11 @@ void TalkTable::load(const std::string& filename) {
     stringCount_ = loadedStringCount;
     stringEntriesOffset_ = loadedStringEntriesOffset;
     entries_ = std::move(loadedEntries);
-    filename_ = filename;
-    saveTargetFilename_ = loadedSaveTargetFilename;
-    hasSaveTarget_ = true;
-    saveTargetSnapshotValid_ = loadedSaveTargetSignature.valid;
-    saveTargetSize_ = loadedSaveTargetSignature.size;
-    saveTargetWriteTime_ = loadedSaveTargetSignature.writeTime;
-    saveTargetContentHash_ = loadedSaveTargetSignature.contentHash;
+    filename_.clear(); saveTargetFilename_.clear(); hasSaveTarget_ = false;
+    saveTargetSnapshotValid_ = false; originalSnapshot_.reset();
     fileOpen_ = true;
     modified_ = false;
+    savedModelHash_ = modelHash(); savedModelHashValid_ = true;
 }
 
 void TalkTable::loadDragonAgeV02(const std::filesystem::path& sourcePath,
@@ -1634,6 +1762,20 @@ void TalkTable::loadDragonAgeV02(const std::filesystem::path& sourcePath,
     } catch (const std::exception& ex) {
         throw NeoTLKError(std::string("Unable to read Dragon Age TLK V0.2 file: ") + ex.what());
     }
+    TalkTable parsed;
+    parsed.loadDragonAgeBacking(std::move(backing));
+    const FileSignature expected{true, sourceSize, sourceWriteTime, sourceContentHash};
+    if (!existingRegularFileSignatureMatches(sourcePath, expected))
+        throw NeoTLKError("The source TLK changed while it was being read.");
+    parsed.filename_ = displayFilename;
+    parsed.saveTargetFilename_ = stableAbsolutePathString(sourcePath);
+    parsed.hasSaveTarget_ = true; parsed.saveTargetSnapshotValid_ = true;
+    parsed.saveTargetSize_ = sourceSize; parsed.saveTargetWriteTime_ = sourceWriteTime;
+    parsed.saveTargetContentHash_ = sourceContentHash;
+    *this = std::move(parsed);
+}
+
+void TalkTable::loadDragonAgeBacking(std::unique_ptr<neogff::GffFile> backing) {
     if (!backing->isGff4() || backing->filetype() != "TLK " || backing->version() != "V0.2") {
         throw NeoTLKError("Type/version mismatch. File is not a supported Dragon Age GFF TLK V0.2 file!");
     }
@@ -1686,12 +1828,8 @@ void TalkTable::loadDragonAgeV02(const std::filesystem::path& sourcePath,
         loadedEntries.push_back(std::move(entry));
     }
 
-    const FileSignature expected{true, sourceSize, sourceWriteTime, sourceContentHash};
-    if (!existingRegularFileSignatureMatches(sourcePath, expected)) {
-        throw NeoTLKError("Unable to load TLK file safely because the source file changed while it was being read!");
-    }
-
     storageFormat_ = TlkStorageFormat::DragonAgeV02;
+    encodingOverride_ = false;
     preferredTextEncoding_ = TextEncoding::Utf8;
     fileType_ = makeFourChar("TLK ");
     fileVersion_ = makeFourChar("V0.2");
@@ -1699,13 +1837,8 @@ void TalkTable::loadDragonAgeV02(const std::filesystem::path& sourcePath,
     stringEntriesOffset_ = 0u;
     entries_ = std::move(loadedEntries);
     synchronizeCount();
-    filename_ = displayFilename;
-    saveTargetFilename_ = stableAbsolutePathString(sourcePath);
-    hasSaveTarget_ = true;
-    saveTargetSnapshotValid_ = true;
-    saveTargetSize_ = sourceSize;
-    saveTargetWriteTime_ = sourceWriteTime;
-    saveTargetContentHash_ = sourceContentHash;
+    filename_.clear(); saveTargetFilename_.clear(); hasSaveTarget_ = false;
+    saveTargetSnapshotValid_ = false; originalSnapshot_.reset();
     fileOpen_ = true;
     modified_ = false;
     dragonAgeBacking_ = std::move(backing);
@@ -1714,6 +1847,7 @@ void TalkTable::loadDragonAgeV02(const std::filesystem::path& sourcePath,
     dragonAgeListLabelId_ = listLabelId;
     dragonAgeIdLabelId_ = idLabelId;
     dragonAgeTextLabelId_ = textLabelId;
+    savedModelHash_ = modelHash(); savedModelHashValid_ = true;
 }
 
 void TalkTable::prepareDragonAgeV02ForSave() {
@@ -1754,7 +1888,6 @@ void TalkTable::save(const std::string& filename) {
         throw NeoTLKError("There is no open file to save!");
     }
 
-    const bool explicitOutputFilename = !filename.empty();
     std::string outputFilename = filename;
     if (outputFilename.empty()) {
         if (!hasSaveTarget_) {
@@ -1793,18 +1926,20 @@ void TalkTable::save(const std::string& filename) {
         throw NeoTLKError("Refusing to overwrite the TLK file because it has changed on disk since it was loaded or last saved. Reload the file or use Save As to write a separate copy.");
     }
 
-    if (!explicitOutputFilename && !modified_) {
-        std::error_code ec;
-        const std::filesystem::file_status status = std::filesystem::symlink_status(outputPath, ec);
-        if (!ec && std::filesystem::exists(status) && std::filesystem::is_regular_file(status)) {
-            return;
-        }
+    const bool preserveSnapshot = originalSnapshot_ && savedModelHashValid_ && modelHash() == savedModelHash_;
+    const bool preserveImage = hasSaveTarget_ && savedModelHashValid_ && modelHash() == savedModelHash_;
+    if (preserveImage && savingKnownTarget) {
+        modified_ = false;
+        return; // The signature check above is required even for this no-op.
     }
+    if (preserveImage && !existingRegularFileSignatureMatches(userPathFromString(saveTargetFilename_), rememberedSaveTarget))
+        throw NeoTLKError("Cannot copy unchanged source bytes: the source TLK changed. Reload it before Save As.");
+    if (!preserveImage && !preserveSnapshot) validateNativeOutput();
 
 
     std::vector<TalkString> workingEntries = entries_;
     UInt32 workingStringEntriesOffset = stringEntriesOffset_;
-    for (TalkString& entry : workingEntries) {
+    if (!preserveImage && !preserveSnapshot) for (TalkString& entry : workingEntries) {
         normalizeEntryForSave(entry);
     }
 
@@ -1812,7 +1947,27 @@ void TalkTable::save(const std::string& filename) {
     TemporarySaveFile temporary = makeTemporarySaveFile(outputPath);
 
     try {
-        if (isDragonAgeV02()) {
+        if (preserveSnapshot) {
+            std::ofstream output(temporary.file, std::ios::binary | std::ios::trunc);
+            if (!output) throw NeoTLKError("Unable to stage TLK snapshot.");
+            if (!originalSnapshot_->empty()) output.write(reinterpret_cast<const char*>(originalSnapshot_->data()), static_cast<std::streamsize>(originalSnapshot_->size()));
+            output.flush();
+            if (!output) throw NeoTLKError("Unable to write unchanged TLK snapshot.");
+        } else if (preserveImage) {
+            std::ifstream source(userPathFromString(saveTargetFilename_), std::ios::binary);
+            std::ofstream output(temporary.file, std::ios::binary | std::ios::trunc);
+            if (!source || !output) throw NeoTLKError("Unable to stage unchanged TLK source bytes.");
+            std::array<char, 65536> buffer{};
+            while (source) {
+                source.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+                output.write(buffer.data(), source.gcount());
+            }
+            output.flush();
+            if (!source.eof() || !output ||
+                !existingRegularFileSignatureMatches(userPathFromString(saveTargetFilename_), rememberedSaveTarget) ||
+                hashExistingRegularFileContent(temporary.file, "Cannot verify unchanged TLK copy.") != rememberedSaveTarget.contentHash)
+                throw NeoTLKError("The source TLK changed or its unchanged copy could not be completed.");
+        } else if (isDragonAgeV02()) {
             prepareDragonAgeV02ForSave();
             try {
                 dragonAgeBacking_->SaveFile(temporary.file);
@@ -1838,6 +1993,9 @@ void TalkTable::save(const std::string& filename) {
         if (savingKnownTarget && !existingRegularFileSignatureMatches(outputPath, rememberedSaveTarget)) {
             throw NeoTLKError("Refusing to overwrite the TLK file because it changed while the save operation was being prepared. Reload the file or use Save As to write a separate copy.");
         }
+        if (preserveImage && !existingRegularFileSignatureMatches(userPathFromString(saveTargetFilename_), rememberedSaveTarget)) {
+            throw NeoTLKError("The original TLK changed before its unchanged copy could be committed.");
+        }
         if (!outputTargetStillMatchesStart(outputPath, outputTargetAtSaveStart)) {
             throw NeoTLKError("Refusing to overwrite the output TLK file because it changed or appeared while the save operation was being prepared. Choose another output path or retry after reviewing the file.");
         }
@@ -1850,6 +2008,7 @@ void TalkTable::save(const std::string& filename) {
         throw;
     }
 
+    originalSnapshot_.reset();
     entries_ = std::move(workingEntries);
     stringEntriesOffset_ = workingStringEntriesOffset;
     synchronizeCount();
@@ -1862,9 +2021,11 @@ void TalkTable::save(const std::string& filename) {
     saveTargetContentHash_ = savedSignature.contentHash;
     hasSaveTarget_ = true;
     modified_ = false;
+    savedModelHash_ = modelHash(); savedModelHashValid_ = true;
 }
 
 void TalkTable::reset() {
+    originalSnapshot_.reset();
     storageFormat_ = TlkStorageFormat::ClassicV30;
     preferredTextEncoding_ = TextEncoding::Windows1252;
     fileType_.fill('\0');
@@ -1881,6 +2042,9 @@ void TalkTable::reset() {
     dragonAgeListLabelId_ = 0u;
     dragonAgeIdLabelId_ = 0u;
     dragonAgeTextLabelId_ = 0u;
+    savedModelHashValid_ = false;
+    savedModelHash_ = 0;
+    encodingOverride_ = false;
     saveTargetSnapshotValid_ = false;
     saveTargetSize_ = 0;
     saveTargetWriteTime_ = {};

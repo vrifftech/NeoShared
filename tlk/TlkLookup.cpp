@@ -271,10 +271,15 @@ void TlkLookup::clear() {
     filename_.clear();
     languageId_ = 0;
     strings_.clear();
+    flags_.clear(); classicV30_ = false; nativeEncodingUsable_ = false;
     sparseStrings_.clear();
 }
 
-void TlkLookup::load(const std::filesystem::path& file) {
+void TlkLookup::load(const std::filesystem::path& file) { loadImpl(file, std::nullopt); }
+void TlkLookup::load(const std::filesystem::path& file, TextEncoding interpretation) {
+    loadImpl(file, interpretation);
+}
+void TlkLookup::loadImpl(const std::filesystem::path& file, std::optional<TextEncoding> interpretation) {
     std::ifstream probeInput(file, std::ios::binary);
     if (!probeInput) throw std::runtime_error("Unable to open TLK file: " + file.string());
 
@@ -297,7 +302,11 @@ void TlkLookup::load(const std::filesystem::path& file) {
         return;
     }
 
-    TalkTable table(file.string());
+    TalkTable table(file.u8string());
+    if (interpretation) table.reinterpretTextEncoding(*interpretation);
+    classicV30_ = table.storageFormat() == TlkStorageFormat::ClassicV30;
+    nativeEncodingUsable_ = !classicV30_ || (table.preferredTextEncoding() != TextEncoding::Utf8 &&
+        (table.language() <= 5u || interpretation.has_value()));
     languageId_ = table.supportsLanguageId() ? table.language() : 0u;
     if (table.hasSparseStrRefs()) {
         sparseStrings_.reserve(table.entries().size());
@@ -306,11 +315,13 @@ void TlkLookup::load(const std::filesystem::path& file) {
         }
     } else {
         strings_.resize(table.entries().size());
+        flags_.resize(table.entries().size());
         for (const TalkString& entry : table.entries()) {
             if (entry.strRef >= strings_.size()) {
                 throw std::runtime_error("TLK entry index exceeds the declared string table size.");
             }
             strings_[static_cast<std::size_t>(entry.strRef)] = entry.text;
+            flags_[static_cast<std::size_t>(entry.strRef)] = entry.flags;
         }
     }
 
@@ -318,7 +329,7 @@ void TlkLookup::load(const std::filesystem::path& file) {
     loaded_ = true;
 }
 
-std::optional<std::string> TlkLookup::resolve(std::uint32_t strref) const {
+std::optional<std::string> TlkLookup::resolveRaw(std::uint32_t strref) const {
     if (!loaded_ || strref == 0xFFFFFFFFu) return std::nullopt;
     if (!strings_.empty()) {
         if (strref >= strings_.size()) return std::nullopt;
@@ -327,6 +338,69 @@ std::optional<std::string> TlkLookup::resolve(std::uint32_t strref) const {
     const auto found = sparseStrings_.find(strref);
     if (found == sparseStrings_.end()) return std::nullopt;
     return found->second;
+}
+
+std::string TlkResolution::problem() const {
+    switch (status) {
+    case TlkResolutionStatus::Resolved: return {};
+    case TlkResolutionStatus::NotLoaded: return "Choose a loaded talk table";
+    case TlkResolutionStatus::Missing: return "No entry in the supplied talk-table context";
+    case TlkResolutionStatus::TextNotPresent: return "TLK entry has TEXT_PRESENT disabled; stored text is not spoken text";
+    case TlkResolutionStatus::Skipped: return "TLK entry is skipped (0x8000); a usable fallback table is required";
+    case TlkResolutionStatus::EmbeddedNul: return "TLK text contains an embedded NUL; native display truncates it. Confirm/correct the complete recorded words";
+    case TlkResolutionStatus::EncodingUnavailable: return "Choose a supported native code page; UTF-8 inspection and unverified language defaults are not effective native text";
+    case TlkResolutionStatus::ContextUnavailable: return "The supplied language/variant/fallback context is incomplete or not a classic KotOR table";
+    }
+    return "Unresolved talk-table text";
+}
+
+TlkResolution TlkLookup::resolveEntry(std::uint32_t strref) const {
+    TlkResolution result;
+    result.source = filename_;
+    if (!loaded_) { result.status = TlkResolutionStatus::NotLoaded; return result; }
+    const auto raw = resolveRaw(strref);
+    if (!raw) return result;
+    if (classicV30_) {
+        if (!nativeEncodingUsable_) { result.status = TlkResolutionStatus::EncodingUnavailable; return result; }
+        result.flags = flags_.at(static_cast<std::size_t>(strref));
+        if (result.flags & SKIP_ENTRY) { result.status = TlkResolutionStatus::Skipped; return result; }
+        if (!(result.flags & TEXT_PRESENT)) { result.status = TlkResolutionStatus::TextNotPresent; return result; }
+        if (raw->find('\0') != std::string::npos) { result.status = TlkResolutionStatus::EmbeddedNul; return result; }
+    }
+    result.status = TlkResolutionStatus::Resolved;
+    result.text = raw;
+    return result;
+}
+
+std::optional<std::string> TlkLookup::resolve(std::uint32_t strref) const {
+    return resolveEntry(strref).text;
+}
+
+TlkResolution resolveKotorText(const KotorTlkContext& context, std::uint32_t strref,
+                              std::uint32_t languageId, TlkGender gender) {
+    if (strref == 0xffffffffu) return {};
+    // This mask is recovered from FetchInternal, not a generic/sparse TLK rule.
+    const auto index = strref & 0x00ffffffu;
+    TlkResolution last;
+    auto visit = [&](const std::vector<const TlkLookup*>& tables) {
+        for (const auto* table : tables) {
+            if (!table || !table->loaded() || !table->isClassicV30() || table->languageId() != languageId) {
+                last = {}; last.status = TlkResolutionStatus::ContextUnavailable; return true;
+            }
+            auto result = table->resolveEntry(index);
+            if (result.status == TlkResolutionStatus::Skipped) { last = std::move(result); continue; }
+            if (result.status == TlkResolutionStatus::Missing) continue;
+            // A present row with TEXT_PRESENT off is selected without text;
+            // it does not authorize trying another row/table for hidden text.
+            last = std::move(result); return true;
+        }
+        return false;
+    };
+    if (gender == TlkGender::Female && visit(context.femaleTables)) return last;
+    if (visit(context.maleTables)) return last;
+    if (context.maleTables.empty() && (context.femaleTables.empty() || gender == TlkGender::Male))
+        last.status = TlkResolutionStatus::ContextUnavailable;
+    return last;
 }
 
 } // namespace neotlk

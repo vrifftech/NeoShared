@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #pragma once
+#include <istream>
 
 #include "neotlk/TextEncoding.hpp"
 
@@ -23,6 +24,8 @@ namespace neotlk {
 
 using UInt32 = std::uint32_t;
 
+inline constexpr unsigned kNativeTlkSafetyApiVersion = 1;
+constexpr UInt32 SKIP_ENTRY = 0x8000; // KotOR: try the next candidate talk table.
 constexpr UInt32 TEXT_PRESENT = 0x0001;
 constexpr UInt32 SND_PRESENT = 0x0002;
 constexpr UInt32 SNDLENGTH_PRESENT = 0x0004;
@@ -70,6 +73,8 @@ struct TalkString {
 
     std::string soundString() const;
     void cloneFrom(const TalkString& other);
+    // Ignores offsets, byte counts and editor bookkeeping; compares float bits.
+    bool sameContent(const TalkString& other) const noexcept;
 };
 
 class TalkTable {
@@ -98,6 +103,12 @@ public:
     TlkStorageFormat storageFormat() const noexcept { return storageFormat_; }
     TextEncoding preferredTextEncoding() const noexcept { return preferredTextEncoding_; }
     std::string textEncodingSummary() const;
+    // Interpretation only: requires an unchanged file, preserves source bytes.
+    // UTF-8 may be inspected explicitly; edited V3 output requires a code page.
+    void reinterpretTextEncoding(TextEncoding encoding);
+    // Explicit table-wide Unicode -> native-code-page conversion, all-or-nothing.
+    void setTextEncoding(TextEncoding encoding);
+    std::vector<std::string> nativeCompatibilityIssues() const;
     UInt32 count() const;
     UInt32 minStrRef() const noexcept;
     UInt32 maxStrRef() const noexcept;
@@ -122,9 +133,12 @@ public:
     // Atomically replace the semantic entry set while preserving the native
     // file family and any format-specific backing data (notably GFF4 TLKs).
     void replaceAllEntries(std::vector<TalkString> entries);
-    void deleteEntry(UInt32 strRef);
+    void clearEntry(UInt32 strRef); // Keep the row/ID and unexposed flags.
+    void deleteEntry(UInt32 strRef); // Deliberate compaction for dense tables.
     void newFile();
     void load(const std::string& filename);
+    // Owned archive snapshot; displayName is NOT a filesystem save target.
+    void loadBytes(const std::vector<std::uint8_t>& bytes, const std::string& displayName = {});
     void save(const std::string& filename = std::string());
     void reset();
 
@@ -132,6 +146,9 @@ public:
     UInt32 padToStrRef(UInt32 targetStrRef);
 
 private:
+    std::shared_ptr<const std::vector<std::uint8_t>> originalSnapshot_;
+    void loadClassicStream(std::istream& input, std::streamoff fileSize);
+    void loadDragonAgeBacking(std::unique_ptr<neogff::GffFile> backing);
     TlkStorageFormat storageFormat_ = TlkStorageFormat::ClassicV30;
     TextEncoding preferredTextEncoding_ = TextEncoding::Windows1252;
     std::array<char, 4> fileType_{};
@@ -147,6 +164,11 @@ private:
     bool fileOpen_ = false;
     bool modified_ = false;
     bool hasSaveTarget_ = false;
+    bool encodingOverride_ = false;
+    bool savedModelHashValid_ = false;
+    std::uint64_t savedModelHash_ = 0;
+    std::uint64_t modelHash() const noexcept;
+    void validateNativeOutput() const;
     bool saveTargetSnapshotValid_ = false;
     std::uintmax_t saveTargetSize_ = 0;
     std::filesystem::file_time_type saveTargetWriteTime_{};

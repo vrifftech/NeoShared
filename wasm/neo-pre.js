@@ -1187,7 +1187,7 @@
     var session = getRetainedSession(sessionId);
     var entry = session.files.get(Number(fileId));
     if (!entry || !entry.active) throw new Error('The selected browser file is no longer available.');
-    var file = entry.file || (entry.handle ? await entry.handle.getFile() : null);
+    var file = entry.handle ? await entry.handle.getFile() : entry.file;
     if (!session.active || !entry.active) {
       throw new Error('The browser archive file was replaced.');
     }
@@ -1254,13 +1254,13 @@
         Module.ccall(
           'neo_browser_retained_export_completed',
           null,
-          ['number', 'number', 'number', 'string', 'number', 'string'],
+          ['number', 'number', 'number', 'string', 'number', 'string', 'number', 'number', 'string'],
           [requestId,
            result.disposition || 0,
            result.filesWritten || 0,
            String(result.bytesWritten || 0),
            result.usedDirectory ? 1 : 0,
-           error || '']);
+           error || '', result.filesSkipped || 0, result.stopped ? 1 : 0, result.details || '']);
       } catch (callbackError) {
         console.error('[NeoTools] Retained-file export completion failed:', callbackError);
       }
@@ -1273,6 +1273,7 @@
   }
 
   function assertRetainedSourceActive(source) {
+    checkRetainedExportJob();
     if (!source.session.active || !source.entry.active) {
       throw new Error('The browser archive file was replaced.');
     }
@@ -1283,11 +1284,14 @@
     for (var offset = 0; offset < blob.size; offset += chunkSize) {
       assertRetainedSourceActive(source);
       await writable.write(blob.slice(offset, Math.min(blob.size, offset + chunkSize)));
+      await assertRetainedRevision(source);
+      await cooperativeBrowserYield();
       assertRetainedSourceActive(source);
     }
   }
 
   function assertRetainedExportEntriesActive(entries) {
+    checkRetainedExportJob();
     var checked = Object.create(null);
     for (var index = 0; index < entries.length; ++index) {
       var sessionId = Number(entries[index].sessionId);
@@ -1303,103 +1307,133 @@
     }
   }
 
-  async function uniqueRetainedDestination(root, relativePath, createdDirectories) {
-    var normalized = normalizePackageRelativePath(relativePath, false);
-    var resolved = await resolvePackageFile(root, normalized, true, createdDirectories);
-    if (!resolved.exists) return resolved;
-
-    var slash = normalized.lastIndexOf('/');
-    var parent = slash >= 0 ? normalized.substring(0, slash + 1) : '';
-    var leaf = slash >= 0 ? normalized.substring(slash + 1) : normalized;
-    var dot = leaf.lastIndexOf('.');
-    var stem = dot > 0 ? leaf.substring(0, dot) : leaf;
-    var extension = dot > 0 ? leaf.substring(dot) : '';
-    for (var ordinal = 2; ordinal < 1000000; ++ordinal) {
-      var candidate = parent + stem + '__' + ordinal + extension;
-      resolved = await resolvePackageFile(root, candidate, true, createdDirectories);
-      if (!resolved.exists) return resolved;
+  var retainedExportJob = null;
+  function checkRetainedExportJob() {
+    if (retainedExportJob && retainedExportJob.cancelled) {
+      var error = new Error('Extraction cancelled; completed files were retained.'); error.name = 'AbortError'; throw error;
     }
-    throw new Error('Unable to choose a collision-free browser extraction path for ' + normalized + '.');
   }
-
-  async function exportRetainedDirectory(entries) {
-    if (!retainedDirectoryWriteSupported()) {
-      throw new Error('Writable directory selection is unavailable in this browser. Use Save as ZIP instead.');
+  function beginRetainedExportJob(count) {
+    if (retainedExportJob) throw new Error('Another archive export is already running.');
+    var job = { cancelled: false, panel: null, label: null, count: count };
+    if (typeof document !== 'undefined' && document.body) {
+      var panel = document.createElement('div'); panel.setAttribute('role','status');
+      panel.style.cssText='position:fixed;bottom:12px;right:12px;z-index:100000;padding:12px;background:#202124;color:white;border:1px solid #888';
+      var label = document.createElement('span'); label.textContent='Preparing ' + count + ' resources...'; panel.appendChild(label);
+      var button = document.createElement('button'); button.textContent='Cancel extraction'; button.style.marginLeft='12px';
+      button.onclick=function(){job.cancelled=true;button.disabled=true;label.textContent='Cancelling...';}; panel.appendChild(button);
+      document.body.appendChild(panel); job.panel=panel; job.label=label;
     }
-    assertRetainedExportEntriesActive(entries);
-    var root = null;
-    try {
-      root = await window.showDirectoryPicker({ mode: 'readwrite' });
-    } catch (error) {
-      if (error && error.name === 'AbortError') return { disposition: 0 };
-      throw error;
+    retainedExportJob=job;
+    return job;
+  }
+  function updateRetainedExportJob(done, text) {
+    checkRetainedExportJob();
+    if(retainedExportJob && retainedExportJob.label) retainedExportJob.label.textContent=done+' / '+retainedExportJob.count+' — '+text;
+  }
+  async function assertRetainedRevision(source) {
+    assertRetainedSourceActive(source);
+    if(source.entry.handle) {
+      var now=await source.entry.handle.getFile();
+      if(now.size!==source.entry.size || Number(now.lastModified||0)!==source.entry.lastModified)
+        throw new Error('Archive changed after indexing; rescan: '+source.entry.relativePath);
     }
-    assertRetainedExportEntriesActive(entries);
-    await ensurePackagePermission(root);
-    assertRetainedExportEntriesActive(entries);
-    var bytesWritten = 0;
-    var filesWritten = 0;
-    var created = [];
-    var createdDirectories = [];
-    try {
-      for (var index = 0; index < entries.length; ++index) {
-        var item = entries[index];
-        var source = await getRetainedFile(item.sessionId, item.fileId);
-        if (item.offset > source.file.size || item.size > source.file.size - item.offset) {
-          throw new Error('Export range extends beyond ' + source.entry.relativePath + '.');
+  }
+  async function protectRetainedOutput(handle, replacing) {
+    // Protect all active archives, including ones not represented by the current selection.
+    for(var session of retainedFileSets.values()) if(session.active) {
+      for(var entry of session.files.values()) if(entry.active) {
+        if(entry.handle) {
+          if(typeof handle.isSameEntry!=='function') throw new Error('This browser cannot verify source-file identity. Use ZIP download instead.');
+          if(await handle.isSameEntry(entry.handle)) throw new Error('An input archive cannot be an extraction destination.');
+        } else if(replacing) {
+          throw new Error('Source identity is unavailable for this imported selection. Use Skip/Keep both in a separate directory, or a ZIP download; existing files will not be replaced.');
         }
-        var destination = await uniqueRetainedDestination(
-          root, item.outputPath, createdDirectories);
-        assertRetainedSourceActive(source);
-        var handle = await destination.parentHandle.getFileHandle(
-          destination.requestedName, { create: true });
-        created.push({ parentHandle: destination.parentHandle, name: destination.requestedName });
-        assertRetainedSourceActive(source);
-        var writable = null;
+      }
+    }
+  }
+  async function exportRetainedDirectory(entries, mode) {
+    if(!retainedDirectoryWriteSupported()) throw new Error('Writable folders are unavailable. Use Save as ZIP.');
+    assertRetainedExportEntriesActive(entries);
+    var root=await window.showDirectoryPicker({mode:'readwrite'});
+    await ensurePackagePermission(root);
+    var plans=[], reserved=new Set(), details=[];
+    var result={disposition:1,filesWritten:0,filesSkipped:0,bytesWritten:0,usedDirectory:true,stopped:false,details:''};
+    // No files/directories are created during planning. Names are frozen before publishing.
+    for(var i=0;i<entries.length;++i) {
+      checkRetainedExportJob(); var item=entries[i], path=item.outputPath;
+      var destination=await resolvePackageFile(root,path,false);
+      if(destination.exists && mode===2) { result.filesSkipped++; continue; }
+      if(mode===4) {
+        var slash=path.lastIndexOf('/'),prefix=slash<0?'':path.slice(0,slash+1),leaf=path.slice(slash+1),dot=leaf.lastIndexOf('.');
+        var stem=dot>0?leaf.slice(0,dot):leaf,ext=dot>0?leaf.slice(dot):'';var serial=1;
+        while(destination.exists || reserved.has(path.toLowerCase())) {
+          if(++serial>1000000) throw new Error('Too many output-name conflicts.');
+          path=prefix+stem+'__'+serial+ext;destination=await resolvePackageFile(root,path,false);
+        }
+        if(path!==item.outputPath) details.push(item.outputPath+' -> '+path);
+      }
+      if(reserved.has(path.toLowerCase())) throw new Error('Conflicting output path: '+path);
+      reserved.add(path.toLowerCase());
+      var previous=null;
+      if(destination.exists) {
+        await protectRetainedOutput(destination.fileHandle,true);
+        previous=await destination.fileHandle.getFile();
+      }
+      plans.push({item:item,path:path,existed:destination.exists,handle:destination.fileHandle,previous:previous});
+    }
+    for(var a of reserved) for(var slash=a.indexOf('/');slash>=0;slash=a.indexOf('/',slash+1))
+      if(reserved.has(a.slice(0,slash))) throw new Error('File/directory output conflict: '+a);
+    try {
+      for(var index=0;index<plans.length;++index) {
+        var plan=plans[index], current=plan.item, handle=null,writable=null,owned=false,parent=null,name='';
+        updateRetainedExportJob(result.filesWritten+result.filesSkipped,plan.path);
+        var source=await getRetainedFile(current.sessionId,current.fileId);
+        if(current.offset>source.file.size || current.size>source.file.size-current.offset) throw new Error('Invalid archive range: '+source.entry.relativePath);
         try {
-          writable = await handle.createWritable({ keepExistingData: false });
-          assertRetainedSourceActive(source);
-          await writeBlobInChunks(
-            writable, source.file.slice(item.offset, item.offset + item.size), source);
-          assertRetainedSourceActive(source);
-          await writable.close();
-          writable = null;
-          assertRetainedSourceActive(source);
-        } catch (error) {
-          if (writable) { try { await writable.abort(); } catch (_) {} }
+          var destination=await resolvePackageFile(root,plan.path,true);
+          parent=destination.parentHandle;name=destination.actualName||destination.requestedName;
+          if(destination.exists!==plan.existed) throw new Error('Output changed since the extraction plan: '+plan.path);
+          if(destination.exists) {
+            handle=destination.fileHandle;
+            if(!(await handle.isSameEntry(plan.handle))) throw new Error('Output was replaced: '+plan.path);
+            var before=await handle.getFile();
+            if(before.size!==plan.previous.size || before.lastModified!==plan.previous.lastModified) throw new Error('Output was modified: '+plan.path);
+          } else {
+            handle=await parent.getFileHandle(name,{create:true});
+            var empty=await handle.getFile();
+            if(empty.size!==0) throw new Error('New output appeared during extraction: '+plan.path);
+            owned=true;
+          }
+          await protectRetainedOutput(handle,plan.existed);
+          writable=await handle.createWritable({keepExistingData:false});
+          await writeBlobInChunks(writable,source.file.slice(current.offset,current.offset+current.size),source);
+          await assertRetainedRevision(source);
+          var named=await parent.getFileHandle(name);
+          if(!(await named.isSameEntry(handle))) throw new Error('Output was replaced during extraction: '+plan.path);
+          var latest=await handle.getFile();
+          if(plan.existed && (latest.size!==plan.previous.size || latest.lastModified!==plan.previous.lastModified)) throw new Error('Output was edited during extraction: '+plan.path);
+          if(!plan.existed && latest.size!==0) throw new Error('Output was edited during extraction: '+plan.path);
+          checkRetainedExportJob();
+          await writable.close();writable=null;owned=false;
+          result.filesWritten++;result.bytesWritten+=current.size;
+        } catch(error) {
+          if(writable) {try{await writable.abort();}catch(_){}}
+          if(owned && parent && handle) {
+            try {
+              var named=await parent.getFileHandle(name);var remaining=await named.getFile();
+              if(await named.isSameEntry(handle) && remaining.size===0) await parent.removeEntry(name);
+            } catch(cleanup) { error.message+=' Cleanup could not remove the unfinished output: '+plan.path; }
+          }
           throw error;
         }
-        filesWritten += 1;
-        bytesWritten += item.size;
+        await cooperativeBrowserYield();
       }
-      assertRetainedExportEntriesActive(entries);
-      return { disposition: 1, filesWritten: filesWritten, bytesWritten: bytesWritten, usedDirectory: true };
-    } catch (error) {
-      var rollbackFailures = 0;
-      for (var createdIndex = created.length - 1; createdIndex >= 0; --createdIndex) {
-        try {
-          await created[createdIndex].parentHandle.removeEntry(created[createdIndex].name);
-        } catch (_) {
-          rollbackFailures += 1;
-        }
-      }
-      for (var directoryIndex = createdDirectories.length - 1;
-           directoryIndex >= 0; --directoryIndex) {
-        try {
-          await createdDirectories[directoryIndex].parentHandle.removeEntry(
-            createdDirectories[directoryIndex].name);
-        } catch (directoryError) {
-          if (!directoryError || directoryError.name !== 'NotFoundError') {
-            rollbackFailures += 1;
-          }
-        }
-      }
-      if (rollbackFailures) {
-        var baseMessage = error && error.message ? error.message : String(error || 'Browser extraction failed.');
-        throw new Error(baseMessage + ' Rollback could not remove ' + rollbackFailures +
-          ' partially extracted file or director' + (rollbackFailures === 1 ? 'y.' : 'ies.'));
-      }
-      throw error;
+      result.details=details.join('\n');return result;
+    } catch(error) {
+      result.details=details.join('\n');
+      if(error && error.name==='AbortError'){result.stopped=true;return result;}
+      error.partialResult=result;throw error;
     }
   }
 
@@ -1526,6 +1560,9 @@
         if (error && error.name === 'AbortError') return null;
         throw error;
       }
+      if(!/\.zip$/i.test(handle.name||'')) throw new Error('ZIP output must have a .zip extension.');
+      var previous=await handle.getFile();
+      await protectRetainedOutput(handle,previous.size!==0);
       var writable = await handle.createWritable({ keepExistingData: false });
       return {
         position: 0,
@@ -1533,7 +1570,13 @@
         parts: null,
         async writeBytes(bytes) { await writable.write(bytes); this.position += bytes.byteLength; },
         async writeBlob(blob) { await writable.write(blob); this.position += blob.size; },
-        async finish() { await writable.close(); this.writable = null; return { disposition: 1 }; },
+        async finish() {
+          checkRetainedExportJob();
+          var now=await handle.getFile();
+          if(now.size!==previous.size || now.lastModified!==previous.lastModified) throw new Error('ZIP destination changed during extraction.');
+          await protectRetainedOutput(handle,previous.size!==0);
+          await writable.close(); this.writable = null; return { disposition: 1 };
+        },
         async abort() { if (this.writable) { try { await this.writable.abort(); } catch (_) {} this.writable = null; } }
       };
     }
@@ -1630,7 +1673,9 @@
         await sink.writeBytes(zipDataDescriptor(crc, item.size));
         assertRetainedSourceActive(source);
         central.push({ nameBytes: nameBytes, crc: crc, size: item.size, localOffset: localOffset });
+        await assertRetainedRevision(source);
         bytesWritten += item.size;
+        updateRetainedExportJob(index+1,item.outputPath);
       }
 
       assertRetainedExportEntriesActive(entries);
@@ -1674,9 +1719,14 @@
 
   async function exportRetainedEntries(mode, defaultName, payload) {
     var entries = parseRetainedExportManifest(payload);
-    if (Number(mode) === 0) return exportRetainedDirect(entries, defaultName);
-    if (Number(mode) === 2) return exportRetainedDirectory(entries);
-    return exportRetainedZip(entries, defaultName);
+    var job=beginRetainedExportJob(entries.length);
+    try {
+      if(Number(mode)===0) return await exportRetainedDirect(entries,defaultName);
+      if([2,3,4].indexOf(Number(mode))>=0) return await exportRetainedDirectory(entries,Number(mode));
+      return await exportRetainedZip(entries,defaultName);
+    } finally {
+      if(job.panel) job.panel.remove(); retainedExportJob=null;
+    }
   }
 
 
@@ -2430,7 +2480,79 @@
     return queueBrowserDownload(readDownloadBytes(path), name);
   }
 
+  // New-file-only batch publication. This intentionally refuses replacement:
+  // the browser cannot prove that a writable folder is not also an input root.
+  // Callers preflight a genuinely empty output directory and publish each
+  // encoded image + optional TXI together, rolling back newly created files.
+  async function checkEmptyWritableBatchDirectory(root) {
+    root = normalizeBrowserWritableDirectory(root);
+    var entry = findBrowserWritableDirectory(root);
+    if (!entry || entry.root !== root || !entry.handle) {
+      throw new Error('Select a writable output directory in a browser with File System Access support.');
+    }
+    await ensurePackagePermission(entry.handle);
+    for await (var child of entry.handle.entries()) {
+      throw new Error('Browser batches require an empty output directory. Existing files are never replaced. Choose a new empty folder; use the desktop app for replacement batches.');
+    }
+    return true;
+  }
+
+  async function publishNewWritableBatchFiles(root, entries) {
+    root = normalizeBrowserWritableDirectory(root);
+    var selected = findBrowserWritableDirectory(root);
+    if (!selected || selected.root !== root || !selected.handle) throw new Error('The output directory selection has expired.');
+    if (!Array.isArray(entries) || entries.length < 1 || entries.length > 2) throw new Error('Expected one image and at most one TXI sidecar.');
+    await ensurePackagePermission(selected.handle);
+    var total = 0, unique = new Set(), journal = [], directories = [];
+    entries = entries.map(function(item) {
+      var name = normalizePackageRelativePath(item.relativePath, false);
+      var key = name.toLowerCase();
+      if (unique.has(key)) throw new Error('Conflicting output names in image/TXI pair.');
+      unique.add(key);
+      var bytes = copyBytes(item.bytes);
+      total += bytes.length;
+      if (total > 96 * 1024 * 1024) throw new Error('Encoded browser image/TXI pair exceeds 96 MiB.');
+      return { relativePath: name, bytes: bytes };
+    });
+    // Inspect every destination before creating any directory or file.
+    for (var item of entries) {
+      var existing = await resolvePackageFile(selected.handle, item.relativePath, false);
+      if (existing.exists) throw new Error('Output already exists; no file was replaced: ' + item.relativePath);
+    }
+    try {
+      for (var item of entries) {
+        var dest = await resolvePackageFile(selected.handle, item.relativePath, true, directories);
+        if (dest.exists) throw new Error('Output appeared after preflight: ' + item.relativePath);
+        // Also reject a same-name directory; never choose a suffixed filename.
+        var handle = await dest.parentHandle.getFileHandle(dest.requestedName, { create: true });
+        journal.push({ parent: dest.parentHandle, name: dest.requestedName, handle: handle });
+        await writeBytesToBrowserFileHandle(handle, item.bytes);
+      }
+    } catch (error) {
+      var failures = [];
+      for (var i = journal.length - 1; i >= 0; --i) {
+        try {
+          var created = journal[i];
+          var current = await created.parent.getFileHandle(created.name, { create: false });
+          if (typeof current.isSameEntry === 'function' && !await current.isSameEntry(created.handle)) {
+            throw new Error('Destination identity changed during rollback.');
+          }
+          await created.parent.removeEntry(created.name);
+        } catch (rollback) { failures.push(journal[i].name + ': ' + String(rollback.message || rollback)); }
+      }
+      for (var i = directories.length - 1; i >= 0; --i) {
+        try { await directories[i].parentHandle.removeEntry(directories[i].name); } catch (_) {}
+      }
+      if (failures.length) throw new Error(String(error.message || error) + '\nCleanup needs attention: ' + failures.join('; '));
+      throw error;
+    }
+    selected.lastUsedAt = Date.now();
+    return true;
+  }
+
   Module.neoToolsBrowserFiles = {
+    checkEmptyWritableBatchDirectory: checkEmptyWritableBatchDirectory,
+    publishNewWritableBatchFiles: publishNewWritableBatchFiles,
     // Internal bridge used by the wx compatibility dialogs. It deliberately
     // shares the same ownership, limits, write-back hooks, and diagnostics as
     // requestOpenFiles() rather than creating a second browser-I/O subsystem.
@@ -2579,12 +2701,12 @@
             }
             var message = error && error.message ? error.message : String(error || 'Unknown retained export error.');
             console.error('[NeoTools] Retained-file export failed:', error);
-            completeRetainedExportRequest(requestId, {}, message);
+            completeRetainedExportRequest(requestId, (error && error.partialResult) || {}, message);
           });
         return true;
       } catch (error) {
         var message = error && error.message ? error.message : String(error || 'Unknown retained export error.');
-        completeRetainedExportRequest(requestId, {}, message);
+        completeRetainedExportRequest(requestId, (error && error.partialResult) || {}, message);
         return true;
       }
     },

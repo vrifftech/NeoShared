@@ -10,7 +10,7 @@
 
 namespace neobrowser {
 
-inline constexpr unsigned kBrowserFileApiVersion = 10u;
+inline constexpr unsigned kBrowserFileApiVersion = 11u;
 
 struct OpenFilesResult {
     std::vector<std::filesystem::path> paths;
@@ -182,7 +182,9 @@ bool readRetainedFileRange(std::uint32_t sessionId,
 enum class RetainedExportMode {
     DirectDownload = 0,
     ZipDownload = 1,
-    Directory = 2,
+    Directory = 2, // Skip existing; never rename implicitly.
+    DirectoryReplace = 3,
+    DirectoryKeepBoth = 4,
 };
 
 struct RetainedExportEntry {
@@ -199,6 +201,9 @@ struct RetainedExportResult {
     std::uint64_t bytesWritten = 0;
     bool usedDirectory = false;
     std::string error;
+    std::size_t filesSkipped = 0;
+    bool stopped = false;
+    std::string details{};
 
     bool cancelled() const noexcept {
         return disposition == DownloadDisposition::Cancelled && error.empty();
