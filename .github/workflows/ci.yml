@@ -50,20 +50,13 @@ jobs:
     runs-on: windows-2025-vs2026
     timeout-minutes: 120
     env:
-      VCPKG_BINARY_SOURCES: clear;x-gha,readwrite
+      VCPKG_BINARY_SOURCES: clear;default,readwrite
 
     steps:
       - name: Check out neoshared
         uses: actions/checkout@v7
         with:
           persist-credentials: false
-
-      - name: Enable vcpkg GitHub Actions cache
-        uses: actions/github-script@v9
-        with:
-          script: |
-            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
-            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
 
       - name: Validate wxWidgets 3.3.3 overlay
         shell: pwsh

@@ -104,31 +104,7 @@ rm -rf "$WX_BUILD"
 mkdir -p "$WX_BUILD"
 embuilder build zlib
 
-# Prove against the active Emscripten headers that the forced compatibility
-# header eliminates the legacy pthread symbols before spending time on wxWidgets.
-PROBE_SOURCE="$WRAPPER_DIR/wx-no-pthreads-probe.cpp"
-PROBE_OBJECT="$WRAPPER_DIR/wx-no-pthreads-probe.o"
-cat > "$PROBE_SOURCE" <<'EOF_PROBE'
-#include <emscripten/threading.h>
-static void neo_probe_callback(void*) {}
-int neo_probe_no_pthreads()
-{
-    if (emscripten_is_main_runtime_thread())
-        return 1;
-    emscripten_async_run_in_main_runtime_thread(
-        EM_FUNC_SIG_VI, &neo_probe_callback, nullptr);
-    return 0;
-}
-EOF_PROBE
-em++ -std=c++17 -O0 -include "$NO_PTHREADS_COMPAT" -c "$PROBE_SOURCE" -o "$PROBE_OBJECT"
 LLVM_NM="$NEO_WASM_EMSDK_ROOT/upstream/bin/llvm-nm"
-if [[ -x "$LLVM_NM" ]] &&
-   "$LLVM_NM" -u "$PROBE_OBJECT" 2>/dev/null |
-     grep -E 'emscripten_(is_main_runtime_thread|async_run_in_main_runtime_thread_)' >/dev/null; then
-  echo "The wxWidgets no-pthreads compatibility header did not remove pthread-only references." >&2
-  exit 2
-fi
-rm -f "$PROBE_SOURCE" "$PROBE_OBJECT"
 
 if [[ ! -x "$WX_SOURCE/configure" || "$WX_SOURCE/configure.in" -nt "$WX_SOURCE/configure" ||
       ( -f "$WX_SOURCE/autoconf_inc.m4" && "$WX_SOURCE/autoconf_inc.m4" -nt "$WX_SOURCE/configure" ) ]]; then
@@ -190,8 +166,7 @@ for stub in richtext webview; do
   ln -s "libwx_wasmu_${stub}-3.2.a" "libwx_wasmu_${stub}-3.2-emscripten.a"
 done
 
-# Catch any regression in the pinned source or compiler flags before an
-# application reaches the final link step.
+# Reject unsupported pthread-only imports in the compiled wxWidgets libraries.
 if [[ -x "$LLVM_NM" ]]; then
   if "$LLVM_NM" -u ./*.a 2>/dev/null |
        grep -E 'emscripten_(is_main_runtime_thread|async_run_in_main_runtime_thread_)' >/dev/null; then
