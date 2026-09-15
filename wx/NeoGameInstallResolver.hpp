@@ -371,6 +371,38 @@ public:
         return installs.front();
     }
 
+    // Read saved labels/paths only: no canonicalization, discovery, validation,
+    // or migration writes. Safe to call while constructing a main window.
+    std::vector<GameInstall> readSaved(const GameDefinition& game) const {
+        neosettings::SharedSettings settings;
+        const auto base = installListBase(game.id);
+        const auto count = std::min<std::size_t>(parseCount(settings.readString(base + "Count", "0")), 256);
+        std::vector<GameInstall> installs;
+        for (std::size_t i = 0; i < count; ++i) {
+            const auto item = base + std::to_string(i) + "/";
+            GameInstall install;
+            install.id = game.id;
+            install.installId = settings.readString(item + "Id", std::string{});
+            install.installPath = settings.readPath(item + "InstallPath").value_or(std::filesystem::path{});
+            install.tlkPath = settings.readPath(item + "TLKPath").value_or(std::filesystem::path{});
+            install.overridePath = settings.readPath(item + "OverridePath").value_or(std::filesystem::path{});
+            install.dataRootPath = settings.readPath(item + "DataRootPath").value_or(std::filesystem::path{});
+            install.displayName = settings.readString(item + "Name", defaultInstallName(game, install.installPath));
+            installs.push_back(std::move(install));
+        }
+        if (installs.empty()) {
+            const auto legacy = settingBase(game.id);
+            const auto root = settings.readPath(legacy + "InstallPath");
+            if (root && !root->empty()) {
+                GameInstall install;
+                install.id = game.id; install.installPath = *root;
+                install.displayName = settings.readString(legacy + "DisplayName", defaultInstallName(game, *root));
+                installs.push_back(std::move(install));
+            }
+        }
+        return installs;
+    }
+
     std::vector<GameInstall> readAll(const GameDefinition& game) const {
         neosettings::SharedSettings settings;
         const std::string base = installListBase(game.id);

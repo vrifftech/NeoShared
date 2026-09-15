@@ -93,6 +93,14 @@ inline std::string trimSlashes(std::string key) {
     return key;
 }
 
+// Settings/menu paths are labels, not a request to probe the filesystem.
+inline std::filesystem::path storedPath(const std::filesystem::path& input) {
+    if (input.empty()) return {};
+    std::error_code ec;
+    const auto absolute = std::filesystem::absolute(input, ec);
+    return (ec ? input : absolute).lexically_normal();
+}
+
 inline std::filesystem::path normalizedPath(const std::filesystem::path& input) {
     if (input.empty()) return {};
     std::error_code ec;
@@ -108,8 +116,8 @@ inline std::filesystem::path normalizedPath(const std::filesystem::path& input) 
 }
 
 inline bool samePathForMru(const std::filesystem::path& lhs, const std::filesystem::path& rhs) {
-    const std::string a = pathToUtf8(normalizedPath(lhs));
-    const std::string b = pathToUtf8(normalizedPath(rhs));
+    const std::string a = pathToUtf8(storedPath(lhs));
+    const std::string b = pathToUtf8(storedPath(rhs));
 #if defined(_WIN32)
     if (a.size() != b.size()) return false;
     for (std::size_t i = 0; i < a.size(); ++i) {
@@ -440,7 +448,7 @@ public:
         std::vector<std::filesystem::path> files;
         auto addUnique = [&](const std::filesystem::path& path) {
             if (path.empty()) return;
-            const auto normalized = normalizedPath(path);
+            const auto normalized = storedPath(path);
             if (std::find_if(files.begin(), files.end(), [&](const auto& existing) { return samePathForMru(existing, normalized); }) == files.end()) {
                 files.push_back(normalized);
             }
@@ -484,7 +492,7 @@ public:
         destination.clear();
         for (const auto& file : files) {
             if (file.empty()) continue;
-            const auto normalized = normalizedPath(file);
+            const auto normalized = storedPath(file);
             if (std::find_if(destination.begin(), destination.end(), [&](const auto& existing) {
                     return samePathForMru(existing, normalized);
                 }) != destination.end()) {
@@ -501,7 +509,7 @@ public:
         std::size_t written = 0;
         for (const auto& file : files) {
             if (file.empty()) continue;
-            config.Write(toWx("MRU/Files/" + std::to_string(written)), pathToWx(normalizedPath(file)));
+            config.Write(toWx("MRU/Files/" + std::to_string(written)), pathToWx(storedPath(file)));
             ++written;
             if (written >= maxItems) break;
         }
@@ -514,7 +522,7 @@ public:
                        std::size_t maxItems = kMaxRecentFiles) const {
         if (path.empty()) return;
         std::vector<std::filesystem::path> files = recentFiles(maxItems);
-        const auto normalized = normalizedPath(path);
+        const auto normalized = storedPath(path);
         files.erase(std::remove_if(files.begin(), files.end(), [&](const auto& existing) {
             return samePathForMru(existing, normalized);
         }), files.end());

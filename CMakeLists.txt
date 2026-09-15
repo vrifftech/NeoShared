@@ -122,6 +122,9 @@ if(NEOSHARED_ENABLE_ERF)
     endif()
 endif()
 
+# Game textures have no wxWidgets, PNG/JPEG, or tool-repository dependency.
+add_subdirectory(texture EXCLUDE_FROM_ALL)
+
 add_library(neoshared_wx INTERFACE)
 add_library(neoshared::wx ALIAS neoshared_wx)
 target_include_directories(neoshared_wx INTERFACE

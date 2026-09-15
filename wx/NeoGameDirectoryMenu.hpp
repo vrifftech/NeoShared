@@ -29,6 +29,7 @@ struct SavedGameDirectory {
     std::filesystem::path path;
     bool active = false;
     bool exists = false;
+    bool availabilityKnown = true;
 };
 
 // Applications that need more than the selected path (for example, NeoERF's
@@ -37,13 +38,13 @@ struct SavedGameDirectory {
 using OpenGameDirectoryAction = std::function<void(const SavedGameDirectory&)>;
 using OpenGameFileDialog = std::function<void(const std::filesystem::path&)>;
 
-inline std::vector<SavedGameDirectory> savedGameDirectories() {
+inline std::vector<SavedGameDirectory> savedGameDirectories(bool validatePaths = true) {
     std::vector<SavedGameDirectory> directories;
     const GamePathSettings settings;
 
     for (const GameDefinition& game : knownGames()) {
         const std::string activeId = settings.activeInstallId(game.id).value_or(std::string{});
-        for (const GameInstall& install : settings.readAll(game)) {
+        for (const GameInstall& install : (validatePaths ? settings.readAll(game) : settings.readSaved(game))) {
             if (install.installPath.empty()) continue;
 
             SavedGameDirectory directory;
@@ -53,9 +54,10 @@ inline std::vector<SavedGameDirectory> savedGameDirectories() {
             directory.installName = install.displayName.empty()
                                         ? defaultInstallName(game, install.installPath)
                                         : install.displayName;
-            directory.path = neosettings::normalizedPath(install.installPath);
+            directory.path = validatePaths ? neosettings::normalizedPath(install.installPath) : install.installPath;
             directory.active = !activeId.empty() && install.installId == activeId;
-            directory.exists = isDirectoryPath(directory.path);
+            directory.availabilityKnown = validatePaths;
+            directory.exists = validatePaths && isDirectoryPath(directory.path);
             directories.push_back(std::move(directory));
         }
     }
@@ -105,7 +107,7 @@ public:
         return;
 #endif
 
-        const std::vector<SavedGameDirectory> directories = savedGameDirectories();
+        const std::vector<SavedGameDirectory> directories = savedGameDirectories(false);
         for (const SavedGameDirectory& directory : directories) {
             if (!isAllowedGameId(allowedGameIds_, directory.gameId)) continue;
             std::string label = directory.active ? "[Active] " : std::string{};
@@ -113,14 +115,14 @@ public:
             if (!directory.installName.empty() && directory.installName != directory.gameName) {
                 label += " - " + directory.installName;
             }
-            if (!directory.exists) label += " (missing)";
+            if (directory.availabilityKnown && !directory.exists) label += " (missing)";
             label = neosettings::ellipsizeMiddle(label, 100);
 
             wxMenuItem* item = menu_.Append(
                 wxID_ANY,
                 neosettings::toWx(neosettings::escapeMenuLabel(label)),
                 neosettings::pathToWx(directory.path));
-            item->Enable(directory.exists);
+            item->Enable(!directory.availabilityKnown || directory.exists);
 
             const int id = item->GetId();
             entries_.push_back({id, directory});
@@ -199,7 +201,9 @@ private:
         }
 
         try {
-            action_(it->directory);
+            auto selected = it->directory;
+            selected.exists = true; selected.availabilityKnown = true;
+            action_(selected);
         } catch (const std::exception& ex) {
             wxString message = "The application could not open its file dialog:\n\n";
             message += neosettings::toWx(ex.what());
