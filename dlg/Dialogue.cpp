@@ -1,3 +1,4 @@
+#include "neoshared/PathUtf8.hpp"
 #include "Dialogue.hpp"
 #include "GFFFile.hpp"
 #include <neotlk/TlkLookup.hpp>
@@ -115,7 +116,7 @@ Dialogue read(const std::filesystem::path& path, const ReadOptions& options) {
     std::error_code ec;
     const auto size = std::filesystem::file_size(path, ec);
     if (ec || size < 56 || size > 64 * 1024 * 1024)
-        throw GffError("Choose a readable DLG file (maximum 64 MiB): " + path.u8string());
+        throw GffError("Choose a readable DLG file (maximum 64 MiB): " + neoshared::pathToUtf8(path));
     std::array<char, 8> signature{};
     std::ifstream input(path, std::ios::binary); input.read(signature.data(), static_cast<std::streamsize>(signature.size()));
     const std::string header(signature.data(), signature.size());

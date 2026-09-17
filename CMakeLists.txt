@@ -6,6 +6,14 @@ project(neoshared
 
 include(${CMAKE_CURRENT_LIST_DIR}/cmake/NeoMinimalRelease.cmake)
 
+
+add_library(neoshared_path INTERFACE)
+add_library(neoshared::path ALIAS neoshared_path)
+target_include_directories(neoshared_path INTERFACE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_compile_features(neoshared_path INTERFACE cxx_std_17)
+
 add_library(neoshared_tabular
     tabular/TabularData.cpp
 )
@@ -60,6 +68,7 @@ target_link_libraries(neoshared_gff PUBLIC
     neoshared::json
     neoshared::xml
 )
+target_link_libraries(neoshared_gff PUBLIC neoshared::path)
 target_compile_features(neoshared_gff PUBLIC cxx_std_17)
 
 add_library(neoshared_tlk
@@ -71,14 +80,14 @@ add_library(neoshared::tlk ALIAS neoshared_tlk)
 target_include_directories(neoshared_tlk PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/tlk/include
 )
-target_link_libraries(neoshared_tlk PRIVATE neoshared::gff)
+target_link_libraries(neoshared_tlk PUBLIC neoshared::path PRIVATE neoshared::gff)
 target_compile_features(neoshared_tlk PUBLIC cxx_std_17)
 
 # Read-only dialogue semantics; all binary parsing stays in the shared cores.
 add_library(neoshared_dlg dlg/Dialogue.cpp)
 add_library(neoshared::dlg ALIAS neoshared_dlg)
 target_include_directories(neoshared_dlg PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(neoshared_dlg PUBLIC neoshared::gff neoshared::tlk)
+target_link_libraries(neoshared_dlg PUBLIC neoshared::path neoshared::gff neoshared::tlk)
 target_compile_features(neoshared_dlg PUBLIC cxx_std_17)
 
 add_library(neoshared_gff_app
@@ -110,7 +119,7 @@ if(NEOSHARED_ENABLE_ERF)
     target_include_directories(neoshared_erf PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
     )
-    target_link_libraries(neoshared_erf PUBLIC ZLIB::ZLIB)
+    target_link_libraries(neoshared_erf PUBLIC neoshared::path ZLIB::ZLIB)
     target_compile_features(neoshared_erf PUBLIC cxx_std_17)
     if(EMSCRIPTEN)
         target_compile_options(neoshared_erf PRIVATE -fexceptions)
@@ -131,6 +140,7 @@ target_include_directories(neoshared_wx INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/wx
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
+target_link_libraries(neoshared_wx INTERFACE neoshared::path)
 target_compile_features(neoshared_wx INTERFACE cxx_std_17)
 
 neo_apply_minimal_release_to_directory_targets()

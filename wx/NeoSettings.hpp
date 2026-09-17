@@ -1,6 +1,7 @@
 #pragma once
 
 #include "NeoWindowPlacement.hpp"
+#include "neoshared/PathUtf8.hpp"
 
 #include <wx/config.h>
 #include <wx/menu.h>
@@ -45,30 +46,14 @@ inline std::string toStd(const wxString& text) {
     return buffer ? std::string(buffer.data()) : std::string();
 }
 
-// std::filesystem::path::u8string() returns std::string in C++17 and
-// std::u8string in C++20. Keep all shared path boundaries explicitly UTF-8 so
-// consumers compile correctly regardless of the language mode selected by a
-// newer compiler or a parent project.
+// Keep the long-standing neosettings API while routing all filesystem text
+// through the collection-wide UTF-8 boundary helpers.
 inline std::string pathToUtf8(const std::filesystem::path& path) {
-#if defined(__cpp_lib_char8_t)
-    const auto text = path.u8string();
-    return std::string(reinterpret_cast<const char*>(text.data()), text.size());
-#else
-    return path.u8string();
-#endif
+    return neoshared::pathToUtf8(path);
 }
 
 inline std::filesystem::path pathFromUtf8(const std::string& text) {
-    if (text.empty()) return {};
-#if defined(_WIN32)
-    // std::filesystem::path is natively UTF-16 on Windows. Convert through
-    // wxString rather than the locale-dependent narrow path constructor.
-    return std::filesystem::path(toWx(text).ToStdWstring());
-#else
-    // POSIX path storage is a byte sequence. NeoTools defines those bytes as
-    // UTF-8 at its application boundaries, so construct the path directly.
-    return std::filesystem::path(text);
-#endif
+    return neoshared::pathFromUtf8(text);
 }
 
 inline wxString pathToWx(const std::filesystem::path& path) {

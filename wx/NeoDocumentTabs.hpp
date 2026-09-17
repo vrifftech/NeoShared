@@ -1,5 +1,7 @@
 #pragma once
 
+#include "neoshared/PathUtf8.hpp"
+
 #include <wx/aui/auibook.h>
 #include <wx/event.h>
 #include <wx/menu.h>
@@ -119,21 +121,12 @@ inline void configureDocumentTabStrip(wxAuiNotebook* notebook) {
     updateDocumentTabStripLayout(notebook);
 }
 
-inline std::string pathToUtf8(const std::filesystem::path& path) {
-#if defined(__cpp_lib_char8_t)
-    const auto text = path.u8string();
-    return std::string(reinterpret_cast<const char*>(text.data()), text.size());
-#else
-    return path.u8string();
-#endif
-}
-
 inline std::string displayNameForPath(const std::filesystem::path& path,
                                       const std::string& untitled) {
     if (!path.empty()) {
-        const std::string leaf = pathToUtf8(path.filename());
+        const std::string leaf = neoshared::pathToUtf8(path.filename());
         if (!leaf.empty()) return leaf;
-        return pathToUtf8(path);
+        return neoshared::pathToUtf8(path);
     }
     return untitled.empty() ? std::string("Untitled") : untitled;
 }

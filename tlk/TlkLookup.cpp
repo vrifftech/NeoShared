@@ -1,3 +1,4 @@
+#include "neoshared/PathUtf8.hpp"
 #include "neotlk/TlkLookup.hpp"
 #include "neotlk/TlkFile.hpp"
 
@@ -302,7 +303,7 @@ void TlkLookup::loadImpl(const std::filesystem::path& file, std::optional<TextEn
         return;
     }
 
-    TalkTable table(file.u8string());
+    TalkTable table(neoshared::pathToUtf8(file));
     if (interpretation) table.reinterpretTextEncoding(*interpretation);
     classicV30_ = table.storageFormat() == TlkStorageFormat::ClassicV30;
     nativeEncodingUsable_ = !classicV30_ || (table.preferredTextEncoding() != TextEncoding::Utf8 &&

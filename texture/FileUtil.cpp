@@ -1,4 +1,5 @@
 #include "neoshared/texture/FileUtil.hpp"
+#include "neoshared/PathUtf8.hpp"
 #include "neoshared/texture/Operation.hpp"
 #include "neoshared/texture/ParserLimits.hpp"
 
@@ -24,31 +25,6 @@
 namespace neoshared::texture {
 namespace {
 
-#if defined(_WIN32)
-std::string widePathToUtf8(const std::wstring& value) {
-    if (value.empty()) return {};
-    if (value.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-        throw std::length_error("Windows path is too long to encode as UTF-8");
-    }
-
-    const int inputLength = static_cast<int>(value.size());
-    const int outputLength = WideCharToMultiByte(
-        CP_UTF8, 0, value.data(), inputLength, nullptr, 0, nullptr, nullptr);
-    if (outputLength <= 0) {
-        throw std::system_error(static_cast<int>(GetLastError()), std::system_category(),
-                                "Unable to encode Windows path as UTF-8");
-    }
-
-    std::string output(static_cast<std::size_t>(outputLength), '\0');
-    const int converted = WideCharToMultiByte(
-        CP_UTF8, 0, value.data(), inputLength, output.data(), outputLength, nullptr, nullptr);
-    if (converted != outputLength) {
-        throw std::system_error(static_cast<int>(GetLastError()), std::system_category(),
-                                "Unable to encode Windows path as UTF-8");
-    }
-    return output;
-}
-#endif
 
 std::string systemErrorText(const std::string& action, const std::filesystem::path& path) {
 #if defined(_WIN32)
@@ -126,19 +102,11 @@ bool pathsReferToSameFile(const std::filesystem::path& left, const std::filesyst
 static void flushFileToDisk(const std::filesystem::path& path);
 
 std::string pathToUtf8(const std::filesystem::path& path) {
-#if defined(_WIN32)
-    return widePathToUtf8(path.native());
-#else
-    return path.native();
-#endif
+    return neoshared::pathToUtf8(path);
 }
 
 std::string genericPathToUtf8(const std::filesystem::path& path) {
-    auto value = pathToUtf8(path);
-#if defined(_WIN32)
-    std::replace(value.begin(), value.end(), '\\', '/');
-#endif
-    return value;
+    return neoshared::genericPathToUtf8(path);
 }
 
 std::string asciiLower(std::string value) {

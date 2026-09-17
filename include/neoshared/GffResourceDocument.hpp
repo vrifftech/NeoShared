@@ -1,4 +1,6 @@
 #pragma once
+
+#include "neoshared/PathUtf8.hpp"
 #include "ResourceDocument.hpp"
 #include <gff/AppModel.hpp>
 #include <algorithm>
@@ -26,7 +28,7 @@ inline void loadGffResource(const ResourceDocument& source, neogff::GffFile& fil
 }
 inline void checkGffOutputType(const std::filesystem::path& path,
                                const std::string& requiredExtension = {}) {
-    std::string extension = path.extension().u8string();
+    std::string extension = neoshared::pathToUtf8(path.extension());
     std::transform(extension.begin(), extension.end(), extension.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     if ((!requiredExtension.empty() && extension != requiredExtension) ||
