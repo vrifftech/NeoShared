@@ -87,8 +87,8 @@ esac
 
 SOURCE_ROOT="$(cd "$SOURCE_ROOT" && pwd)"
 NEOSHARED_ROOT_VALUE="$(cd "$NEOSHARED_ROOT_VALUE" && pwd)"
-[[ -x "$SOURCE_ROOT/scripts/build.sh" ]] || {
-  echo "Application build wrapper is missing or not executable: $SOURCE_ROOT/scripts/build.sh" >&2
+[[ -f "$SOURCE_ROOT/scripts/build.sh" ]] || {
+  echo "Application build wrapper is missing: $SOURCE_ROOT/scripts/build.sh" >&2
   exit 2
 }
 
