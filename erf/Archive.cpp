@@ -2070,16 +2070,6 @@ void ensure_unique_save_staging_leaves(const std::vector<Resource>& resources,
     }
 }
 
-std::vector<std::filesystem::path> temp_files_full_path(const std::filesystem::path& temp_folder) {
-    // archive save has its own local GetFileList helper, and that helper
-    // calls FindClose(rFile). Keep that behavior separate from the
-    // global GetFilesInFolder helper, which intentionally omits
-    // FindClose.
-    return files_in_folder(temp_folder, false, false, true);
-}
-
-
-
 
 void ensure_staged_input_fits_archive_format(const std::filesystem::path& source) {
     std::uintmax_t size = 0;
@@ -2262,35 +2252,6 @@ private:
     FileIdentity identity_{};
     bool active_ = false;
 };
-
-void verify_temp_archive_before_replace(const std::filesystem::path& filename) {
-    ErfArchive probe;
-    probe.load(filename);
-
-    std::error_code ec;
-    const auto archive_size = std::filesystem::file_size(filename, ec);
-    if (ec) {
-        throw ErfError("Refusing to replace target; unable to size temporary archive: " + path_to_string(filename));
-    }
-
-    const bool packed_toc = probe.disk_format() == ArchiveDiskFormat::ErfV2_2 ||
-                            probe.disk_format() == ArchiveDiskFormat::ErfV3_0;
-    for (const auto& res : probe.resources()) {
-        const std::uintmax_t stored_size = packed_toc && res.packed_size != 0
-            ? static_cast<std::uintmax_t>(res.packed_size)
-            : static_cast<std::uintmax_t>(res.data_size);
-        if (stored_size == 0) {
-            continue;
-        }
-        const std::uintmax_t offset = res.data_offset;
-        if (offset > archive_size || stored_size > archive_size - offset) {
-            throw ErfError("Refusing to replace target with a temporary archive containing out-of-range resource data.");
-        }
-    }
-}
-
-
-
 
 #if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
 void fsync_parent_directory_after_replace(const std::filesystem::path& target) {
@@ -3809,7 +3770,6 @@ void ErfArchive::save(std::filesystem::path filename, std::string filetype_overr
                 "ERF V3.0 aligned data offset");
 
             for (std::size_t i = 0; i < all_files.size(); ++i) {
-                const auto& file = all_files[i];
                 seekp_from_u32_offset(out, toc_offset);
                 write_i32(out, v3_name_offsets.at(i));
                 write_u64(out, v3_name_hashes.at(i));
@@ -3839,7 +3799,6 @@ void ErfArchive::save(std::filesystem::path filename, std::string filetype_overr
                 checked_mul_u32(header_.entrycount, resref32_ ? 48u : 32u, "RIM key/resource table byte size"),
                 "RIM data offset");
             for (std::size_t i = 0; i < all_files.size(); ++i) {
-                const auto& file = all_files[i];
                 const std::string save_leaf = filename_string(std::filesystem::path(all_archive_names.at(i)));
                 const std::string ext_with_dot = extension_string(std::filesystem::path(save_leaf));
                 const std::string name = resource_stem_from_text(save_leaf);
@@ -3883,7 +3842,6 @@ void ErfArchive::save(std::filesystem::path filename, std::string filetype_overr
                 checked_mul_u32(header_.entrycount, 8u, "ERF resource-list byte size"),
                 "ERF data offset");
             for (std::size_t i = 0; i < all_files.size(); ++i) {
-                const auto& file = all_files[i];
                 const std::string save_leaf = filename_string(std::filesystem::path(all_archive_names.at(i)));
                 const std::string ext_with_dot = extension_string(std::filesystem::path(save_leaf));
                 const std::string name = resource_stem_from_text(save_leaf);
