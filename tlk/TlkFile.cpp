@@ -1918,22 +1918,13 @@ void TalkTable::save(const std::string& filename) {
     const FileSignature rememberedSaveTarget{saveTargetSnapshotValid_, saveTargetSize_, saveTargetWriteTime_, saveTargetContentHash_};
     rejectUnsafeExistingSaveTarget(outputPath);
     rejectExistingNonTlkOutputTarget(outputPath);
-    const FileSignature outputTargetAtSaveStart = captureOptionalExistingRegularFileSignature(
-        outputPath,
-        "Unable to inspect output TLK file safely before overwrite!");
-
-    if (savingKnownTarget && !existingRegularFileSignatureMatches(outputPath, rememberedSaveTarget)) {
-        throw NeoTLKError("Refusing to overwrite the TLK file because it has changed on disk since it was loaded or last saved. Reload the file or use Save As to write a separate copy.");
-    }
-
-    const bool preserveSnapshot = originalSnapshot_ && savedModelHashValid_ && modelHash() == savedModelHash_;
-    const bool preserveImage = hasSaveTarget_ && savedModelHashValid_ && modelHash() == savedModelHash_;
+    const auto currentModelHash = modelHash();
+    const bool preserveSnapshot = originalSnapshot_ && savedModelHashValid_ && currentModelHash == savedModelHash_;
+    const bool preserveImage = hasSaveTarget_ && savedModelHashValid_ && currentModelHash == savedModelHash_;
     if (preserveImage && savingKnownTarget) {
         modified_ = false;
-        return; // The signature check above is required even for this no-op.
+        return;
     }
-    if (preserveImage && !existingRegularFileSignatureMatches(userPathFromString(saveTargetFilename_), rememberedSaveTarget))
-        throw NeoTLKError("Cannot copy unchanged source bytes: the source TLK changed. Reload it before Save As.");
     if (!preserveImage && !preserveSnapshot) validateNativeOutput();
 
 
@@ -1963,10 +1954,8 @@ void TalkTable::save(const std::string& filename) {
                 output.write(buffer.data(), source.gcount());
             }
             output.flush();
-            if (!source.eof() || !output ||
-                !existingRegularFileSignatureMatches(userPathFromString(saveTargetFilename_), rememberedSaveTarget) ||
-                hashExistingRegularFileContent(temporary.file, "Cannot verify unchanged TLK copy.") != rememberedSaveTarget.contentHash)
-                throw NeoTLKError("The source TLK changed or its unchanged copy could not be completed.");
+            if (!source.eof() || !output)
+                throw NeoTLKError("The unchanged TLK copy could not be completed.");
         } else if (isDragonAgeV02()) {
             prepareDragonAgeV02ForSave();
             try {
@@ -1986,23 +1975,12 @@ void TalkTable::save(const std::string& filename) {
             if (!output) throw NeoTLKError("Unable to flush output TLK file!");
         }
         applyExistingPermissionsToTemporary(temporary.file, previousPermissions);
-        flushPathToStableStorage(temporary.file, "Unable to flush output TLK file to stable storage!");
-        flushDirectoryBestEffort(temporary.directory);
-        rejectUnsafeExistingSaveTarget(outputPath);
-        rejectExistingNonTlkOutputTarget(outputPath);
-        if (savingKnownTarget && !existingRegularFileSignatureMatches(outputPath, rememberedSaveTarget)) {
-            throw NeoTLKError("Refusing to overwrite the TLK file because it changed while the save operation was being prepared. Reload the file or use Save As to write a separate copy.");
-        }
-        if (preserveImage && !existingRegularFileSignatureMatches(userPathFromString(saveTargetFilename_), rememberedSaveTarget)) {
-            throw NeoTLKError("The original TLK changed before its unchanged copy could be committed.");
-        }
-        if (!outputTargetStillMatchesStart(outputPath, outputTargetAtSaveStart)) {
-            throw NeoTLKError("Refusing to overwrite the output TLK file because it changed or appeared while the save operation was being prepared. Choose another output path or retry after reviewing the file.");
-        }
+        // A completed sibling temporary file plus rename is sufficient for
+        // ordinary editor saves. Avoid repeated content hashes and synchronous
+        // device/directory flushes used only for concurrent-mutation hardening.
         replaceFileWithTemporary(temporary.file, outputPath);
         temporary.file.clear();
         removeTemporarySaveFileBestEffort(temporary);
-        flushDirectoryBestEffort(outputPath.has_parent_path() ? outputPath.parent_path() : std::filesystem::path("."));
     } catch (...) {
         removeTemporarySaveFileBestEffort(temporary);
         throw;

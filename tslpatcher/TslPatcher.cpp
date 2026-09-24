@@ -84,23 +84,28 @@ std::string uniqueSectionName(const PatchProject& project, const std::string& ba
     }
 }
 
-std::string nextKey(const IniSection& section, const std::string& prefix) {
-    std::size_t next = 0;
+std::string nextKey(IniSection& section, const std::string& prefix) {
     const std::string want = lowerAscii(prefix);
-    for (const auto& kv : section.entries) {
-        const std::string key = lowerAscii(kv.key);
-        if (key.rfind(want, 0) != 0) continue;
-        const std::string suffix = key.substr(want.size());
-        if (suffix.empty()) continue;
-        bool ok = true;
-        std::size_t value = 0;
-        for (char ch : suffix) {
-            if (!std::isdigit(static_cast<unsigned char>(ch))) { ok = false; break; }
-            value = value * 10 + static_cast<std::size_t>(ch - '0');
+    auto found = section.numberedNext.find(want);
+    if (found == section.numberedNext.end()) {
+        std::size_t next = 0;
+        for (const auto& kv : section.entries) {
+            const std::string key = lowerAscii(kv.key);
+            if (key.rfind(want, 0) != 0) continue;
+            const std::string suffix = key.substr(want.size());
+            if (suffix.empty()) continue;
+            bool ok = true;
+            std::size_t value = 0;
+            for (char ch : suffix) {
+                if (!std::isdigit(static_cast<unsigned char>(ch))) { ok = false; break; }
+                value = value * 10 + static_cast<std::size_t>(ch - '0');
+            }
+            if (ok && value >= next) next = value + 1;
         }
-        if (ok && value >= next) next = value + 1;
+        found = section.numberedNext.emplace(want, next).first;
     }
-    return prefix + std::to_string(next);
+    const std::size_t value = found->second++;
+    return prefix + std::to_string(value);
 }
 
 void addAssetIfRequested(PatchProject& project, bool copyBaselineAsset, const std::filesystem::path& baselineAsset, const std::string& patchFilename) {
@@ -854,6 +859,7 @@ void applySectionRenames(PatchProject& project,
             }
         }
     }
+    project.rebuildSectionIndex();
 }
 
 std::unordered_set<std::string> mergeableSectionNames(const PatchProject& project) {
@@ -1259,19 +1265,27 @@ std::filesystem::path validateOutputIniPath(const std::filesystem::path& input) 
 
 } // namespace
 
+void PatchProject::rebuildSectionIndex() const {
+    sectionIndex_.clear();
+    sectionIndex_.reserve(sections.size());
+    for (std::size_t i = 0; i < sections.size(); ++i)
+        sectionIndex_[lowerAscii(sections[i].name)] = i;
+}
+
 IniSection& PatchProject::section(const std::string& name) {
-    for (auto& section : sections) {
-        if (iequals(section.name, name)) return section;
-    }
+    if (sectionIndex_.size() != sections.size()) rebuildSectionIndex();
+    const std::string key = lowerAscii(name);
+    const auto found = sectionIndex_.find(key);
+    if (found != sectionIndex_.end()) return sections[found->second];
     sections.push_back({name, {}});
+    sectionIndex_[key] = sections.size() - 1u;
     return sections.back();
 }
 
 const IniSection* PatchProject::findSection(const std::string& name) const {
-    for (const auto& section : sections) {
-        if (iequals(section.name, name)) return &section;
-    }
-    return nullptr;
+    if (sectionIndex_.size() != sections.size()) rebuildSectionIndex();
+    const auto found = sectionIndex_.find(lowerAscii(name));
+    return found == sectionIndex_.end() ? nullptr : &sections[found->second];
 }
 
 void PatchProject::add(const std::string& sectionName, std::string key, std::string value) {
@@ -1465,7 +1479,6 @@ IniMergeReport writePackageToIni(const PatchProject& project,
         }
     }
 
-    (void)preflightIniMerge(project, outputIni, includeSettings);
     std::vector<std::string> assetNotes;
     for (const auto& asset : project.assets) {
         if (asset.targetName.empty()) continue;

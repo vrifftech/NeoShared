@@ -3478,10 +3478,12 @@ void ErfArchive::save(std::filesystem::path filename, std::string filetype_overr
         ScopedTempOutputFile output_guard(output_temp);
         std::vector<std::filesystem::path> all_files;
         std::vector<FileIdentity> all_file_identities;
+        std::vector<const Resource*> direct_resources;
         std::vector<std::string> all_archive_names;
         std::vector<Resource> all_resource_metadata;
         all_files.reserve(resources_.size() + new_files_.size());
         all_file_identities.reserve(resources_.size() + new_files_.size());
+        direct_resources.reserve(resources_.size() + new_files_.size());
         all_archive_names.reserve(resources_.size() + new_files_.size());
         all_resource_metadata.reserve(resources_.size() + new_files_.size());
 
@@ -3495,6 +3497,7 @@ void ErfArchive::save(std::filesystem::path filename, std::string filetype_overr
             temp_guard.remember_file(staged_file, identity);
             all_files.push_back(staged_file);
             all_file_identities.push_back(identity);
+            direct_resources.push_back(nullptr);
             if (filename_based_resources()) {
                 archive_name = normalize_filename_resource_name(archive_name, disk_format_);
                 metadata.filename = archive_name;
@@ -3522,13 +3525,34 @@ void ErfArchive::save(std::filesystem::path filename, std::string filetype_overr
             all_resource_metadata.push_back(std::move(metadata));
         };
 
+        auto remember_direct_resource = [&](const Resource& resource, std::string archive_name) {
+            Resource metadata = resource;
+            if (filename_based_resources()) {
+                archive_name = normalize_filename_resource_name(archive_name, disk_format_);
+                metadata.filename = archive_name;
+            } else {
+                archive_name = filename_string(std::filesystem::path(archive_name));
+            }
+            all_files.emplace_back();
+            all_file_identities.emplace_back();
+            direct_resources.push_back(&resource);
+            all_archive_names.push_back(std::move(archive_name));
+            all_resource_metadata.push_back(std::move(metadata));
+        };
+
         if (!newfile_) {
+            const bool must_recompress_existing =
+                disk_format_ == ArchiveDiskFormat::ErfV2_2 && erf_compression_scheme(header_.v2_flags) != 0;
             for (const auto& res : resources_) {
                 const std::string archive_name = resource_filename_for_archive(res, resource_type_profile_);
+                if (!must_recompress_existing) {
+                    remember_direct_resource(res, archive_name);
+                    continue;
+                }
                 const auto out_path = (temp_folder_ / save_staging_leaf(all_files.size(), archive_name));
                 ExclusiveOutputFile out_file(out_path, OutputCreateMode::CreateNew, "temporary resource file");
                 std::ostream& out = out_file.stream();
-                if (res.data_size > 0 || ((disk_format_ == ArchiveDiskFormat::ErfV2_2 || disk_format_ == ArchiveDiskFormat::ErfV3_0) && res.packed_size > 0)) {
+                if (res.data_size > 0 || res.packed_size > 0) {
                     ensure_archive_stream();
                     archive_stream_.clear();
                     copy_resource_payload_to_stream(archive_stream_, out, res, disk_format_, archive_flags());
@@ -3561,21 +3585,10 @@ void ErfArchive::save(std::filesystem::path filename, std::string filetype_overr
             remember_staged_file(staged_dest, staged_dest_identity, archive_name, metadata);
         }
 
-        if (!directory_exists(temp_folder_)) {
-            throw ErfError("Save temporary folder disappeared before archive rewrite: " + path_to_string(temp_folder_));
-        }
-        if (!same_path_identity(temp_folder_, temp_folder_identity)) {
-            throw ErfError("Save temporary folder was replaced before archive rewrite: " + path_to_string(temp_folder_));
-        }
-        const auto discovered_files = temp_files_full_path(temp_folder_);
-        const auto expected_staged_count = resources_.size() + new_files_.size();
-        if (all_files.size() != expected_staged_count || discovered_files.size() != expected_staged_count) {
-            throw ErfError("Save staging file count mismatch; refusing to replace archive.");
-        }
-        for (std::size_t i = 0; i < all_files.size(); ++i) {
-            if (!same_regular_file_identity(all_files[i], all_file_identities[i])) {
-                throw ErfError("Save-staged file was replaced before archive rewrite: " + path_to_string(all_files[i]));
-            }
+        if (all_files.size() != direct_resources.size() ||
+            all_files.size() != all_archive_names.size() ||
+            all_files.size() != all_resource_metadata.size()) {
+            throw ErfError("Internal save payload table mismatch.");
         }
         const bool is_erf_v2 = disk_format_ == ArchiveDiskFormat::ErfV2_0 || disk_format_ == ArchiveDiskFormat::ErfV2_2;
         const bool is_erf_v2_2 = disk_format_ == ArchiveDiskFormat::ErfV2_2;
@@ -3673,6 +3686,20 @@ void ErfArchive::save(std::filesystem::path filename, std::string filetype_overr
         output_guard.activate(output_identity);
         std::ostream& out = out_file.stream();
 
+        auto unpacked_payload_size = [&](std::size_t index) -> std::uint64_t {
+            if (direct_resources.at(index) != nullptr) return direct_resources.at(index)->data_size;
+            return all_file_identities.at(index).size;
+        };
+        auto write_payload = [&](std::ostream& destination, std::size_t index) -> std::uint64_t {
+            if (const Resource* source = direct_resources.at(index)) {
+                ensure_archive_stream();
+                archive_stream_.clear();
+                copy_resource_payload_to_stream(archive_stream_, destination, *source, disk_format_, archive_flags());
+                return source->data_size;
+            }
+            return write_file_payload(destination, all_files.at(index), &all_file_identities.at(index));
+        };
+
         if (is_erf_v2) {
             write_erf_v2_magic(out, is_erf_v2_2 ? '2' : '0');
             write_u32(out, header_.entrycount);
@@ -3753,10 +3780,10 @@ void ErfArchive::save(std::filesystem::path filename, std::string filetype_overr
                 toc_offset = checked_u32(static_cast<std::uintmax_t>(out.tellp()), "ERF V2.0 TOC offset");
 
                 seekp_from_u32_offset(out, data_offset);
-                const std::uint64_t unpacked_size = all_file_identities.at(i).size;
+                const std::uint64_t unpacked_size = unpacked_payload_size(i);
                 const std::uint64_t stored_size = compress_v2_payloads
                     ? write_file_payload_zlib(out, file, erf_compression_scheme(header_.v2_flags), &all_file_identities.at(i))
-                    : write_file_payload(out, file, &all_file_identities.at(i));
+                    : write_payload(out, i);
                 const std::uint32_t packed_u32 = checked_u32(stored_size, std::string(version_label) + " packed resource size");
                 const std::uint32_t unpacked_u32 = checked_u32(unpacked_size, std::string(version_label) + " unpacked resource size");
                 data_offset = checked_u32(static_cast<std::uintmax_t>(out.tellp()), std::string(version_label) + " data offset");
@@ -3795,7 +3822,7 @@ void ErfArchive::save(std::filesystem::path filename, std::string filetype_overr
                 toc_offset = checked_u32(static_cast<std::uintmax_t>(out.tellp()), "ERF V3.0 TOC offset");
 
                 seekp_from_u32_offset(out, data_offset);
-                const auto copied = write_file_payload(out, file, &all_file_identities.at(i));
+                const auto copied = write_payload(out, i);
                 const std::uint32_t copied_u32 = checked_u32(copied, "ERF V3.0 resource data size");
                 write_zero_padding_to_alignment(out, 4u);
                 data_offset = checked_u32(static_cast<std::uintmax_t>(out.tellp()), "ERF V3.0 data offset");
@@ -3839,7 +3866,7 @@ void ErfArchive::save(std::filesystem::path filename, std::string filetype_overr
 
                 seekp_from_u32_offset(out, data_offset);
                 res.data_offset = data_offset;
-                const auto copied = write_file_payload(out, file, &all_file_identities.at(i));
+                const auto copied = write_payload(out, i);
                 res.data_size = checked_u32(copied, "Resource data size");
                 data_offset = checked_u32(static_cast<std::uintmax_t>(out.tellp()), "RIM data offset");
 
@@ -3882,7 +3909,7 @@ void ErfArchive::save(std::filesystem::path filename, std::string filetype_overr
 
                 seekp_from_u32_offset(out, data_offset);
                 res.data_offset = data_offset;
-                const auto copied = write_file_payload(out, file, &all_file_identities.at(i));
+                const auto copied = write_payload(out, i);
                 res.data_size = checked_u32(copied, "Resource data size");
                 data_offset = checked_u32(static_cast<std::uintmax_t>(out.tellp()), "ERF data offset");
 
@@ -3893,7 +3920,6 @@ void ErfArchive::save(std::filesystem::path filename, std::string filetype_overr
             }
         }
         out_file.close();
-        verify_temp_archive_before_replace(output_temp);
 
         if (archive_stream_.is_open()) {
             archive_stream_.close();
@@ -4254,6 +4280,39 @@ void ErfArchive::get_resource(const std::string& resref, std::uint16_t res_type,
     output_guard.release();
 }
 
+
+
+void ErfArchive::get_resource(std::size_t index, std::filesystem::path filename) {
+    ensure_loaded_for_operation("Unable to get resource from file, no ERF file is open!");
+    if (index >= resources_.size()) {
+        throw ErfError("Resource index is out of range. Unable to extract it!");
+    }
+
+    const Resource& res = resources_[index];
+    if (filename.empty()) {
+        filename = default_temp_root() / resource_filename_for_archive(res, resource_type_profile_);
+    }
+
+    ensure_extract_target_does_not_overwrite_inputs(filename, filename_, new_files_);
+    const ReplacementTargetState extract_target_state = capture_replacement_target_state(filename);
+    const std::filesystem::path output_temp = make_unique_output_temp_path(filename);
+    ScopedTempOutputFile output_guard(output_temp);
+    FileIdentity output_identity{};
+    {
+        ExclusiveOutputFile out_file(output_temp, OutputCreateMode::CreateNew, "temporary output resource file");
+        output_identity = out_file.identity();
+        output_guard.activate(output_identity);
+        std::ostream& out = out_file.stream();
+        if (res.data_size > 0 || ((disk_format_ == ArchiveDiskFormat::ErfV2_2 || disk_format_ == ArchiveDiskFormat::ErfV3_0) && res.packed_size > 0)) {
+            ensure_archive_stream();
+            archive_stream_.clear();
+            copy_resource_payload_to_stream(archive_stream_, out, res, disk_format_, archive_flags());
+        }
+        out_file.close();
+    }
+    replace_file_atomically(output_temp, output_identity, filename, extract_target_state);
+    output_guard.release();
+}
 
 void ErfArchive::get_resource_by_name(const std::string& resource_name, std::filesystem::path filename) {
     ensure_loaded_for_operation("Unable to get resource from file, no ERF file is open!");

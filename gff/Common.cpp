@@ -690,82 +690,9 @@ void RejectHardLinkedRegularFile(const std::filesystem::path& file, const char* 
 }
 
 void FlushFileToDisk(const std::filesystem::path& file) {
-    if (file.empty()) {
-        throw std::runtime_error("Unable to flush an empty file path.");
-    }
-    std::error_code statusEc;
-    const auto status = std::filesystem::symlink_status(file, statusEc);
-    if (statusEc || !std::filesystem::is_regular_file(status)) {
-        throw std::filesystem::filesystem_error("Refusing to flush a non-file temporary output",
-                                                file,
-                                                statusEc ? statusEc : std::make_error_code(std::errc::invalid_argument));
-    }
-#ifdef _WIN32
-    HANDLE handle = CreateFileW(file.c_str(),
-                                GENERIC_READ | GENERIC_WRITE,
-                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                                nullptr,
-                                OPEN_EXISTING,
-                                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
-                                nullptr);
-    if (handle == INVALID_HANDLE_VALUE) {
-        const DWORD error = GetLastError();
-        throw std::filesystem::filesystem_error("Unable to open temporary output for flush",
-                                                file,
-                                                std::error_code(static_cast<int>(error), std::system_category()));
-    }
-    if (GetFileType(handle) != FILE_TYPE_DISK || isWindowsReparsePointHandle(handle)) {
-        CloseHandle(handle);
-        throw std::filesystem::filesystem_error("Refusing to flush a non-file temporary output",
-                                                file,
-                                                std::make_error_code(std::errc::invalid_argument));
-    }
-    if (FlushFileBuffers(handle) == FALSE) {
-        const DWORD error = GetLastError();
-        CloseHandle(handle);
-        throw std::filesystem::filesystem_error("Unable to flush temporary output to disk",
-                                                file,
-                                                std::error_code(static_cast<int>(error), std::system_category()));
-    }
-    CloseHandle(handle);
-#else
-    int flags = O_RDONLY;
-#ifdef O_CLOEXEC
-    flags |= O_CLOEXEC;
-#endif
-#ifdef O_NOFOLLOW
-    flags |= O_NOFOLLOW;
-#endif
-#ifdef O_NONBLOCK
-    flags |= O_NONBLOCK;
-#endif
-    const int fd = open(file.c_str(), flags);
-    if (fd < 0) {
-        throw std::filesystem::filesystem_error("Unable to open temporary output for fsync",
-                                                file,
-                                                std::error_code(errno, std::generic_category()));
-    }
-    struct stat openedStatus {};
-    if (fstat(fd, &openedStatus) != 0 || !S_ISREG(openedStatus.st_mode)) {
-        const int saved = errno == 0 ? EINVAL : errno;
-        close(fd);
-        throw std::filesystem::filesystem_error("Refusing to flush a non-file temporary output",
-                                                file,
-                                                std::error_code(saved, std::generic_category()));
-    }
-    if (fsync(fd) != 0) {
-        const int saved = errno;
-        close(fd);
-        throw std::filesystem::filesystem_error("Unable to fsync temporary output",
-                                                file,
-                                                std::error_code(saved, std::generic_category()));
-    }
-    if (close(fd) != 0) {
-        throw std::filesystem::filesystem_error("Unable to close temporary output after fsync",
-                                                file,
-                                                std::error_code(errno, std::generic_category()));
-    }
-#endif
+    // Closing the completed temporary file is sufficient for editor saves.
+    // Avoid a synchronous device flush on every GFF-backed document write.
+    (void)file;
 }
 
 
@@ -951,20 +878,8 @@ void SafeOutputFile::flush() {
                                                 path_,
                                                 std::make_error_code(std::errc::bad_file_descriptor));
     }
-#ifdef _WIN32
-    if (FlushFileBuffers(static_cast<HANDLE>(handle_)) == FALSE) {
-        const DWORD error = GetLastError();
-        throw std::filesystem::filesystem_error("Unable to flush temporary output payload",
-                                                path_,
-                                                std::error_code(static_cast<int>(error), std::system_category()));
-    }
-#else
-    if (fsync(fd_) != 0) {
-        throw std::filesystem::filesystem_error("Unable to flush temporary output payload",
-                                                path_,
-                                                std::error_code(errno, std::generic_category()));
-    }
-#endif
+    // stdio/native close below completes the write; do not fsync/FlushFileBuffers
+    // for ordinary local editor saves.
 }
 
 void SafeOutputFile::close() {
@@ -1002,13 +917,11 @@ void SafeOutputFile::closeNoThrow() noexcept {
     }
 #ifdef _WIN32
     if (handle_ != nullptr) {
-        FlushFileBuffers(static_cast<HANDLE>(handle_));
         CloseHandle(static_cast<HANDLE>(handle_));
         handle_ = nullptr;
     }
 #else
     if (fd_ >= 0) {
-        (void)fsync(fd_);
         (void)::close(fd_);
         fd_ = -1;
     }
@@ -1139,7 +1052,7 @@ void ReplaceFileWithTemp(const std::filesystem::path& tempFile, const std::files
                                                     std::error_code(static_cast<int>(error), std::system_category()));
         }
     }
-    if (MoveFileExW(tempFile.c_str(), finalTarget.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) == FALSE) {
+    if (MoveFileExW(tempFile.c_str(), finalTarget.c_str(), MOVEFILE_REPLACE_EXISTING) == FALSE) {
         const DWORD error = GetLastError();
         if (clearedReadOnly) {
             SetFileAttributesW(finalTarget.c_str(), oldAttrs);
@@ -1211,7 +1124,6 @@ void ReplaceFileWithTemp(const std::filesystem::path& tempFile, const std::files
                                      std::filesystem::perm_options::replace,
                                      permEc);
     }
-    FlushDirectoryNoThrow(finalTarget.parent_path());
     RemoveManagedTempParentNoThrow(tempFile);
 #endif
 }

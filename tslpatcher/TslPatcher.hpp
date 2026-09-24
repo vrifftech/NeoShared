@@ -7,6 +7,7 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <unordered_map>
 #include <vector>
 
 namespace neotsl {
@@ -19,6 +20,8 @@ struct KeyValue {
 struct IniSection {
     std::string name;
     std::vector<KeyValue> entries;
+    // Lazily populated counters for AddRowN/ChangeRowN/etc. generation.
+    mutable std::unordered_map<std::string, std::size_t> numberedNext;
 };
 
 struct StagedAsset {
@@ -39,6 +42,10 @@ struct PatchProject {
     const IniSection* findSection(const std::string& name) const;
     void add(const std::string& sectionName, std::string key, std::string value);
     bool emptyInstructions() const;
+    void rebuildSectionIndex() const;
+
+private:
+    mutable std::unordered_map<std::string, std::size_t> sectionIndex_;
 };
 
 struct DiffOptions {
