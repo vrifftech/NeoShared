@@ -1,6 +1,10 @@
 include_guard(GLOBAL)
 
-set(_NEO_MACOS_BUNDLE_MODULE_DIR "${CMAKE_CURRENT_LIST_DIR}")
+# Remember the module location independently of the calling directory. The
+# collection still supports CMake 3.16, which predates
+# CMAKE_CURRENT_FUNCTION_LIST_DIR.
+set_property(GLOBAL PROPERTY NEOSHARED_NEO_MACOS_BUNDLE_MODULE_DIR
+    "${CMAKE_CURRENT_LIST_DIR}")
 
 function(neo_configure_macos_bundle target_name)
     set(_neo_one_value_args NAME IDENTIFIER ICON VERSION)
@@ -42,10 +46,22 @@ function(neo_configure_macos_bundle target_name)
         set(_neo_bundle_version "0.0.0")
     endif()
 
+    get_property(_neo_macos_bundle_module_dir GLOBAL PROPERTY
+        NEOSHARED_NEO_MACOS_BUNDLE_MODULE_DIR)
+    if(NOT _neo_macos_bundle_module_dir)
+        message(FATAL_ERROR
+            "NeoMacOSBundle.cmake could not resolve its template directory.")
+    endif()
+    set(_neo_macos_bundle_info_plist
+        "${_neo_macos_bundle_module_dir}/NeoMacOSBundleInfo.plist.in")
+    if(NOT EXISTS "${_neo_macos_bundle_info_plist}")
+        message(FATAL_ERROR
+            "macOS bundle Info.plist template was not found: ${_neo_macos_bundle_info_plist}")
+    endif()
+
     set_target_properties(${target_name} PROPERTIES
         MACOSX_BUNDLE TRUE
-        MACOSX_BUNDLE_INFO_PLIST
-            "${_NEO_MACOS_BUNDLE_MODULE_DIR}/NeoMacOSBundleInfo.plist.in"
+        MACOSX_BUNDLE_INFO_PLIST "${_neo_macos_bundle_info_plist}"
         MACOSX_BUNDLE_ICON_FILE "${_neo_icon_name}"
         MACOSX_BUNDLE_BUNDLE_NAME "${NEO_MACOS_NAME}"
         MACOSX_BUNDLE_GUI_IDENTIFIER "${NEO_MACOS_IDENTIFIER}"
