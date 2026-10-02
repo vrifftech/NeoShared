@@ -1,0 +1,12 @@
+add_library(neoshared_material Material.cpp Runtime.cpp)
+add_library(neoshared::material ALIAS neoshared_material)
+target_include_directories(neoshared_material PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/../include")
+target_link_libraries(neoshared_material PUBLIC neoshared::texture)
+target_compile_features(neoshared_material PUBLIC cxx_std_17)
+if(MSVC)
+    target_compile_options(neoshared_material PRIVATE /W4 /permissive- /utf-8)
+else()
+    target_compile_options(neoshared_material PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+neo_apply_minimal_release_to_directory_targets()

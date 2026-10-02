@@ -1,17 +1,21 @@
 #pragma once
 #include "NeoWxUi.hpp"
+#include <neoshared/ResourceDocument.hpp>
 #include <wx/menu.h>
 #include <wx/panel.h>
 #include <functional>
 #include <filesystem>
 #include <memory>
+#include <optional>
+#include <string>
+#include <cstdint>
 #include <stdexcept>
 #include <utility>
 #include <vector>
 
 // Small, compile-time hosting boundary. No plugin loader and no second wxApp.
 namespace neomodules {
-inline constexpr unsigned kPanelApiVersion = 2;
+inline constexpr unsigned kPanelApiVersion = 3;
 class Panel;
 struct Context {
     bool embedded = false;
@@ -19,6 +23,9 @@ struct Context {
     std::function<void(const wxString&)> titleChanged;
     std::function<void()> closeRequested;
     std::function<void(const std::filesystem::path&, const Panel*)> validateOutput;
+    // Resolves a game resource from the host session without retaining archive internals.
+    // Embedded viewers use this for companion resources such as MDX and TPC.
+    std::function<std::optional<neoshared::ResourceDocument>(const std::string&, std::uint16_t)> resolveResource;
 
 };
 class Panel : public wxPanel {

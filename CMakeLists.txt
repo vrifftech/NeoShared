@@ -153,8 +153,14 @@ if(NEOSHARED_ENABLE_ERF)
     endif()
 endif()
 
+# Binary Odyssey MDL/MDX parsing and transforms have no wxWidgets or tool-repository dependency.
+add_subdirectory(model EXCLUDE_FROM_ALL)
+
 # Game textures have no wxWidgets, PNG/JPEG, or tool-repository dependency.
 add_subdirectory(texture EXCLUDE_FROM_ALL)
+
+# Typed, renderer-independent texture/material metadata.
+add_subdirectory(material EXCLUDE_FROM_ALL)
 
 add_library(neoshared_wx INTERFACE)
 add_library(neoshared::wx ALIAS neoshared_wx)

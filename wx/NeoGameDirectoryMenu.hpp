@@ -29,6 +29,7 @@ struct SavedGameDirectory {
     std::filesystem::path path;
     bool active = false;
     bool exists = false;
+    bool validInstallation = false;
     bool availabilityKnown = true;
 };
 
@@ -44,7 +45,10 @@ inline std::vector<SavedGameDirectory> savedGameDirectories(bool validatePaths =
 
     for (const GameDefinition& game : knownGames()) {
         const std::string activeId = settings.activeInstallId(game.id).value_or(std::string{});
-        for (const GameInstall& install : (validatePaths ? settings.readAll(game) : settings.readSaved(game))) {
+        // readAll performs the same canonical-root validation and stale automatic
+        // entry cleanup used by TLK resolution. Opening menus must not expose a
+        // weaker, path-only interpretation of the saved settings.
+        for (const GameInstall& install : settings.readAll(game)) {
             if (install.installPath.empty()) continue;
 
             SavedGameDirectory directory;
@@ -54,10 +58,14 @@ inline std::vector<SavedGameDirectory> savedGameDirectories(bool validatePaths =
             directory.installName = install.displayName.empty()
                                         ? defaultInstallName(game, install.installPath)
                                         : install.displayName;
-            directory.path = validatePaths ? neosettings::normalizedPath(install.installPath) : install.installPath;
+            directory.path = validatePaths
+                ? neosettings::normalizedPath(install.installPath)
+                : install.installPath;
             directory.active = !activeId.empty() && install.installId == activeId;
-            directory.availabilityKnown = validatePaths;
-            directory.exists = validatePaths && isDirectoryPath(directory.path);
+            directory.availabilityKnown = true;
+            directory.exists = isDirectoryPath(directory.path);
+            directory.validInstallation = directory.exists &&
+                isValidGameInstallation(game, directory.path);
             directories.push_back(std::move(directory));
         }
     }
@@ -107,7 +115,7 @@ public:
         return;
 #endif
 
-        const std::vector<SavedGameDirectory> directories = savedGameDirectories(false);
+        const std::vector<SavedGameDirectory> directories = savedGameDirectories(true);
         for (const SavedGameDirectory& directory : directories) {
             if (!isAllowedGameId(allowedGameIds_, directory.gameId)) continue;
             std::string label = directory.active ? "[Active] " : std::string{};
@@ -116,13 +124,17 @@ public:
                 label += " - " + directory.installName;
             }
             if (directory.availabilityKnown && !directory.exists) label += " (missing)";
+            else if (directory.availabilityKnown && !directory.validInstallation) {
+                label += " (invalid installation)";
+            }
             label = neosettings::ellipsizeMiddle(label, 100);
 
             wxMenuItem* item = menu_.Append(
                 wxID_ANY,
                 neosettings::toWx(neosettings::escapeMenuLabel(label)),
                 neosettings::pathToWx(directory.path));
-            item->Enable(!directory.availabilityKnown || directory.exists);
+            item->Enable(!directory.availabilityKnown ||
+                         (directory.exists && directory.validInstallation));
 
             const int id = item->GetId();
             entries_.push_back({id, directory});
@@ -192,6 +204,24 @@ private:
             return;
         }
 
+        const GameDefinition* game = findGame(it->directory.gameId);
+        if (game == nullptr || !isValidGameInstallation(*game, it->directory.path)) {
+            wxString message = "The saved directory is not a valid game installation:\n\n";
+            message += neosettings::pathToWx(it->directory.path);
+            if (game != nullptr) {
+                message += "\n\nThe selected root must contain ";
+                message += neosettings::toWx(installationRequirementText(*game));
+                message += ".";
+            }
+            message += "\n\nUse Manage Game Directories to update it.";
+            wxMessageBox(message,
+                         "Invalid Game Installation",
+                         wxOK | wxICON_WARNING,
+                         &owner_);
+            refresh();
+            return;
+        }
+
         if (!action_) {
             wxMessageBox("This application did not configure a file picker for saved game directories.",
                          "Unable to Open from Game Directory",
@@ -202,7 +232,9 @@ private:
 
         try {
             auto selected = it->directory;
-            selected.exists = true; selected.availabilityKnown = true;
+            selected.exists = true;
+            selected.validInstallation = true;
+            selected.availabilityKnown = true;
             action_(selected);
         } catch (const std::exception& ex) {
             wxString message = "The application could not open its file dialog:\n\n";

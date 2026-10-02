@@ -33,6 +33,12 @@ struct GameDefinition {
     std::vector<std::string> registryValues;
     std::string steamAppId;
     std::string gogAppId;
+    // A root is an installation only when at least one of these canonical
+    // files exists as a regular file. Directory names never validate a root.
+    std::vector<std::string> requiredRootFileAlternatives;
+    // Used only when discovery metadata did not already identify the game.
+    // These are files, never directories.
+    std::vector<std::string> identityFileAlternatives;
 };
 
 struct GameInstall {
@@ -48,6 +54,7 @@ struct GameInstall {
     std::vector<std::string> evidence;
     bool detected = false;
     bool userOverride = false;
+    bool explicitTlk = false;
     int confidence = 0;
     std::string status;
 };
@@ -96,6 +103,15 @@ std::filesystem::path firstExisting(const std::filesystem::path& root,
                                     const std::vector<std::string>& relatives);
 bool pathStartsWith(const std::filesystem::path& child, const std::filesystem::path& root);
 bool installContainsPath(const GameInstall& install, const std::filesystem::path& path);
+bool hasRequiredInstallationFile(const GameDefinition& game,
+                                 const std::filesystem::path& root);
+bool hasGameIdentityFile(const GameDefinition& game,
+                         const std::filesystem::path& root);
+bool isValidGameInstallation(const GameDefinition& game,
+                             const std::filesystem::path& root);
+bool isUsableGameInstall(const GameDefinition& game,
+                         const GameInstall& install);
+std::string installationRequirementText(const GameDefinition& game);
 
 int validationScore(const GameDefinition& game, const std::filesystem::path& root);
 std::string confidenceText(int confidence, bool userOverride);

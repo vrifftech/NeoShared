@@ -154,6 +154,20 @@ private:
         return install;
     }
 
+    void showInvalidInstallMessage(const GameDefinition& game,
+                                   const std::filesystem::path& path) const {
+        wxString message = "The selected directory is not a valid ";
+        message += neosettings::toWx(game.displayName);
+        message += " installation:\n\n";
+        message += neosettings::pathToWx(path);
+        message += "\n\nSelect the game root containing ";
+        message += neosettings::toWx(installationRequirementText(game));
+        message += ". Folder names such as Override, StreamWaves, lips, modules, or data do not identify an installation.";
+        wxMessageBox(message, "Invalid Game Installation",
+                     wxOK | wxICON_WARNING,
+                     const_cast<GameDirectoryDialog*>(this));
+    }
+
     void refreshList(const std::string& selectGameId = {}, const std::string& selectInstallId = {}) {
         if (list_ == nullptr) return;
         list_->DeleteAllItems();
@@ -220,6 +234,10 @@ private:
         if (dialog.ShowModal() != wxID_OK) return;
         const auto path = std::filesystem::path(neosettings::toStd(dialog.GetPath()));
         const auto install = resolver().rememberUserInstall(game->id, path);
+        if (install.installId.empty()) {
+            showInvalidInstallMessage(*game, path);
+            return;
+        }
         refreshList(install.id, install.installId);
 #endif
     }
@@ -240,10 +258,15 @@ private:
                            wxDD_DEFAULT_STYLE | wxDD_DIR_MUST_EXIST);
         if (dialog.ShowModal() != wxID_OK) return;
         const auto path = std::filesystem::path(neosettings::toStd(dialog.GetPath()));
-        const auto install = resolver().rememberUserInstall(game->id, path,
-                                                            selected ? selected->tlkPath : std::filesystem::path{},
-                                                            selected ? selected->displayName : std::string{},
-                                                            selected ? selected->installId : std::string{});
+        const auto install = resolver().rememberUserInstall(
+            game->id, path,
+            selected && selected->explicitTlk ? selected->tlkPath : std::filesystem::path{},
+            selected ? selected->displayName : std::string{},
+            selected ? selected->installId : std::string{});
+        if (install.installId.empty()) {
+            showInvalidInstallMessage(*game, path);
+            return;
+        }
         refreshList(install.id, install.installId);
 #endif
     }
@@ -264,9 +287,15 @@ private:
                             wxEmptyString, "TLK files (*.tlk)|*.tlk|All files (*.*)|*.*",
                             wxFD_OPEN | wxFD_FILE_MUST_EXIST);
         if (dialog.ShowModal() != wxID_OK) return;
-        const auto install = resolver().rememberUserTlk(game->id, std::filesystem::path(neosettings::toStd(dialog.GetPath())),
-                                                       selected ? selected->installId : std::string{},
-                                                       selected ? selected->displayName : std::string{});
+        const auto install = resolver().rememberUserTlk(
+            game->id, std::filesystem::path(neosettings::toStd(dialog.GetPath())),
+            selected ? selected->installId : std::string{},
+            selected ? selected->displayName : std::string{});
+        if (install.installId.empty()) {
+            wxMessageBox("The selected TLK file could not be registered.",
+                         "Invalid TLK File", wxOK | wxICON_WARNING, this);
+            return;
+        }
         refreshList(install.id, install.installId);
 #endif
     }
@@ -291,7 +320,16 @@ private:
     void onSetActive() {
         const auto selected = requireInstall();
         if (!selected) return;
-        resolver().settings().setActiveInstall(selected->id, selected->installId);
+        if (!resolver().settings().setActiveInstall(selected->id, selected->installId)) {
+            const GameDefinition* game = findGame(selected->id);
+            if (game != nullptr && !selected->installPath.empty()) {
+                showInvalidInstallMessage(*game, selected->installPath);
+            } else {
+                wxMessageBox("The selected entry has neither a valid installation root nor a readable explicit TLK file.",
+                             "Cannot Activate Entry", wxOK | wxICON_WARNING, this);
+            }
+            return;
+        }
         refreshList(selected->id, selected->installId);
     }
 

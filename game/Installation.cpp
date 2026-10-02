@@ -250,6 +250,27 @@ std::filesystem::path caseAwareRelative(const std::filesystem::path& root,
     return current;
 }
 
+std::filesystem::path firstRegularFile(
+    const std::filesystem::path& root,
+    const std::vector<std::string>& relatives) {
+    if (!isDirectoryPath(root)) return {};
+    for (const auto& relative : relatives) {
+        const auto path = caseAwareRelative(root, pathFromUtf8(relative));
+        if (isRegularFilePath(path)) return path;
+    }
+    return {};
+}
+
+bool rootHasRequiredFile(const GameDefinition& game,
+                         const std::filesystem::path& root) {
+    return !firstRegularFile(root, game.requiredRootFileAlternatives).empty();
+}
+
+bool rootHasIdentityFile(const GameDefinition& game,
+                         const std::filesystem::path& root) {
+    return !firstRegularFile(root, game.identityFileAlternatives).empty();
+}
+
 std::string pathIdentity(const std::filesystem::path& path) {
 #if !defined(_WIN32)
     struct stat info {};
@@ -495,30 +516,19 @@ public:
         return roots;
     }
 
-    std::pair<std::set<GameId>, std::vector<std::string>> identify(const std::filesystem::path& root) {
+    std::pair<std::set<GameId>, std::vector<std::string>> identify(
+        const std::filesystem::path& root) {
         std::set<GameId> games;
         std::vector<std::string> evidence;
-        const std::array<std::pair<GameId, std::array<const char*, 5>>, 2> strong = {{
-            {GameId::Kotor1, {"swkotor.exe", "swkotor", "kotor1", "swkotor.ini", "goggame-1207666283.info"}},
-            {GameId::Kotor2, {"swkotor2.exe", "swkotor2", "kotor2", "swkotor2.ini", "goggame-1421404581.info"}},
-        }};
-        for (const auto& [game, names] : strong) {
-            for (const char* name : names) {
-                if (!file(root, name).empty()) {
-                    games.insert(game);
-                    evidence.push_back(gameIdString(game) + ": " + name);
-                }
+        for (const auto& game : knownGames()) {
+            if (!rootHasRequiredFile(game, root) ||
+                !rootHasIdentityFile(game, root)) {
+                continue;
             }
-        }
-        if (games.empty()) {
-            for (const auto& [game, name] : std::array<std::pair<GameId, const char*>, 2>{{
-                     {GameId::Kotor1, "streamwaves"}, {GameId::Kotor2, "streamvoice"}}}) {
-                const auto directory = child(root, name);
-                if (isDirectoryPath(directory)) {
-                    games.insert(game);
-                    evidence.push_back(gameIdString(game) + ": " + std::string(name) + "/");
-                }
-            }
+            games.insert(game.game);
+            const auto marker = firstRegularFile(root, game.identityFileAlternatives);
+            evidence.push_back(game.id + ": " +
+                genericPathToUtf8(marker.lexically_relative(root)));
         }
         return {games, evidence};
     }
@@ -1223,7 +1233,26 @@ void addWineCandidates(std::vector<Candidate>& candidates, Scan& scan, const Dis
 
 void addKnownCandidates(std::vector<Candidate>& candidates, Scan& scan) {
     for (const auto game : {GameId::Kotor1, GameId::Kotor2}) {
-        for (const auto& path : knownPathsFor(game)) addCandidate(candidates, scan, path, std::nullopt, "Known location");
+        for (const auto& path : knownPathsFor(game)) addCandidate(candidates, scan, path, game, "Known location");
+    }
+}
+
+void addEnvironmentCandidates(std::vector<Candidate>& candidates, Scan& scan) {
+    struct EnvironmentCandidate {
+        GameId game;
+        std::array<const char*, 3> variables;
+    };
+    static constexpr std::array<EnvironmentCandidate, 2> entries{{
+        {GameId::Kotor1, {"K1_PATH", "KOTOR_PATH", "KOTOR1_PATH"}},
+        {GameId::Kotor2, {"K2_PATH", "TSL_PATH", "KOTOR2_PATH"}},
+    }};
+    for (const auto& entry : entries) {
+        for (const char* variable : entry.variables) {
+            const auto value = environmentValue(variable);
+            if (!value || value->empty()) continue;
+            addCandidate(candidates, scan, pathFromUtf8(*value), entry.game,
+                         std::string("Environment: ") + variable);
+        }
     }
 }
 
@@ -1252,26 +1281,6 @@ std::vector<GameInstall> materializeCandidates(const std::vector<Candidate>& can
         std::set<std::string> evidence;
     };
 
-    auto scoredIdentity = [&](const std::filesystem::path& root) {
-        std::set<GameId> games;
-        std::vector<std::string> evidence;
-        int bestScore = 0;
-        for (const auto& definition : knownGames()) {
-            const int score = validationScore(definition, root);
-            if (score <= 0) continue;
-            if (score > bestScore) {
-                bestScore = score;
-                games.clear();
-                evidence.clear();
-            }
-            if (score == bestScore) {
-                games.insert(definition.game);
-                evidence.push_back(definition.id + ": validation score " + std::to_string(score));
-            }
-        }
-        return std::make_pair(std::move(games), std::move(evidence));
-    };
-
     std::map<std::string, std::vector<std::filesystem::path>> rootsCache;
     std::map<std::string, Aggregate> found;
     for (const auto& candidate : candidates) {
@@ -1283,12 +1292,10 @@ std::vector<GameInstall> materializeCandidates(const std::vector<Candidate>& can
                 bool directInstall = false;
                 if (candidate.game) {
                     if (const auto* definition = findGame(*candidate.game)) {
-                        directInstall = validationScore(*definition, candidate.path) > 0;
+                        directInstall = rootHasRequiredFile(*definition, candidate.path);
                     }
                 } else {
-                    const auto [games, evidence] = scoredIdentity(candidate.path);
-                    (void)evidence;
-                    directInstall = !games.empty();
+                    directInstall = !scan.identify(candidate.path).first.empty();
                 }
                 if (directInstall) roots.push_back(candidate.path);
             }
@@ -1296,33 +1303,29 @@ std::vector<GameInstall> materializeCandidates(const std::vector<Candidate>& can
         }
 
         for (const auto& root : rootsIt->second) {
-            const std::string rootId = pathIdentity(root);
-            auto it = found.find(rootId);
-            if (it == found.end()) {
-                auto [games, evidence] = scan.identify(root);
-                if (games.empty()) {
-                    auto scored = scoredIdentity(root);
-                    games = std::move(scored.first);
-                    evidence.insert(evidence.end(), scored.second.begin(), scored.second.end());
-                }
-                Aggregate aggregate;
-                aggregate.foundAt = candidate.path;
-                aggregate.root = root;
-                aggregate.games = std::move(games);
-                aggregate.evidence.insert(evidence.begin(), evidence.end());
-                it = found.emplace(rootId, std::move(aggregate)).first;
-            }
-            it->second.sources.insert(candidate.source);
+            auto [games, evidence] = scan.identify(root);
             if (candidate.game) {
                 const auto* definition = findGame(*candidate.game);
-                const bool metadataMatches = definition != nullptr &&
-                    (validationScore(*definition, root) > 0 || !scan.file(root, "chitin.key").empty());
-                if (metadataMatches) {
-                    it->second.games.clear();
-                    it->second.games.insert(*candidate.game);
-                    it->second.evidence.insert(gameIdString(*candidate.game) + ": " + candidate.source);
-                }
+                if (definition == nullptr || !rootHasRequiredFile(*definition, root)) continue;
+                // A game-specific executable/configuration file is stronger than
+                // launcher metadata when the two disagree. A canonical root with
+                // no local identity evidence may use the launcher/registry hint.
+                if (!games.empty() && games.count(*candidate.game) == 0u) continue;
+                games.clear();
+                games.insert(*candidate.game);
+                evidence.push_back(gameIdString(*candidate.game) + ": " + candidate.source);
             }
+            if (games.empty()) continue;
+
+            const std::string rootId = pathIdentity(root);
+            auto [it, inserted] = found.try_emplace(rootId);
+            if (inserted) {
+                it->second.foundAt = candidate.path;
+                it->second.root = root;
+            }
+            it->second.games.insert(games.begin(), games.end());
+            it->second.sources.insert(candidate.source);
+            it->second.evidence.insert(evidence.begin(), evidence.end());
         }
     }
 
@@ -1332,9 +1335,9 @@ std::vector<GameInstall> materializeCandidates(const std::vector<Candidate>& can
         if (aggregate.games.size() != 1u) continue;
         const GameId gameId = *aggregate.games.begin();
         const GameDefinition* game = findGame(gameId);
-        if (game == nullptr) continue;
+        if (game == nullptr || !rootHasRequiredFile(*game, aggregate.root)) continue;
         GameInstall install = makeInstall(*game, aggregate.root, true, false,
-                                          std::max(1, validationScore(*game, aggregate.root)));
+                                          validationScore(*game, aggregate.root));
         install.foundAt = aggregate.foundAt;
         install.sources.assign(aggregate.sources.begin(), aggregate.sources.end());
         install.evidence.assign(aggregate.evidence.begin(), aggregate.evidence.end());
@@ -1372,47 +1375,78 @@ std::size_t pathLength(const std::filesystem::path& path) {
 const std::vector<GameDefinition>& knownGames() {
     static const std::vector<GameDefinition> games = {
         {GameId::Kotor1, "kotor", "Star Wars: Knights of the Old Republic",
-         {"dialog.tlk", "chitin.key"}, {"streamwaves", "Override", "override", "swkotor.exe", "swkotor"},
+         {"chitin.key", "dialog.tlk"},
+         {"swkotor.exe", "swkotor", "swkotor.ini", "goggame-1207666283.info"},
          {"dialog.tlk"}, {"Override", "override"}, {"data", "Data"},
          {"swkotor", "Knights of the Old Republic", "STAR WARS Knights of the Old Republic",
           "Star Wars - KotOR", "Star Wars - Knights of the Old Republic", "Star Wars Knights of the Old Republic"},
-         {"Software\\BioWare\\SW\\KOTOR/Path", "Software\\LucasArts\\KotOR/Path"}, "32370", "1207666283"},
+         {"Software\\BioWare\\SW\\KOTOR/Path", "Software\\LucasArts\\KotOR/Path"}, "32370", "1207666283",
+         {"chitin.key"},
+         {"swkotor.exe", "swkotor", "swkotor.ini", "goggame-1207666283.info"}},
         {GameId::Kotor2, "kotor2", "Star Wars: Knights of the Old Republic II",
-         {"dialog.tlk", "chitin.key"}, {"streamvoice", "Override", "override", "swkotor2.exe", "swkotor2", "kotor2"},
+         {"chitin.key", "dialog.tlk"},
+         {"swkotor2.exe", "swkotor2", "swkotor2.ini", "goggame-1421404581.info"},
          {"dialog.tlk"}, {"Override", "override"}, {"data", "Data"},
          {"Knights of the Old Republic II", "Knights of the Old Republic 2", "swkotor2", "kotor2",
           "STAR WARS Knights of the Old Republic II", "Star Wars - KotOR2", "Star Wars Knights of the Old Republic II"},
-         {"Software\\Obsidian\\Star Wars KOTOR2/Path", "Software\\LucasArts\\KotOR2/Path"}, "208580", "1421404581"},
+         {"Software\\Obsidian\\Star Wars KOTOR2/Path", "Software\\LucasArts\\KotOR2/Path"}, "208580", "1421404581",
+         {"chitin.key"},
+         {"swkotor2.exe", "swkotor2", "swkotor2.ini", "goggame-1421404581.info"}},
         {GameId::JadeEmpire, "jade", "Jade Empire",
-         {"dialog.tlk"}, {"JadeEmpire.exe", "Jade Empire.exe", "data", "Data"},
+         {"chitin.key", "dialog.tlk"},
+         {"JadeEmpire.exe", "Jade Empire.exe", "JadeEmpireLauncher.exe"},
          {"dialog.tlk"}, {"override", "Override"}, {"data", "Data"},
-         {"Jade Empire", "Jade Empire Special Edition"}, {"Software\\BioWare\\Jade Empire/Path"}, {}, {}},
+         {"Jade Empire", "Jade Empire Special Edition"},
+         {"Software\\BioWare\\Jade Empire/Path"}, {}, {},
+         {"chitin.key"},
+         {"JadeEmpire.exe", "Jade Empire.exe", "JadeEmpireLauncher.exe"}},
         {GameId::NeverwinterNights, "nwn", "Neverwinter Nights",
-         {"dialog.tlk"}, {"nwn.ini", "nwn.exe", "override", "Override"},
+         {"chitin.key", "dialog.tlk"},
+         {"nwn.exe", "nwmain.exe", "nwn", "nwn.ini"},
          {"dialog.tlk"}, {"override", "Override"}, {"data", "Data", "modules", "Modules"},
-         {"Neverwinter Nights", "NeverwinterNights", "NWN"}, {"Software\\BioWare\\NWN\\Neverwinter/Location"}, {}, {}},
+         {"Neverwinter Nights", "NeverwinterNights", "NWN"},
+         {"Software\\BioWare\\NWN\\Neverwinter/Location"}, {}, {},
+         {"chitin.key"},
+         {"nwn.exe", "nwmain.exe", "nwn", "nwn.ini"}},
         {GameId::NeverwinterNights2, "nwn2", "Neverwinter Nights 2",
-         {"dialog.tlk"}, {"nwn2.exe", "nwn2.ini", "Override", "override"},
+         {"chitin.key", "dialog.tlk"},
+         {"nwn2main.exe", "nwn2.exe", "nwn2main", "nwn2.ini"},
          {"dialog.tlk"}, {"Override", "override"}, {"Data", "data", "modules", "Modules"},
-         {"Neverwinter Nights 2", "NeverwinterNights2", "NWN2"}, {"Software\\Obsidian\\NWN 2\\Neverwinter/Location"}, {}, {}},
+         {"Neverwinter Nights 2", "NeverwinterNights2", "NWN2"},
+         {"Software\\Obsidian\\NWN 2\\Neverwinter/Location"}, {}, {},
+         {"chitin.key"},
+         {"nwn2main.exe", "nwn2.exe", "nwn2main", "nwn2.ini"}},
         {GameId::Witcher1, "witcher1", "The Witcher",
-         {"Data"}, {"System/witcher.exe", "System/witcher", "Data/dialogues"},
-         {"Data/dialogues/dialog.tlk", "Data/dialog.tlk", "dialog.tlk"}, {"Override", "override"}, {"Data", "data"},
-         {"The Witcher", "The Witcher Enhanced Edition"}, {"Software\\CD Projekt Red\\The Witcher/InstallFolder"}, {}, {}},
+         {"System/witcher.exe", "System/witcher"},
+         {"Data/dialogues/dialog.tlk"},
+         {"Data/dialogues/dialog.tlk", "Data/dialog.tlk", "dialog.tlk"},
+         {"Override", "override"}, {"Data", "data"},
+         {"The Witcher", "The Witcher Enhanced Edition"},
+         {"Software\\CD Projekt Red\\The Witcher/InstallFolder"}, {}, {},
+         {"System/witcher.exe", "System/witcher"},
+         {"System/witcher.exe", "System/witcher"}},
         {GameId::DragonAgeOrigins, "dao", "Dragon Age: Origins",
-         {"packages/core/data"}, {"bin_ship/daorigins.exe", "modules/Single Player", "modules/single player"},
+         {"bin_ship/daorigins.exe", "bin_ship/daorigins"},
+         {"packages/core/data/talktables/dialog.tlk"},
          {"modules/Single Player/data/talktables/dialog.tlk", "modules/single player/data/talktables/dialog.tlk",
           "packages/core/data/talktables/dialog.tlk", "dialog.tlk"},
          {"packages/core/override", "packages/core/Override", "override", "Override"},
          {"packages/core/data", "packages/core/Data"},
-         {"Dragon Age Origins", "Dragon Age Ultimate Edition", "Dragon Age"}, {"Software\\BioWare\\Dragon Age/Path"}, {}, {}},
+         {"Dragon Age Origins", "Dragon Age Ultimate Edition", "Dragon Age"},
+         {"Software\\BioWare\\Dragon Age/Path"}, {}, {},
+         {"bin_ship/daorigins.exe", "bin_ship/daorigins"},
+         {"bin_ship/daorigins.exe", "bin_ship/daorigins"}},
         {GameId::DragonAge2, "da2", "Dragon Age II",
-         {"packages/core/data"}, {"bin_ship/DragonAge2.exe", "modules/single player", "modules/Single Player"},
+         {"bin_ship/DragonAge2.exe", "bin_ship/DragonAge2"},
+         {"packages/core/data/talktables/core_en-us.tlk"},
          {"modules/single player/data/talktables/core_en-us.tlk", "modules/Single Player/data/talktables/core_en-us.tlk",
           "packages/core/data/talktables/core_en-us.tlk", "dialog.tlk"},
          {"packages/core/override", "packages/core/Override", "override", "Override"},
-         {"packages/core/data", "packages/core/Data"}, {"Dragon Age II", "Dragon Age 2"},
-         {"Software\\BioWare\\Dragon Age 2/Path"}, {}, {}},
+         {"packages/core/data", "packages/core/Data"},
+         {"Dragon Age II", "Dragon Age 2"},
+         {"Software\\BioWare\\Dragon Age 2/Path"}, {}, {},
+         {"bin_ship/DragonAge2.exe", "bin_ship/DragonAge2"},
+         {"bin_ship/DragonAge2.exe", "bin_ship/DragonAge2"}},
     };
     return games;
 }
@@ -1506,21 +1540,58 @@ bool pathStartsWith(const std::filesystem::path& child, const std::filesystem::p
 }
 
 bool installContainsPath(const GameInstall& install, const std::filesystem::path& path) {
-    if (!install.installPath.empty() && pathStartsWith(path, install.installPath)) return true;
-    if (!install.tlkPath.empty() && normalizeConfiguredPath(path) == normalizeConfiguredPath(install.tlkPath)) return true;
-    if (!install.overridePath.empty() && pathStartsWith(path, install.overridePath)) return true;
-    if (!install.dataRootPath.empty() && pathStartsWith(path, install.dataRootPath)) return true;
+    const GameDefinition* game = findGame(install.id);
+    const bool validRoot = game != nullptr &&
+        isValidGameInstallation(*game, install.installPath);
+    if (validRoot && pathStartsWith(path, install.installPath)) return true;
+    if ((validRoot || install.explicitTlk) && !install.tlkPath.empty() &&
+        normalizeConfiguredPath(path) == normalizeConfiguredPath(install.tlkPath)) return true;
+    if (validRoot && !install.overridePath.empty() &&
+        pathStartsWith(path, install.overridePath)) return true;
+    if (validRoot && !install.dataRootPath.empty() &&
+        pathStartsWith(path, install.dataRootPath)) return true;
     return false;
 }
 
-int validationScore(const GameDefinition& game, const std::filesystem::path& root) {
-    if (!isDirectoryPath(normalizeConfiguredPath(root))) return 0;
-    int score = 0;
-    for (const auto& marker : game.strongMarkers) if (existsPath(caseAwareRelative(root, pathFromUtf8(marker)))) score += 3;
-    for (const auto& marker : game.weakMarkers) if (existsPath(caseAwareRelative(root, pathFromUtf8(marker)))) score += 1;
-    for (const auto& relative : game.tlkRelativePaths) {
-        if (isRegularFilePath(caseAwareRelative(root, pathFromUtf8(relative)))) { score += 2; break; }
+bool hasRequiredInstallationFile(const GameDefinition& game,
+                                 const std::filesystem::path& root) {
+    return rootHasRequiredFile(game, normalizeConfiguredPath(root));
+}
+
+bool hasGameIdentityFile(const GameDefinition& game,
+                         const std::filesystem::path& root) {
+    return rootHasIdentityFile(game, normalizeConfiguredPath(root));
+}
+
+bool isValidGameInstallation(const GameDefinition& game,
+                             const std::filesystem::path& root) {
+    const auto normalized = normalizeConfiguredPath(root);
+    return isDirectoryPath(normalized) && rootHasRequiredFile(game, normalized);
+}
+
+bool isUsableGameInstall(const GameDefinition& game,
+                         const GameInstall& install) {
+    return isValidGameInstallation(game, install.installPath) ||
+           (install.explicitTlk && isRegularFilePath(install.tlkPath));
+}
+
+std::string installationRequirementText(const GameDefinition& game) {
+    if (game.requiredRootFileAlternatives.empty()) return "a canonical game file";
+    std::ostringstream text;
+    for (std::size_t i = 0; i < game.requiredRootFileAlternatives.size(); ++i) {
+        if (i != 0u) text << (i + 1u == game.requiredRootFileAlternatives.size()
+                              ? " or " : ", ");
+        text << game.requiredRootFileAlternatives[i];
     }
+    return text.str();
+}
+
+int validationScore(const GameDefinition& game, const std::filesystem::path& root) {
+    const auto normalized = normalizeConfiguredPath(root);
+    if (!isValidGameInstallation(game, normalized)) return 0;
+    int score = 5;
+    if (rootHasIdentityFile(game, normalized)) score += 2;
+    if (!firstRegularFile(normalized, game.tlkRelativePaths).empty()) score += 2;
     return score;
 }
 
@@ -1554,20 +1625,45 @@ void refreshDerivedPaths(const GameDefinition& game, GameInstall& install) {
     install.overridePath = normalizeConfiguredPath(install.overridePath);
     install.dataRootPath = normalizeConfiguredPath(install.dataRootPath);
     install.foundAt = normalizeConfiguredPath(install.foundAt);
-    const int score = validationScore(game, install.installPath);
-    install.confidence = std::max(install.confidence, score);
-    if (install.userOverride) install.confidence = std::max(install.confidence, 8);
-    if (!install.installPath.empty()) {
-        if (!isRegularFilePath(install.tlkPath)) install.tlkPath = firstExisting(install.installPath, game.tlkRelativePaths);
-        if (!isDirectoryPath(install.overridePath)) install.overridePath = firstExisting(install.installPath, game.overrideRelativePaths);
-        if (!isDirectoryPath(install.dataRootPath)) install.dataRootPath = firstExisting(install.installPath, game.dataRelativePaths);
+
+    const bool rootValid = isValidGameInstallation(game, install.installPath);
+    if (rootValid) {
+        if (!install.explicitTlk) {
+            install.tlkPath = firstRegularFile(install.installPath, game.tlkRelativePaths);
+        }
+        if (!isDirectoryPath(install.overridePath)) {
+            install.overridePath = firstExisting(install.installPath, game.overrideRelativePaths);
+        }
+        if (!isDirectoryPath(install.dataRootPath)) {
+            install.dataRootPath = firstExisting(install.installPath, game.dataRelativePaths);
+        }
+    } else {
+        if (!install.explicitTlk) install.tlkPath.clear();
+        install.overridePath.clear();
+        install.dataRootPath.clear();
     }
-    if (install.installId.empty()) install.installId = makeInstallId(game, install.installPath, install.tlkPath);
-    if (install.displayName.empty()) install.displayName = defaultInstallName(game, install.installPath);
-    const bool rootValid = !install.installPath.empty() && validationScore(game, install.installPath) > 0;
+
+    install.confidence = std::max(install.confidence,
+                                  validationScore(game, install.installPath));
+    if (install.userOverride) install.confidence = std::max(install.confidence, 8);
+    if (install.installId.empty()) {
+        install.installId = makeInstallId(game, install.installPath, install.tlkPath);
+    }
+    if (install.displayName.empty()) {
+        install.displayName = defaultInstallName(game, install.installPath);
+    }
+
     const bool tlkValid = isRegularFilePath(install.tlkPath);
-    install.status = (!rootValid && !tlkValid && (!install.installPath.empty() || !install.tlkPath.empty()))
-        ? "missing" : confidenceText(install.confidence, install.userOverride);
+    if (rootValid) {
+        install.status = !tlkValid
+            ? "TLK missing" : confidenceText(install.confidence, install.userOverride);
+    } else if (install.explicitTlk && tlkValid) {
+        install.status = "TLK only";
+    } else if (!install.installPath.empty() || !install.tlkPath.empty()) {
+        install.status = "invalid install";
+    } else {
+        install.status = "not found";
+    }
 }
 
 GameInstall makeInstall(const GameDefinition& game, const std::filesystem::path& root,
@@ -1578,9 +1674,6 @@ GameInstall makeInstall(const GameDefinition& game, const std::filesystem::path&
     install.installId = std::move(installId);
     install.displayName = std::move(displayName);
     install.installPath = normalizeConfiguredPath(root);
-    install.tlkPath = firstExisting(install.installPath, game.tlkRelativePaths);
-    install.overridePath = firstExisting(install.installPath, game.overrideRelativePaths);
-    install.dataRootPath = firstExisting(install.installPath, game.dataRelativePaths);
     install.detected = detected;
     install.userOverride = userOverride;
     install.confidence = confidence;
@@ -1603,7 +1696,12 @@ void mergeInstall(GameInstall& existing, const GameInstall& incoming) {
         if (!incoming.displayName.empty()) existing.displayName = incoming.displayName;
     }
     if (!incoming.installPath.empty()) existing.installPath = incoming.installPath;
-    if (!incoming.tlkPath.empty() && (existing.tlkPath.empty() || incoming.userOverride)) existing.tlkPath = incoming.tlkPath;
+    if (incoming.explicitTlk) {
+        existing.tlkPath = incoming.tlkPath;
+        existing.explicitTlk = true;
+    } else if (!existing.explicitTlk && !incoming.tlkPath.empty()) {
+        existing.tlkPath = incoming.tlkPath;
+    }
     if (!incoming.overridePath.empty() && existing.overridePath.empty()) existing.overridePath = incoming.overridePath;
     if (!incoming.dataRootPath.empty() && existing.dataRootPath.empty()) existing.dataRootPath = incoming.dataRootPath;
     if (!incoming.foundAt.empty() && existing.foundAt.empty()) existing.foundAt = incoming.foundAt;
@@ -1654,6 +1752,7 @@ std::vector<GameInstall> discoverGameInstallations(const DiscoveryOptions& optio
         addMacApplicationCandidates(candidates, scan, options);
     }
     if (options.knownLocations) {
+        addEnvironmentCandidates(candidates, scan);
         addNonSteamCandidates(candidates, scan);
         addKnownCandidates(candidates, scan);
         addGenericCandidates(candidates, scan, options);
@@ -1666,20 +1765,36 @@ std::vector<GameInstall> discoverGameInstallations(const DiscoveryOptions& optio
 std::vector<GameInstall> discoverGameInstallations(const GameDefinition& game,
                                                     const std::optional<std::filesystem::path>& hint,
                                                     const DiscoveryOptions& options) {
-    DiscoveryOptions effective = options;
+    DiscoveryOptions broad = options;
+    const auto configuredCandidates = broad.additionalCandidates;
+    broad.additionalCandidates.clear();
+
+    std::vector<GameInstall> filtered;
+    for (auto install : discoverGameInstallations(broad)) {
+        if (install.id == game.id) upsertInstall(filtered, game, std::move(install));
+    }
+
+    const auto inspectCandidate = [&](const std::filesystem::path& candidate,
+                                      const std::string& source) {
+        if (const auto install = inspectGameInstallation(candidate, game.game, source)) {
+            upsertInstall(filtered, game, *install);
+            return true;
+        }
+        return false;
+    };
+    for (const auto& candidate : configuredCandidates) {
+        inspectCandidate(candidate, "Configured candidate");
+    }
+
     if (hint && !hint->empty()) {
         auto current = normalizeConfiguredPath(*hint);
         if (!isDirectoryPath(current)) current = current.parent_path();
         while (!current.empty()) {
-            effective.additionalCandidates.push_back(current);
+            if (inspectCandidate(current, "Opened resource")) break;
             const auto parent = current.parent_path();
             if (parent.empty() || parent == current) break;
             current = parent;
         }
-    }
-    std::vector<GameInstall> filtered;
-    for (auto install : discoverGameInstallations(effective)) {
-        if (install.id == game.id) upsertInstall(filtered, game, std::move(install));
     }
     sortInstalls(filtered);
     return filtered;
@@ -1689,16 +1804,21 @@ std::optional<GameInstall> inspectGameInstallation(const std::filesystem::path& 
                                                     std::optional<GameId> gameHint,
                                                     std::string source) {
     Scan scan;
-    const auto directory = scan.directory(candidate);
+    auto normalized = normalizeConfiguredPath(candidate);
+    if (!isDirectoryPath(normalized)) normalized = normalized.parent_path();
+    const auto directory = scan.directory(normalized);
     if (directory.empty()) return std::nullopt;
     std::vector<Candidate> candidates{{directory, gameHint, std::move(source)}};
     auto installs = materializeCandidates(candidates, scan);
     if (gameHint) {
         const std::string id = gameIdString(*gameHint);
-        const auto it = std::find_if(installs.begin(), installs.end(), [&](const GameInstall& install) { return install.id == id; });
+        const auto it = std::find_if(installs.begin(), installs.end(),
+            [&](const GameInstall& install) { return install.id == id; });
         if (it != installs.end()) return *it;
+        return std::nullopt;
     }
-    return installs.size() == 1u ? std::optional<GameInstall>(installs.front()) : std::nullopt;
+    return installs.size() == 1u
+        ? std::optional<GameInstall>(installs.front()) : std::nullopt;
 }
 
 TalkTableResolution resolveTalkTable(const std::filesystem::path& resourcePath,
@@ -1711,6 +1831,8 @@ TalkTableResolution resolveTalkTable(const std::filesystem::path& resourcePath,
     for (const auto& install : installations) {
         const auto game = gameIdFromString(install.id);
         if (!game) continue;
+        const GameDefinition* definition = findGame(*game);
+        if (definition == nullptr || !isUsableGameInstall(*definition, install)) continue;
         if (context.definitiveGame && *game != *context.definitiveGame) continue;
         if (!context.definitiveGame && !gameAllowed(*game, compatible)) continue;
         eligible.push_back(&install);

@@ -29,7 +29,11 @@ using neoshared::game::firstExisting;
 using neoshared::game::gameIdFromString;
 using neoshared::game::gameIdString;
 using neoshared::game::installContainsPath;
+using neoshared::game::installationRequirementText;
 using neoshared::game::isDirectoryPath;
+using neoshared::game::isRegularFilePath;
+using neoshared::game::isUsableGameInstall;
+using neoshared::game::isValidGameInstallation;
 using neoshared::game::knownGames;
 using neoshared::game::makeInstall;
 using neoshared::game::makeInstallId;
@@ -77,6 +81,9 @@ public:
 
     std::optional<GameInstall> read(const GameDefinition& game) const {
         auto installs = readAll(game);
+        installs.erase(std::remove_if(installs.begin(), installs.end(), [&](const GameInstall& install) {
+            return !isUsableGameInstall(game, install);
+        }), installs.end());
         if (installs.empty()) return std::nullopt;
         const auto active = activeInstallId(game.id);
         if (active && !active->empty()) {
@@ -88,41 +95,26 @@ public:
         return installs.front();
     }
 
-    // Read saved labels and paths without discovery. This is safe while a main
-    // window and its menus are being constructed.
+    // Read configured entries without running platform discovery. Filesystem
+    // validation is still performed so every consumer sees the same definition
+    // of an installation.
     std::vector<GameInstall> readSaved(const GameDefinition& game) const {
         neosettings::SharedSettings settings;
-        const auto base = installListBase(game.id);
-        const auto count = std::min<std::size_t>(parseCount(settings.readString(base + "Count", "0")), 256u);
+        const std::string base = installListBase(game.id);
+        const std::size_t count = std::min<std::size_t>(
+            parseCount(settings.readString(base + "Count", "0")), 256u);
         std::vector<GameInstall> installs;
+        installs.reserve(count);
         for (std::size_t i = 0; i < count; ++i) {
-            const auto item = base + std::to_string(i) + "/";
-            GameInstall install;
-            install.id = game.id;
-            install.installId = settings.readString(item + "Id", std::string{});
-            install.installPath = normalizeConfiguredPath(
-                settings.readPath(item + "InstallPath").value_or(std::filesystem::path{}));
-            install.tlkPath = normalizeConfiguredPath(
-                settings.readPath(item + "TLKPath").value_or(std::filesystem::path{}));
-            install.overridePath = normalizeConfiguredPath(
-                settings.readPath(item + "OverridePath").value_or(std::filesystem::path{}));
-            install.dataRootPath = normalizeConfiguredPath(
-                settings.readPath(item + "DataRootPath").value_or(std::filesystem::path{}));
-            install.displayName = settings.readString(item + "Name", defaultInstallName(game, install.installPath));
-            installs.push_back(std::move(install));
+            const std::string item = base + std::to_string(i) + "/";
+            GameInstall install = readSavedInstall(settings, game, item);
+            refreshDerivedPaths(game, install);
+            upsertInstall(installs, game, std::move(install));
         }
         if (installs.empty()) {
-            const auto legacy = settingBase(game.id);
-            const auto root = settings.readPath(legacy + "InstallPath");
-            if (root && !root->empty()) {
-                GameInstall install;
-                install.id = game.id;
-                install.installPath = normalizeConfiguredPath(*root);
-                install.displayName = settings.readString(
-                    legacy + "DisplayName", defaultInstallName(game, *root));
-                installs.push_back(std::move(install));
-            }
+            if (const auto legacy = readLegacySingle(game)) installs.push_back(*legacy);
         }
+        sortInstalls(installs, activeInstallId(game.id).value_or(std::string{}));
         return installs;
     }
 
@@ -133,33 +125,34 @@ public:
             parseCount(settings.readString(base + "Count", "0")), 256u);
         std::vector<GameInstall> installs;
         installs.reserve(count);
+        bool removedInvalidDetection = false;
 
         for (std::size_t i = 0; i < count; ++i) {
             const std::string item = base + std::to_string(i) + "/";
-            GameInstall install;
-            install.id = game.id;
-            install.installId = settings.readString(item + "Id", std::string{});
-            install.installPath = settings.readPath(item + "InstallPath").value_or(std::filesystem::path{});
-            install.tlkPath = settings.readPath(item + "TLKPath").value_or(std::filesystem::path{});
-            install.overridePath = settings.readPath(item + "OverridePath").value_or(std::filesystem::path{});
-            install.dataRootPath = settings.readPath(item + "DataRootPath").value_or(std::filesystem::path{});
-            install.displayName = settings.readString(item + "Name", defaultInstallName(game, install.installPath));
-            install.detected = settings.readBool(item + "Detected", false);
-            install.userOverride = settings.readBool(item + "UserOverride", false);
-            install.confidence = static_cast<int>(parseCount(
-                settings.readString(item + "ConfidenceScore", "0")));
+            GameInstall install = readSavedInstall(settings, game, item);
             refreshDerivedPaths(game, install);
+            if (shouldDiscardAutomaticEntry(game, install)) {
+                removedInvalidDetection = true;
+                continue;
+            }
             upsertInstall(installs, game, std::move(install));
         }
 
+        bool migratedLegacy = false;
         if (installs.empty()) {
             if (auto legacy = readLegacySingle(game)) {
-                installs.push_back(*legacy);
-                writeAll(game, installs, legacy->installId);
+                if (!shouldDiscardAutomaticEntry(game, *legacy)) {
+                    installs.push_back(*legacy);
+                }
+                migratedLegacy = true;
             }
         }
 
-        sortInstalls(installs, activeInstallId(game.id).value_or(std::string{}));
+        const std::string active = activeInstallId(game.id).value_or(std::string{});
+        sortInstalls(installs, active);
+        if (removedInvalidDetection || migratedLegacy) {
+            writeAll(game, installs, active);
+        }
         return installs;
     }
 
@@ -184,16 +177,24 @@ public:
         normalized.reserve(installs.size());
         for (auto& install : installs) {
             refreshDerivedPaths(game, install);
+            if (shouldDiscardAutomaticEntry(game, install)) continue;
             upsertInstall(normalized, game, install);
         }
 
         if (activeId.empty()) {
             activeId = settings.readString(settingBase(game.id) + "ActiveInstallId", std::string{});
         }
-        if (std::find_if(normalized.begin(), normalized.end(), [&](const GameInstall& install) {
-                return install.installId == activeId;
-            }) == normalized.end()) {
-            activeId = normalized.empty() ? std::string{} : normalized.front().installId;
+        const auto activeIsUsable = std::find_if(
+            normalized.begin(), normalized.end(), [&](const GameInstall& install) {
+                return install.installId == activeId && isUsableGameInstall(game, install);
+            });
+        if (activeIsUsable == normalized.end()) {
+            const auto firstUsable = std::find_if(
+                normalized.begin(), normalized.end(), [&](const GameInstall& install) {
+                    return isUsableGameInstall(game, install);
+                });
+            activeId = firstUsable == normalized.end()
+                ? std::string{} : firstUsable->installId;
         }
 
         settings.writeString(root + "Count", std::to_string(normalized.size()));
@@ -208,11 +209,12 @@ public:
             settings.writePath(item + "DataRootPath", install.dataRootPath);
             settings.writeBool(item + "Detected", install.detected);
             settings.writeBool(item + "UserOverride", install.userOverride);
+            settings.writeBool(item + "ExplicitTLK", install.explicitTlk);
             settings.writeString(item + "ConfidenceScore", std::to_string(install.confidence));
             settings.writeString(item + "Confidence", confidenceText(install.confidence, install.userOverride));
         }
 
-        if (normalized.empty()) {
+        if (normalized.empty() || activeId.empty()) {
             clearLegacySingleKeys(game.id);
             settings.deleteEntry(settingBase(game.id) + "ActiveInstallId");
             return;
@@ -222,7 +224,8 @@ public:
         const auto activeIt = std::find_if(normalized.begin(), normalized.end(), [&](const GameInstall& install) {
             return install.installId == activeId;
         });
-        const GameInstall& active = activeIt == normalized.end() ? normalized.front() : *activeIt;
+        if (activeIt == normalized.end()) return;
+        const GameInstall& active = *activeIt;
         settings.writeString(settingBase(game.id) + "DisplayName", active.displayName);
         settings.writePath(settingBase(game.id) + "InstallPath", active.installPath);
         settings.writePath(settingBase(game.id) + "TLKPath", active.tlkPath);
@@ -230,6 +233,7 @@ public:
         settings.writePath(settingBase(game.id) + "DataRootPath", active.dataRootPath);
         settings.writeBool(settingBase(game.id) + "Detected", active.detected);
         settings.writeBool(settingBase(game.id) + "UserOverride", active.userOverride);
+        settings.writeBool(settingBase(game.id) + "ExplicitTLK", active.explicitTlk);
         settings.writeString(settingBase(game.id) + "Confidence",
                              confidenceText(active.confidence, active.userOverride));
     }
@@ -260,7 +264,7 @@ public:
         const auto it = std::find_if(installs.begin(), installs.end(), [&](const GameInstall& install) {
             return install.installId == installId;
         });
-        if (it == installs.end()) return false;
+        if (it == installs.end() || !isUsableGameInstall(*game, *it)) return false;
         writeAll(*game, installs, installId);
         setActiveGameId(gameId);
         return true;
@@ -286,6 +290,48 @@ public:
     }
 
 private:
+    static GameInstall readSavedInstall(neosettings::SharedSettings& settings,
+                                        const GameDefinition& game,
+                                        const std::string& item) {
+        GameInstall install;
+        install.id = game.id;
+        install.installId = settings.readString(item + "Id", std::string{});
+        install.installPath = settings.readPath(item + "InstallPath").value_or(std::filesystem::path{});
+        install.tlkPath = settings.readPath(item + "TLKPath").value_or(std::filesystem::path{});
+        install.overridePath = settings.readPath(item + "OverridePath").value_or(std::filesystem::path{});
+        install.dataRootPath = settings.readPath(item + "DataRootPath").value_or(std::filesystem::path{});
+        install.displayName = settings.readString(
+            item + "Name", defaultInstallName(game, install.installPath));
+        install.detected = settings.readBool(item + "Detected", false);
+        install.userOverride = settings.readBool(item + "UserOverride", false);
+        install.explicitTlk = settings.readBool(item + "ExplicitTLK", false);
+        install.confidence = static_cast<int>(parseCount(
+            settings.readString(item + "ConfidenceScore", "0")));
+
+        // Older settings did not record whether a TLK was selected explicitly.
+        // Only a user-owned entry may acquire that meaning during migration;
+        // an automatically detected false root must never turn its local file
+        // into a trusted override.
+        if (!install.explicitTlk && install.userOverride &&
+            isRegularFilePath(install.tlkPath)) {
+            auto derived = isValidGameInstallation(game, install.installPath)
+                ? firstExisting(install.installPath, game.tlkRelativePaths)
+                : std::filesystem::path{};
+            if (!isRegularFilePath(derived)) derived.clear();
+            if (derived.empty() ||
+                normalizeConfiguredPath(derived) != normalizeConfiguredPath(install.tlkPath)) {
+                install.explicitTlk = true;
+            }
+        }
+        return install;
+    }
+
+    static bool shouldDiscardAutomaticEntry(const GameDefinition& game,
+                                            const GameInstall& install) {
+        return install.detected && !install.userOverride &&
+               !isValidGameInstallation(game, install.installPath);
+    }
+
     static std::size_t parseCount(const std::string& text) {
         try {
             return static_cast<std::size_t>(std::stoull(text));
@@ -298,7 +344,8 @@ private:
         neosettings::SharedSettings settings;
         const std::string base = settingBase(gameId);
         for (const auto& key : {"DisplayName", "InstallPath", "TLKPath", "OverridePath",
-                                "DataRootPath", "Detected", "UserOverride", "Confidence"}) {
+                                "DataRootPath", "Detected", "UserOverride", "ExplicitTLK",
+                                "Confidence"}) {
             settings.deleteEntry(base + key);
         }
     }
@@ -311,26 +358,27 @@ private:
         if ((!root || root->empty()) && (!savedTlk || savedTlk->empty())) return std::nullopt;
 
         GameInstall install;
-        if (root && !root->empty()) {
-            install = makeInstall(game, *root, false, false, validationScore(game, *root));
-        } else {
-            install.id = game.id;
-            install.status = "user";
-            install.userOverride = true;
-            install.confidence = 8;
+        install.id = game.id;
+        install.installPath = root.value_or(std::filesystem::path{});
+        install.tlkPath = savedTlk.value_or(std::filesystem::path{});
+        install.overridePath = settings.readPath(base + "OverridePath").value_or(std::filesystem::path{});
+        install.dataRootPath = settings.readPath(base + "DataRootPath").value_or(std::filesystem::path{});
+        install.detected = settings.readBool(base + "Detected", false);
+        install.userOverride = settings.readBool(base + "UserOverride", false);
+        install.explicitTlk = settings.readBool(base + "ExplicitTLK", false);
+        if (!install.explicitTlk && install.userOverride && isRegularFilePath(install.tlkPath)) {
+            auto derived = isValidGameInstallation(game, install.installPath)
+                ? firstExisting(install.installPath, game.tlkRelativePaths)
+                : std::filesystem::path{};
+            if (!isRegularFilePath(derived)) derived.clear();
+            install.explicitTlk = derived.empty() ||
+                normalizeConfiguredPath(derived) != normalizeConfiguredPath(install.tlkPath);
         }
-
-        install.installId = makeInstallId(
-            game, root.value_or(std::filesystem::path{}),
-            savedTlk.value_or(std::filesystem::path{}));
+        install.confidence = install.userOverride
+            ? 8 : validationScore(game, install.installPath);
+        install.installId = makeInstallId(game, install.installPath, install.tlkPath);
         install.displayName = settings.readString(
             base + "DisplayName", defaultInstallName(game, install.installPath));
-        install.tlkPath = savedTlk.value_or(install.tlkPath);
-        install.overridePath = settings.readPath(base + "OverridePath").value_or(install.overridePath);
-        install.dataRootPath = settings.readPath(base + "DataRootPath").value_or(install.dataRootPath);
-        install.detected = settings.readBool(base + "Detected", false);
-        install.userOverride = settings.readBool(base + "UserOverride", install.userOverride);
-        if (install.userOverride) install.confidence = std::max(install.confidence, 8);
         refreshDerivedPaths(game, install);
         return install;
     }
@@ -490,11 +538,23 @@ public:
                                     const std::string& installId = {}) const {
         const auto* game = findGame(gameId);
         if (game == nullptr || root.empty()) return {};
-        GameInstall install = makeInstall(
-            *game, normalizeConfiguredPath(root), false, true,
-            std::max(8, validationScore(*game, normalizeConfiguredPath(root))),
-            displayName, installId);
-        if (!explicitTlk.empty()) install.tlkPath = normalizeConfiguredPath(explicitTlk);
+        const auto inspected = neoshared::game::inspectGameInstallation(
+            root, game->game, "User selected installation");
+        if (!inspected || !isValidGameInstallation(*game, inspected->installPath)) return {};
+
+        GameInstall install = *inspected;
+        install.installId = installId;
+        install.displayName = displayName;
+        install.detected = false;
+        install.userOverride = true;
+        install.confidence = std::max(8, install.confidence);
+        if (!explicitTlk.empty()) {
+            install.tlkPath = normalizeConfiguredPath(explicitTlk);
+            if (!isRegularFilePath(install.tlkPath)) return {};
+            install.explicitTlk = true;
+        } else {
+            install.explicitTlk = false;
+        }
         refreshDerivedPaths(*game, install);
 
         auto installs = settings_.readAll(*game);
@@ -515,6 +575,7 @@ public:
         const auto* game = findGame(gameId);
         if (game == nullptr || tlkPath.empty()) return {};
         const auto normalizedTlk = normalizeConfiguredPath(tlkPath);
+        if (!isRegularFilePath(normalizedTlk)) return {};
 
         auto installs = settings_.readAll(*game);
         auto it = installs.end();
@@ -535,8 +596,9 @@ public:
             installs.erase(it);
         } else {
             install.id = game->id;
-            if (lowerAscii(neoshared::pathToUtf8(normalizedTlk.filename())) == "dialog.tlk") {
-                install.installPath = normalizedTlk.parent_path();
+            const auto candidateRoot = normalizedTlk.parent_path();
+            if (isValidGameInstallation(*game, candidateRoot)) {
+                install.installPath = candidateRoot;
             }
             install.installId = makeInstallId(*game, install.installPath, normalizedTlk);
             install.displayName = displayName.empty()
@@ -546,6 +608,7 @@ public:
 
         if (!displayName.empty()) install.displayName = displayName;
         install.tlkPath = normalizedTlk;
+        install.explicitTlk = true;
         install.userOverride = true;
         install.detected = false;
         install.confidence = std::max(install.confidence, 8);
@@ -576,6 +639,9 @@ private:
         const GameDefinition& game,
         std::vector<GameInstall>& installs,
         const std::optional<std::filesystem::path>& hint) const {
+        installs.erase(std::remove_if(installs.begin(), installs.end(), [&](const GameInstall& install) {
+            return !isUsableGameInstall(game, install);
+        }), installs.end());
         if (installs.empty()) return std::nullopt;
         if (hint && !hint->empty()) {
             auto best = installs.end();
@@ -601,7 +667,7 @@ private:
         }
 
         const auto withTlk = std::find_if(installs.begin(), installs.end(), [](const GameInstall& install) {
-            return neoshared::game::isRegularFilePath(install.tlkPath);
+            return isRegularFilePath(install.tlkPath);
         });
         if (withTlk != installs.end()) return *withTlk;
         sortInstalls(installs);
