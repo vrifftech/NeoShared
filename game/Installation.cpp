@@ -906,9 +906,14 @@ void addWindowsRegistryCandidates(std::vector<Candidate>& candidates, Scan& scan
         {GameId::Kotor1, L"Software\\GOG.com\\Games\\1207666283", L"path"},
         {GameId::Kotor2, L"Software\\GOG.com\\Games\\1421404581", L"path"},
     }};
+    constexpr std::array<REGSAM, 3> registryViews{{
+        REGSAM{0},
+        static_cast<REGSAM>(KEY_WOW64_32KEY),
+        static_cast<REGSAM>(KEY_WOW64_64KEY),
+    }};
     for (const auto& item : items) {
         for (HKEY hive : {HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE}) {
-            for (REGSAM view : {REGSAM(0), KEY_WOW64_32KEY, KEY_WOW64_64KEY}) {
+            for (const REGSAM view : registryViews) {
                 const auto path = readRegistryString(hive, item.key, item.value, view);
                 if (path) addCandidate(candidates, scan, *path, item.game, "Windows registry");
             }
