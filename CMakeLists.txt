@@ -32,6 +32,28 @@ target_include_directories(neoshared_json PUBLIC
 )
 target_compile_features(neoshared_json PUBLIC cxx_std_17)
 
+add_library(neoshared_game
+    game/Installation.cpp
+)
+add_library(neoshared::game ALIAS neoshared_game)
+target_include_directories(neoshared_game PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(neoshared_game PUBLIC
+    neoshared::path
+    neoshared::json
+)
+target_compile_features(neoshared_game PUBLIC cxx_std_17)
+
+find_package(SQLite3 QUIET)
+if(SQLite3_FOUND)
+    target_link_libraries(neoshared_game PRIVATE SQLite::SQLite3)
+    target_compile_definitions(neoshared_game PRIVATE NEOSHARED_HAVE_SQLITE3=1)
+endif()
+if(WIN32)
+    target_link_libraries(neoshared_game PRIVATE advapi32)
+endif()
+
 add_library(neoshared_xml
     xml/SimpleXml.cpp
 )
@@ -140,7 +162,7 @@ target_include_directories(neoshared_wx INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/wx
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
-target_link_libraries(neoshared_wx INTERFACE neoshared::path)
+target_link_libraries(neoshared_wx INTERFACE neoshared::path neoshared::game)
 target_compile_features(neoshared_wx INTERFACE cxx_std_17)
 
 neo_apply_minimal_release_to_directory_targets()
