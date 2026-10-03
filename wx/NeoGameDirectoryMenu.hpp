@@ -30,6 +30,7 @@ struct SavedGameDirectory {
     bool active = false;
     bool exists = false;
     bool validInstallation = false;
+    bool customDirectory = false;
     bool availabilityKnown = true;
 };
 
@@ -42,6 +43,20 @@ using OpenGameFileDialog = std::function<void(const std::filesystem::path&)>;
 inline std::vector<SavedGameDirectory> savedGameDirectories(bool validatePaths = true) {
     std::vector<SavedGameDirectory> directories;
     const GamePathSettings settings;
+
+    for (const CustomDirectory& custom : settings.readCustomDirectories()) {
+        if (custom.path.empty()) continue;
+        SavedGameDirectory directory;
+        directory.installId = custom.directoryId;
+        directory.installName = custom.displayName;
+        directory.path = validatePaths
+            ? neosettings::normalizedPath(custom.path)
+            : custom.path;
+        directory.customDirectory = true;
+        directory.availabilityKnown = true;
+        directory.exists = isDirectoryPath(directory.path);
+        directories.push_back(std::move(directory));
+    }
 
     for (const GameDefinition& game : knownGames()) {
         const std::string activeId = settings.activeInstallId(game.id).value_or(std::string{});
@@ -72,6 +87,14 @@ inline std::vector<SavedGameDirectory> savedGameDirectories(bool validatePaths =
 
     std::stable_sort(directories.begin(), directories.end(), [](const SavedGameDirectory& lhs,
                                                                  const SavedGameDirectory& rhs) {
+        if (lhs.customDirectory != rhs.customDirectory) return lhs.customDirectory;
+        if (lhs.customDirectory) {
+            const std::string leftName = lowerAscii(lhs.installName);
+            const std::string rightName = lowerAscii(rhs.installName);
+            if (leftName != rightName) return leftName < rightName;
+            return lowerAscii(neosettings::pathToUtf8(lhs.path)) <
+                   lowerAscii(neosettings::pathToUtf8(rhs.path));
+        }
         if (lhs.gameName != rhs.gameName) return lowerAscii(lhs.gameName) < lowerAscii(rhs.gameName);
         if (lhs.active != rhs.active) return lhs.active;
         if (lhs.installName != rhs.installName) return lowerAscii(lhs.installName) < lowerAscii(rhs.installName);
@@ -117,14 +140,23 @@ public:
 
         const std::vector<SavedGameDirectory> directories = savedGameDirectories(true);
         for (const SavedGameDirectory& directory : directories) {
-            if (!isAllowedGameId(allowedGameIds_, directory.gameId)) continue;
-            std::string label = directory.active ? "[Active] " : std::string{};
-            label += directory.gameName;
-            if (!directory.installName.empty() && directory.installName != directory.gameName) {
-                label += " - " + directory.installName;
+            if (!directory.customDirectory &&
+                !isAllowedGameId(allowedGameIds_, directory.gameId)) {
+                continue;
+            }
+            std::string label;
+            if (directory.customDirectory) {
+                label = "[Directory] " + directory.installName;
+            } else {
+                if (directory.active) label = "[Active] ";
+                label += directory.gameName;
+                if (!directory.installName.empty() && directory.installName != directory.gameName) {
+                    label += " - " + directory.installName;
+                }
             }
             if (directory.availabilityKnown && !directory.exists) label += " (missing)";
-            else if (directory.availabilityKnown && !directory.validInstallation) {
+            else if (directory.availabilityKnown && !directory.customDirectory &&
+                     !directory.validInstallation) {
                 label += " (invalid installation)";
             }
             label = neosettings::ellipsizeMiddle(label, 100);
@@ -134,7 +166,8 @@ public:
                 neosettings::toWx(neosettings::escapeMenuLabel(label)),
                 neosettings::pathToWx(directory.path));
             item->Enable(!directory.availabilityKnown ||
-                         (directory.exists && directory.validInstallation));
+                         (directory.exists &&
+                          (directory.customDirectory || directory.validInstallation)));
 
             const int id = item->GetId();
             entries_.push_back({id, directory});
@@ -143,14 +176,14 @@ public:
 
         if (entries_.empty()) {
             const wxString emptyLabel = allowedGameIds_.empty()
-                                            ? "No saved game directories"
-                                            : "No matching saved game directories";
+                                            ? "No saved directories"
+                                            : "No matching saved directories";
             wxMenuItem* empty = menu_.Append(wxID_ANY, emptyLabel);
             empty->Enable(false);
         }
 
         menu_.AppendSeparator();
-        wxMenuItem* manage = menu_.Append(wxID_ANY, "&Manage Game Directories...");
+        wxMenuItem* manage = menu_.Append(wxID_ANY, "&Manage Directories...");
         manageId_ = manage->GetId();
         owner_.Bind(wxEVT_MENU, &OpenGameDirectoryMenu::onManageDirectories, this, manageId_);
     }
@@ -193,11 +226,11 @@ private:
         if (it == entries_.end()) return;
 
         if (!isDirectoryPath(it->directory.path)) {
-            wxString message = "The saved game directory no longer exists:\n\n";
+            wxString message = "The saved directory no longer exists:\n\n";
             message += neosettings::pathToWx(it->directory.path);
-            message += "\n\nUse Manage Game Directories to update it.";
+            message += "\n\nUse Manage Directories to update it.";
             wxMessageBox(message,
-                         "Game Directory Missing",
+                         "Saved Directory Missing",
                          wxOK | wxICON_WARNING,
                          &owner_);
             refresh();
@@ -205,7 +238,8 @@ private:
         }
 
         const GameDefinition* game = findGame(it->directory.gameId);
-        if (game == nullptr || !isValidGameInstallation(*game, it->directory.path)) {
+        if (!it->directory.customDirectory &&
+            (game == nullptr || !isValidGameInstallation(*game, it->directory.path))) {
             wxString message = "The saved directory is not a valid game installation:\n\n";
             message += neosettings::pathToWx(it->directory.path);
             if (game != nullptr) {
@@ -213,7 +247,7 @@ private:
                 message += neosettings::toWx(installationRequirementText(*game));
                 message += ".";
             }
-            message += "\n\nUse Manage Game Directories to update it.";
+            message += "\n\nUse Manage Directories to update it.";
             wxMessageBox(message,
                          "Invalid Game Installation",
                          wxOK | wxICON_WARNING,
@@ -223,8 +257,8 @@ private:
         }
 
         if (!action_) {
-            wxMessageBox("This application did not configure a file picker for saved game directories.",
-                         "Unable to Open from Game Directory",
+            wxMessageBox("This application did not configure a file picker for saved directories.",
+                         "Unable to Open from Saved Directory",
                          wxOK | wxICON_ERROR,
                          &owner_);
             return;
@@ -233,14 +267,14 @@ private:
         try {
             auto selected = it->directory;
             selected.exists = true;
-            selected.validInstallation = true;
+            selected.validInstallation = !selected.customDirectory;
             selected.availabilityKnown = true;
             action_(selected);
         } catch (const std::exception& ex) {
             wxString message = "The application could not open its file dialog:\n\n";
             message += neosettings::toWx(ex.what());
             wxMessageBox(message,
-                         "Unable to Open from Game Directory",
+                         "Unable to Open from Saved Directory",
                          wxOK | wxICON_ERROR,
                          &owner_);
         }
@@ -264,10 +298,10 @@ inline std::unique_ptr<OpenGameDirectoryMenu> appendOpenGameDirectoryMenu(
     wxWindow& owner,
     wxMenu& parent,
     OpenGameDirectoryAction action,
-    const wxString& label = "Open Game &Directory") {
+    const wxString& label = "Open Saved &Directory") {
     auto* submenu = new wxMenu();
     parent.AppendSubMenu(submenu, label,
-                         "Open a supported file from a saved game installation");
+                         "Open a supported file from a saved installation or custom directory");
     return std::make_unique<OpenGameDirectoryMenu>(owner, *submenu, std::move(action));
 }
 
@@ -276,10 +310,10 @@ inline std::unique_ptr<OpenGameDirectoryMenu> appendOpenGameDirectoryMenu(
     wxMenu& parent,
     OpenGameDirectoryAction action,
     GameDirectoryGameIds allowedGameIds,
-    const wxString& label = "Open Game &Directory") {
+    const wxString& label = "Open Saved &Directory") {
     auto* submenu = new wxMenu();
     parent.AppendSubMenu(submenu, label,
-                         "Open a supported file from a saved game installation");
+                         "Open a supported file from a saved installation or custom directory");
     return std::make_unique<OpenGameDirectoryMenu>(
         owner, *submenu, std::move(action), std::move(allowedGameIds));
 }
@@ -288,7 +322,7 @@ inline std::unique_ptr<OpenGameDirectoryMenu> appendOpenGameDirectoryMenu(
     wxWindow& owner,
     wxMenu& parent,
     OpenGameFileDialog openFileDialog,
-    const wxString& label = "Open Game &Directory") {
+    const wxString& label = "Open Saved &Directory") {
     OpenGameDirectoryAction action = [openFileDialog = std::move(openFileDialog)](
                                          const SavedGameDirectory& directory) {
         if (openFileDialog) openFileDialog(directory.path);
@@ -301,7 +335,7 @@ inline std::unique_ptr<OpenGameDirectoryMenu> appendOpenGameDirectoryMenu(
     wxMenu& parent,
     OpenGameFileDialog openFileDialog,
     GameDirectoryGameIds allowedGameIds,
-    const wxString& label = "Open Game &Directory") {
+    const wxString& label = "Open Saved &Directory") {
     OpenGameDirectoryAction action = [openFileDialog = std::move(openFileDialog)](
                                          const SavedGameDirectory& directory) {
         if (openFileDialog) openFileDialog(directory.path);
@@ -317,7 +351,7 @@ inline std::unique_ptr<OpenGameDirectoryMenu> appendOpenGameDirectoryMenu(
 inline std::unique_ptr<OpenGameDirectoryMenu> appendOpenGameDirectoryMenu(
     wxWindow& owner,
     wxMenu& parent,
-    const wxString& label = "Open Game &Directory") {
+    const wxString& label = "Open Saved &Directory") {
     return appendOpenGameDirectoryMenu(
         owner,
         parent,
@@ -337,7 +371,7 @@ inline std::unique_ptr<OpenGameDirectoryMenu> appendOpenGameDirectoryMenu(
             wxString message = "The system file manager could not open:\n\n";
             message += neosettings::pathToWx(directory);
             wxMessageBox(message,
-                         "Unable to Open Game Directory",
+                         "Unable to Open Saved Directory",
                          wxOK | wxICON_ERROR,
                          &owner);
 #endif

@@ -6,8 +6,11 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <filesystem>
+#include <iomanip>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -59,6 +62,36 @@ inline std::string installListBase(const std::string& gameId) {
     return settingBase(gameId) + "Installs/";
 }
 
+struct CustomDirectory {
+    std::string directoryId;
+    std::string displayName;
+    std::filesystem::path path;
+};
+
+inline std::string customDirectoryListBase() {
+    return "GamePaths/CustomDirectories/";
+}
+
+inline std::string makeCustomDirectoryId(const std::filesystem::path& path) {
+    std::string key = neoshared::genericPathToUtf8(normalizeConfiguredPath(path));
+#if defined(_WIN32)
+    key = lowerAscii(std::move(key));
+#endif
+    std::uint64_t hash = static_cast<std::uint64_t>(14695981039346656037ULL);
+    for (const unsigned char ch : key) {
+        hash ^= static_cast<std::uint64_t>(ch);
+        hash *= static_cast<std::uint64_t>(1099511628211ULL);
+    }
+    std::ostringstream out;
+    out << "d_" << std::hex << std::setw(16) << std::setfill('0') << hash;
+    return out.str();
+}
+
+inline bool sameCustomDirectoryPath(const std::filesystem::path& lhs,
+                                    const std::filesystem::path& rhs) {
+    return !lhs.empty() && !rhs.empty() && neosettings::samePathForMru(lhs, rhs);
+}
+
 class GamePathSettings final {
 public:
     GamePathSettings() = default;
@@ -77,6 +110,150 @@ public:
     std::optional<std::string> activeInstallId(const std::string& gameId) const {
         neosettings::SharedSettings settings;
         return settings.readString(settingBase(gameId) + "ActiveInstallId");
+    }
+
+    std::vector<CustomDirectory> readCustomDirectories() const {
+        neosettings::SharedSettings settings;
+        const std::string root = customDirectoryListBase();
+        const std::size_t count = std::min<std::size_t>(
+            parseCount(settings.readString(root + "Count", "0")), 256u);
+        std::vector<CustomDirectory> directories;
+        directories.reserve(count);
+        for (std::size_t i = 0; i < count; ++i) {
+            const std::string item = root + std::to_string(i) + "/";
+            CustomDirectory entry;
+            entry.directoryId = settings.readString(item + "Id", std::string{});
+            entry.displayName = settings.readString(item + "Name", std::string{});
+            entry.path = settings.readPath(item + "Path").value_or(std::filesystem::path{});
+            if (entry.path.empty()) continue;
+            entry.path = normalizeConfiguredPath(entry.path);
+            if (entry.directoryId.empty()) entry.directoryId = makeCustomDirectoryId(entry.path);
+            if (entry.displayName.empty()) {
+                entry.displayName = neoshared::pathToUtf8(entry.path.filename());
+                if (entry.displayName.empty()) entry.displayName = "Custom Directory";
+            }
+            const auto duplicate = std::find_if(
+                directories.begin(), directories.end(), [&](const CustomDirectory& existing) {
+                    return existing.directoryId == entry.directoryId ||
+                           sameCustomDirectoryPath(existing.path, entry.path);
+                });
+            if (duplicate == directories.end()) directories.push_back(std::move(entry));
+            else *duplicate = std::move(entry);
+        }
+        std::stable_sort(directories.begin(), directories.end(),
+            [](const CustomDirectory& lhs, const CustomDirectory& rhs) {
+                const std::string leftName = lowerAscii(lhs.displayName);
+                const std::string rightName = lowerAscii(rhs.displayName);
+                if (leftName != rightName) return leftName < rightName;
+                return lowerAscii(neoshared::genericPathToUtf8(lhs.path)) <
+                       lowerAscii(neoshared::genericPathToUtf8(rhs.path));
+            });
+        return directories;
+    }
+
+    void writeCustomDirectories(std::vector<CustomDirectory> directories) const {
+        std::vector<CustomDirectory> normalized;
+        normalized.reserve(std::min<std::size_t>(directories.size(), 256u));
+        for (auto& entry : directories) {
+            if (entry.path.empty() || normalized.size() >= 256u) continue;
+            entry.path = normalizeConfiguredPath(entry.path);
+            if (entry.directoryId.empty()) entry.directoryId = makeCustomDirectoryId(entry.path);
+            if (entry.displayName.empty()) {
+                entry.displayName = neoshared::pathToUtf8(entry.path.filename());
+                if (entry.displayName.empty()) entry.displayName = "Custom Directory";
+            }
+            const auto duplicate = std::find_if(
+                normalized.begin(), normalized.end(), [&](const CustomDirectory& existing) {
+                    return existing.directoryId == entry.directoryId ||
+                           sameCustomDirectoryPath(existing.path, entry.path);
+                });
+            if (duplicate == normalized.end()) normalized.push_back(std::move(entry));
+            else *duplicate = std::move(entry);
+        }
+        std::stable_sort(normalized.begin(), normalized.end(),
+            [](const CustomDirectory& lhs, const CustomDirectory& rhs) {
+                const std::string leftName = lowerAscii(lhs.displayName);
+                const std::string rightName = lowerAscii(rhs.displayName);
+                if (leftName != rightName) return leftName < rightName;
+                return lowerAscii(neoshared::genericPathToUtf8(lhs.path)) <
+                       lowerAscii(neoshared::genericPathToUtf8(rhs.path));
+            });
+
+        neosettings::SharedSettings settings;
+        const std::string root = customDirectoryListBase();
+        settings.deleteGroup(root);
+        settings.writeString(root + "Count", std::to_string(normalized.size()));
+        for (std::size_t i = 0; i < normalized.size(); ++i) {
+            const std::string item = root + std::to_string(i) + "/";
+            settings.writeString(item + "Id", normalized[i].directoryId);
+            settings.writeString(item + "Name", normalized[i].displayName);
+            settings.writePath(item + "Path", normalized[i].path);
+        }
+    }
+
+    CustomDirectory rememberCustomDirectory(
+        const std::filesystem::path& directory,
+        const std::string& displayName = {},
+        const std::string& directoryId = {}) const {
+        const auto normalizedPath = normalizeConfiguredPath(directory);
+        if (!isDirectoryPath(normalizedPath)) return {};
+
+        auto directories = readCustomDirectories();
+        auto existing = directories.end();
+        if (!directoryId.empty()) {
+            existing = std::find_if(directories.begin(), directories.end(),
+                [&](const CustomDirectory& entry) {
+                    return entry.directoryId == directoryId;
+                });
+        }
+        if (existing == directories.end()) {
+            existing = std::find_if(directories.begin(), directories.end(),
+                [&](const CustomDirectory& entry) {
+                    return sameCustomDirectoryPath(entry.path, normalizedPath);
+                });
+        }
+
+        CustomDirectory entry;
+        entry.directoryId = existing == directories.end()
+            ? (directoryId.empty() ? makeCustomDirectoryId(normalizedPath) : directoryId)
+            : existing->directoryId;
+        entry.displayName = displayName;
+        entry.path = normalizedPath;
+        if (entry.displayName.empty()) {
+            entry.displayName = neoshared::pathToUtf8(entry.path.filename());
+            if (entry.displayName.empty()) entry.displayName = "Custom Directory";
+        }
+        if (existing == directories.end()) directories.push_back(entry);
+        else *existing = entry;
+        writeCustomDirectories(std::move(directories));
+        return entry;
+    }
+
+    bool renameCustomDirectory(const std::string& directoryId,
+                               const std::string& newName) const {
+        if (directoryId.empty() || newName.empty()) return false;
+        auto directories = readCustomDirectories();
+        const auto entry = std::find_if(directories.begin(), directories.end(),
+            [&](const CustomDirectory& directory) {
+                return directory.directoryId == directoryId;
+            });
+        if (entry == directories.end()) return false;
+        entry->displayName = newName;
+        writeCustomDirectories(std::move(directories));
+        return true;
+    }
+
+    bool clearCustomDirectory(const std::string& directoryId) const {
+        if (directoryId.empty()) return false;
+        auto directories = readCustomDirectories();
+        const auto before = directories.size();
+        directories.erase(std::remove_if(directories.begin(), directories.end(),
+            [&](const CustomDirectory& directory) {
+                return directory.directoryId == directoryId;
+            }), directories.end());
+        if (directories.size() == before) return false;
+        writeCustomDirectories(std::move(directories));
+        return true;
     }
 
     std::optional<GameInstall> read(const GameDefinition& game) const {
@@ -566,6 +743,13 @@ public:
         settings_.writeAll(*game, installs, activeId);
         settings_.setActiveGameId(gameId);
         return actual == installs.end() ? install : *actual;
+    }
+
+    CustomDirectory rememberCustomDirectory(
+        const std::filesystem::path& directory,
+        const std::string& displayName = {},
+        const std::string& directoryId = {}) const {
+        return settings_.rememberCustomDirectory(directory, displayName, directoryId);
     }
 
     GameInstall rememberUserTlk(const std::string& gameId,

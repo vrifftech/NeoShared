@@ -4,14 +4,13 @@
 #include "NeoWindowPlacement.hpp"
 
 #include <wx/button.h>
-#include <wx/choice.h>
+#include <wx/choicdlg.h>
 #include <wx/dirdlg.h>
 #include <wx/filedlg.h>
 #include <wx/listctrl.h>
 #include <wx/msgdlg.h>
 #include <wx/sizer.h>
 #include <wx/stattext.h>
-#include <wx/textctrl.h>
 #include <wx/textdlg.h>
 #include <wx/wx.h>
 #include <wx/wrapsizer.h>
@@ -37,7 +36,7 @@ class GameDirectoryDialog final : public wxDialog {
 public:
     explicit GameDirectoryDialog(wxWindow* parent,
                                  GameDirectoryGameIds allowedGameIds = {})
-        : wxDialog(parent, wxID_ANY, "Game Directories", wxDefaultPosition, wxDefaultSize,
+        : wxDialog(parent, wxID_ANY, "Saved Directories", wxDefaultPosition, wxDefaultSize,
                    wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER),
           allowedGameIds_(std::move(allowedGameIds)) {
         buildLayout();
@@ -45,56 +44,72 @@ public:
     }
 
 private:
+    enum class RowKind {
+        Placeholder,
+        Installation,
+        CustomDirectory,
+    };
+
+    struct Row {
+        RowKind kind = RowKind::Placeholder;
+        std::string gameId;
+        GameInstall install;
+        CustomDirectory directory;
+    };
+
     void buildLayout() {
         auto* root = new wxBoxSizer(wxVERTICAL);
         wxString introText;
-        if (allowedGameIds_.size() == 1) {
+        if (allowedGameIds_.size() == 1u) {
             const GameDefinition* game = findGame(allowedGameIds_.front());
             const std::string name = game ? game->displayName : allowedGameIds_.front();
             introText = neosettings::toWx(
                 "Saved " + name +
-                " installations are shared by the Neo tools. Multiple named installs, such as Steam or GOG, may be configured.");
+                " installations and custom directories are shared by all Neo tools. "
+                "Installations provide TLK, override, and resource-root resolution. "
+                "Custom directories are global named bookmarks for opening files only.");
         } else {
             introText =
-                "Saved game directories are shared by all Neo tools to resolve TLK files, overrides, and resource roots. Each game can have multiple named installs, such as Steam, GOG, or K2 Test. Manual file opening still works when no game is configured.";
+                "Saved game installations and custom directories are shared by all Neo tools. "
+                "Installations provide TLK, override, and resource-root resolution. "
+                "Custom directories may point anywhere and are global named bookmarks for opening files only.";
         }
 #if defined(__EMSCRIPTEN__)
         introText =
-            "Installed-game registration is unavailable in the browser. Open individual resources explicitly for the current session. Use a desktop build for installation scanning, persistent TLK paths, overrides, and resource-root resolution.";
+            "Persistent installation and directory registration is unavailable in the browser. "
+            "Open individual resources explicitly for the current session.";
 #endif
         auto* intro = new wxStaticText(this, wxID_ANY, introText);
-        intro->Wrap(FromDIP(760));
+        intro->Wrap(FromDIP(820));
         root->Add(intro, 0, wxEXPAND | wxALL, FromDIP(10));
 
         list_ = new wxListCtrl(this, wxID_ANY, wxDefaultPosition, wxDefaultSize,
                                wxLC_REPORT | wxLC_SINGLE_SEL | wxLC_HRULES | wxLC_VRULES);
-        list_->AppendColumn("Game", wxLIST_FORMAT_LEFT, FromDIP(220));
-        list_->AppendColumn("Install Name", wxLIST_FORMAT_LEFT, FromDIP(180));
-        list_->AppendColumn("Active", wxLIST_FORMAT_LEFT, FromDIP(70));
-        list_->AppendColumn("Status", wxLIST_FORMAT_LEFT, FromDIP(85));
-        list_->AppendColumn("Install Path", wxLIST_FORMAT_LEFT, FromDIP(300));
-        list_->AppendColumn("TLK", wxLIST_FORMAT_LEFT, FromDIP(260));
-        list_->AppendColumn("Override/Data", wxLIST_FORMAT_LEFT, FromDIP(260));
+        list_->AppendColumn("Scope", wxLIST_FORMAT_LEFT, FromDIP(190));
+        list_->AppendColumn("Kind", wxLIST_FORMAT_LEFT, FromDIP(130));
+        list_->AppendColumn("Name", wxLIST_FORMAT_LEFT, FromDIP(180));
+        list_->AppendColumn("Active", wxLIST_FORMAT_LEFT, FromDIP(65));
+        list_->AppendColumn("Status", wxLIST_FORMAT_LEFT, FromDIP(105));
+        list_->AppendColumn("Directory", wxLIST_FORMAT_LEFT, FromDIP(320));
+        list_->AppendColumn("TLK", wxLIST_FORMAT_LEFT, FromDIP(250));
+        list_->AppendColumn("Override/Data", wxLIST_FORMAT_LEFT, FromDIP(250));
         root->Add(list_, 1, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(10));
 
         auto* actions = new wxWrapSizer(wxHORIZONTAL);
-        auto* addInstall = new wxButton(this, wxID_ANY, "Add Install...");
-        auto* changeInstall = new wxButton(this, wxID_ANY, "Change Install...");
-        auto* browseTlk = new wxButton(this, wxID_ANY, "Browse TLK...");
-        auto* rename = new wxButton(this, wxID_ANY, "Rename...");
-        auto* setActive = new wxButton(this, wxID_ANY, "Set Active");
-        auto* rescanSelected = new wxButton(this, wxID_ANY, "Rescan Selected");
-        auto* rescanAll = new wxButton(this, wxID_ANY, "Rescan All");
-        auto* clear = new wxButton(this, wxID_ANY, "Clear Selected");
+        addInstallButton_ = new wxButton(this, wxID_ANY, "Add Install...");
+        addDirectoryButton_ = new wxButton(this, wxID_ANY, "Add Directory...");
+        changeButton_ = new wxButton(this, wxID_ANY, "Change Path...");
+        browseTlkButton_ = new wxButton(this, wxID_ANY, "Browse TLK...");
+        renameButton_ = new wxButton(this, wxID_ANY, "Rename...");
+        setActiveButton_ = new wxButton(this, wxID_ANY, "Set Active");
+        rescanSelectedButton_ = new wxButton(this, wxID_ANY, "Rescan Selected");
+        rescanAllButton_ = new wxButton(this, wxID_ANY, "Rescan All");
+        clearButton_ = new wxButton(this, wxID_ANY, "Clear Selected");
         auto* close = new wxButton(this, wxID_CLOSE, "Close");
-#if defined(__EMSCRIPTEN__)
-        for (wxButton* button : {addInstall, changeInstall, browseTlk, rename,
-                                 setActive, rescanSelected, rescanAll, clear}) {
-            button->Enable(false);
-        }
-#endif
-        for (wxButton* button : {addInstall, changeInstall, browseTlk, rename,
-                                 setActive, rescanSelected, rescanAll, clear}) {
+
+        for (wxButton* button : {addInstallButton_, addDirectoryButton_, changeButton_,
+                                 browseTlkButton_, renameButton_, setActiveButton_,
+                                 rescanSelectedButton_, rescanAllButton_, clearButton_}) {
             actions->Add(button, 0, wxRIGHT | wxBOTTOM, FromDIP(6));
         }
         root->Add(actions, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP(10));
@@ -105,53 +120,85 @@ private:
         root->Add(closeRow, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(10));
 
         SetSizer(root);
-        neowindow::configureResponsiveWindow(*this, wxSize(1320, 620), wxSize(700, 400));
+        neowindow::configureResponsiveWindow(*this, wxSize(1420, 640), wxSize(760, 420));
         CentreOnParent();
         neowindow::constrainWindowToDisplay(*this);
 
-        addInstall->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { onAddInstall(); });
-        changeInstall->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { onChangeInstall(); });
-        browseTlk->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { onBrowseTlk(); });
-        rename->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { onRename(); });
-        setActive->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { onSetActive(); });
-        rescanSelected->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { onRescanSelected(); });
-        rescanAll->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { onRescanAll(); });
-        clear->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { onClearSelected(); });
+        addInstallButton_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { onAddInstall(); });
+        addDirectoryButton_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { onAddDirectory(); });
+        changeButton_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { onChangePath(); });
+        browseTlkButton_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { onBrowseTlk(); });
+        renameButton_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { onRename(); });
+        setActiveButton_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { onSetActive(); });
+        rescanSelectedButton_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { onRescanSelected(); });
+        rescanAllButton_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { onRescanAll(); });
+        clearButton_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { onClearSelected(); });
         close->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { EndModal(wxID_CLOSE); });
         list_->Bind(wxEVT_LIST_ITEM_ACTIVATED, [this](wxListEvent&) { onRename(); });
+        list_->Bind(wxEVT_LIST_ITEM_SELECTED, [this](wxListEvent&) { updateActionState(); });
+        list_->Bind(wxEVT_LIST_ITEM_DESELECTED, [this](wxListEvent&) { updateActionState(); });
     }
 
-    long selectedRow() const {
+    long selectedRowIndex() const {
         return list_ ? list_->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED) : -1;
     }
 
+    const Row* selectedRow() const {
+        const long index = selectedRowIndex();
+        if (index < 0 || static_cast<std::size_t>(index) >= rows_.size()) return nullptr;
+        return &rows_[static_cast<std::size_t>(index)];
+    }
+
     std::optional<GameInstall> selectedInstall() const {
-        const long row = selectedRow();
-        if (row < 0 || static_cast<std::size_t>(row) >= rows_.size()) return std::nullopt;
-        if (rows_[static_cast<std::size_t>(row)].installId.empty()) return std::nullopt;
-        return rows_[static_cast<std::size_t>(row)];
+        const Row* row = selectedRow();
+        if (row == nullptr || row->kind != RowKind::Installation ||
+            row->install.installId.empty()) {
+            return std::nullopt;
+        }
+        return row->install;
+    }
+
+    std::optional<CustomDirectory> selectedCustomDirectory() const {
+        const Row* row = selectedRow();
+        if (row == nullptr || row->kind != RowKind::CustomDirectory ||
+            row->directory.directoryId.empty()) {
+            return std::nullopt;
+        }
+        return row->directory;
     }
 
     const GameDefinition* selectedGame() const {
-        const long row = selectedRow();
-        if (row < 0 || static_cast<std::size_t>(row) >= rows_.size()) return nullptr;
-        return findGame(rows_[static_cast<std::size_t>(row)].id);
+        const Row* row = selectedRow();
+        if (row == nullptr || row->gameId.empty()) return nullptr;
+        return findGame(row->gameId);
     }
 
-    const GameDefinition* requireGame() const {
-        const GameDefinition* game = selectedGame();
-        if (game == nullptr) {
-            wxMessageBox("Select a game row first.", "Game Directories", wxOK | wxICON_INFORMATION, const_cast<GameDirectoryDialog*>(this));
+    const GameDefinition* chooseGameForInstall() {
+        std::vector<const GameDefinition*> choices;
+        for (const auto& game : knownGames()) {
+            if (isAllowedGameId(allowedGameIds_, game.id)) choices.push_back(&game);
         }
-        return game;
-    }
+        if (choices.empty()) return nullptr;
+        if (choices.size() == 1u) return choices.front();
 
-    std::optional<GameInstall> requireInstall() const {
-        auto install = selectedInstall();
-        if (!install) {
-            wxMessageBox("Select a configured install row first.", "Game Directories", wxOK | wxICON_INFORMATION, const_cast<GameDirectoryDialog*>(this));
+        wxArrayString labels;
+        int initial = 0;
+        const GameDefinition* selected = selectedGame();
+        for (std::size_t i = 0; i < choices.size(); ++i) {
+            labels.Add(neosettings::toWx(choices[i]->displayName));
+            if (selected != nullptr && selected->id == choices[i]->id) {
+                initial = static_cast<int>(i);
+            }
         }
-        return install;
+        wxSingleChoiceDialog dialog(this, "Add an installation for which game?",
+                                    "Choose Game", labels);
+        dialog.SetSelection(initial);
+        if (dialog.ShowModal() != wxID_OK) return nullptr;
+        const int selection = dialog.GetSelection();
+        if (selection == wxNOT_FOUND || static_cast<std::size_t>(selection) >= choices.size()) {
+            return nullptr;
+        }
+        return choices[static_cast<std::size_t>(selection)];
     }
 
     void showInvalidInstallMessage(const GameDefinition& game,
@@ -163,50 +210,86 @@ private:
         message += "\n\nSelect the game root containing ";
         message += neosettings::toWx(installationRequirementText(game));
         message += ". Folder names such as Override, StreamWaves, lips, modules, or data do not identify an installation.";
-        wxMessageBox(message, "Invalid Game Installation",
-                     wxOK | wxICON_WARNING,
+        wxMessageBox(message, "Invalid Game Installation", wxOK | wxICON_WARNING,
                      const_cast<GameDirectoryDialog*>(this));
     }
 
-    void refreshList(const std::string& selectGameId = {}, const std::string& selectInstallId = {}) {
+    void refreshList(const std::string& selectGameId = {},
+                     const std::string& selectEntryId = {},
+                     bool selectCustom = false) {
         if (list_ == nullptr) return;
         list_->DeleteAllItems();
         rows_.clear();
+
+        for (const CustomDirectory& directory : resolver().settings().readCustomDirectories()) {
+            Row row;
+            row.kind = RowKind::CustomDirectory;
+            row.directory = directory;
+            rows_.push_back(std::move(row));
+        }
 
         for (const auto& game : knownGames()) {
             if (!isAllowedGameId(allowedGameIds_, game.id)) continue;
             auto installs = resolver().settings().readAll(game);
             if (installs.empty()) {
-                GameInstall missing;
-                missing.id = game.id;
-                missing.displayName = "";
-                missing.status = "not configured";
-                rows_.push_back(std::move(missing));
+                Row row;
+                row.kind = RowKind::Placeholder;
+                row.gameId = game.id;
+                rows_.push_back(std::move(row));
             } else {
-                rows_.insert(rows_.end(), installs.begin(), installs.end());
+                for (auto& install : installs) {
+                    Row row;
+                    row.kind = RowKind::Installation;
+                    row.gameId = game.id;
+                    row.install = std::move(install);
+                    rows_.push_back(std::move(row));
+                }
             }
         }
 
         long selectRow = -1;
         for (std::size_t i = 0; i < rows_.size(); ++i) {
-            const auto& row = rows_[i];
-            const GameDefinition* game = findGame(row.id);
-            const std::string gameName = game ? game->displayName : row.id;
-            const std::string active = game ? resolver().settings().activeInstallId(game->id).value_or(std::string{}) : std::string{};
-            const bool hasInstall = !row.installId.empty();
-            const bool isActive = hasInstall && active == row.installId;
-            const long item = list_->InsertItem(static_cast<long>(i), neosettings::toWx(gameName));
-            list_->SetItem(item, 1, neosettings::toWx(hasInstall ? row.displayName : std::string("(not configured)")));
-            list_->SetItem(item, 2, isActive ? "Yes" : "");
-            list_->SetItem(item, 3, neosettings::toWx(row.status.empty() ? "not found" : row.status));
-            list_->SetItem(item, 4, neosettings::pathToWx(row.installPath));
-            list_->SetItem(item, 5, neosettings::pathToWx(row.tlkPath));
-            const std::string root = !row.overridePath.empty()
-                                         ? neosettings::pathToUtf8(row.overridePath)
-                                         : neosettings::pathToUtf8(row.dataRootPath);
-            list_->SetItem(item, 6, neosettings::toWx(root));
-            if (selectRow < 0 && row.id == selectGameId &&
-                (selectInstallId.empty() || row.installId == selectInstallId)) {
+            const Row& row = rows_[i];
+            const long item = list_->InsertItem(static_cast<long>(i), wxEmptyString);
+            if (row.kind == RowKind::CustomDirectory) {
+                const bool exists = isDirectoryPath(row.directory.path);
+                list_->SetItem(item, 0, "All tools");
+                list_->SetItem(item, 1, "Custom directory");
+                list_->SetItem(item, 2, neosettings::toWx(row.directory.displayName));
+                list_->SetItem(item, 4, exists ? "available" : "missing");
+                list_->SetItem(item, 5, neosettings::pathToWx(row.directory.path));
+                if (selectCustom && row.directory.directoryId == selectEntryId) {
+                    selectRow = item;
+                }
+                continue;
+            }
+
+            const GameDefinition* game = findGame(row.gameId);
+            const std::string gameName = game ? game->displayName : row.gameId;
+            list_->SetItem(item, 0, neosettings::toWx(gameName));
+            if (row.kind == RowKind::Placeholder) {
+                list_->SetItem(item, 2, "(not configured)");
+                list_->SetItem(item, 4, "not configured");
+                continue;
+            }
+
+            const std::string active = game
+                ? resolver().settings().activeInstallId(game->id).value_or(std::string{})
+                : std::string{};
+            const bool isActive = !active.empty() && active == row.install.installId;
+            list_->SetItem(item, 1, "Installation");
+            list_->SetItem(item, 2, neosettings::toWx(row.install.displayName));
+            list_->SetItem(item, 3, isActive ? "Yes" : "");
+            list_->SetItem(item, 4, neosettings::toWx(
+                row.install.status.empty() ? "not found" : row.install.status));
+            list_->SetItem(item, 5, neosettings::pathToWx(row.install.installPath));
+            list_->SetItem(item, 6, neosettings::pathToWx(row.install.tlkPath));
+            const std::string resourceRoot = !row.install.overridePath.empty()
+                ? neosettings::pathToUtf8(row.install.overridePath)
+                : neosettings::pathToUtf8(row.install.dataRootPath);
+            list_->SetItem(item, 7, neosettings::toWx(resourceRoot));
+            if (!selectCustom && row.gameId == selectGameId &&
+                (selectEntryId.empty() || row.install.installId == selectEntryId)) {
                 selectRow = item;
             }
         }
@@ -216,132 +299,219 @@ private:
                                 wxLIST_STATE_SELECTED | wxLIST_STATE_FOCUSED);
             list_->EnsureVisible(selectRow);
         }
+        updateActionState();
+    }
+
+    void updateActionState() {
+#if defined(__EMSCRIPTEN__)
+        for (wxButton* button : {addInstallButton_, addDirectoryButton_, changeButton_,
+                                 browseTlkButton_, renameButton_, setActiveButton_,
+                                 rescanSelectedButton_, rescanAllButton_, clearButton_}) {
+            if (button != nullptr) button->Enable(false);
+        }
+#else
+        const Row* row = selectedRow();
+        const bool installation = row != nullptr && row->kind == RowKind::Installation;
+        const bool custom = row != nullptr && row->kind == RowKind::CustomDirectory;
+        const bool configured = installation || custom;
+        if (addInstallButton_ != nullptr) addInstallButton_->Enable(true);
+        if (addDirectoryButton_ != nullptr) addDirectoryButton_->Enable(true);
+        if (changeButton_ != nullptr) changeButton_->Enable(configured);
+        if (browseTlkButton_ != nullptr) browseTlkButton_->Enable(installation);
+        if (renameButton_ != nullptr) renameButton_->Enable(configured);
+        if (setActiveButton_ != nullptr) setActiveButton_->Enable(installation);
+        if (rescanSelectedButton_ != nullptr) rescanSelectedButton_->Enable(installation);
+        if (rescanAllButton_ != nullptr) rescanAllButton_->Enable(true);
+        if (clearButton_ != nullptr) clearButton_->Enable(configured);
+#endif
     }
 
     void onAddInstall() {
-        const GameDefinition* game = requireGame();
-        if (game == nullptr) return;
 #if defined(__EMSCRIPTEN__)
-        wxMessageBox(
-            "A browser page cannot scan or retain unrestricted access to an installed game directory. Use the normal Open command and explicitly select the files required for this session.",
-            "Game Directories Unavailable",
-            wxOK | wxICON_INFORMATION,
-            this);
         return;
 #else
-        wxDirDialog dialog(this, neosettings::toWx("Choose install folder for " + game->displayName), wxEmptyString,
-                           wxDD_DEFAULT_STYLE | wxDD_DIR_MUST_EXIST);
+        const GameDefinition* game = chooseGameForInstall();
+        if (game == nullptr) return;
+        wxDirDialog dialog(this,
+                           neosettings::toWx("Choose install folder for " + game->displayName),
+                           wxEmptyString, wxDD_DEFAULT_STYLE | wxDD_DIR_MUST_EXIST);
         if (dialog.ShowModal() != wxID_OK) return;
-        const auto path = std::filesystem::path(neosettings::toStd(dialog.GetPath()));
+        const auto path = neosettings::pathFromWx(dialog.GetPath());
         const auto install = resolver().rememberUserInstall(game->id, path);
         if (install.installId.empty()) {
             showInvalidInstallMessage(*game, path);
             return;
         }
-        refreshList(install.id, install.installId);
+        refreshList(install.id, install.installId, false);
 #endif
     }
 
-    void onChangeInstall() {
-        const GameDefinition* game = requireGame();
-        if (game == nullptr) return;
+    void onAddDirectory() {
 #if defined(__EMSCRIPTEN__)
-        wxMessageBox(
-            "A browser page cannot scan or retain unrestricted access to an installed game directory. Use the normal Open command and explicitly select the files required for this session.",
-            "Game Directories Unavailable",
-            wxOK | wxICON_INFORMATION,
-            this);
         return;
 #else
+        wxDirDialog directoryDialog(this, "Choose a directory to save", wxEmptyString,
+                                    wxDD_DEFAULT_STYLE | wxDD_DIR_MUST_EXIST);
+        if (directoryDialog.ShowModal() != wxID_OK) return;
+        const auto path = neosettings::pathFromWx(directoryDialog.GetPath());
+        std::string defaultName = neosettings::pathToUtf8(path.filename());
+        if (defaultName.empty()) defaultName = "Custom Directory";
+        wxTextEntryDialog nameDialog(this, "Directory name:", "Add Directory",
+                                     neosettings::toWx(defaultName));
+        if (nameDialog.ShowModal() != wxID_OK) return;
+        const std::string name = neosettings::toStd(nameDialog.GetValue());
+        if (name.empty()) {
+            wxMessageBox("The directory name cannot be empty.", "Add Directory",
+                         wxOK | wxICON_INFORMATION, this);
+            return;
+        }
+        const auto entry = resolver().rememberCustomDirectory(path, name);
+        if (entry.directoryId.empty()) {
+            wxMessageBox("The selected directory could not be saved.", "Add Directory",
+                         wxOK | wxICON_WARNING, this);
+            return;
+        }
+        refreshList({}, entry.directoryId, true);
+#endif
+    }
+
+    void onChangePath() {
+#if defined(__EMSCRIPTEN__)
+        return;
+#else
+        if (const auto custom = selectedCustomDirectory()) {
+            wxDirDialog dialog(this, "Choose replacement directory",
+                               neosettings::pathToWx(custom->path),
+                               wxDD_DEFAULT_STYLE | wxDD_DIR_MUST_EXIST);
+            if (dialog.ShowModal() != wxID_OK) return;
+            const auto updated = resolver().rememberCustomDirectory(
+                neosettings::pathFromWx(dialog.GetPath()), custom->displayName,
+                custom->directoryId);
+            if (updated.directoryId.empty()) {
+                wxMessageBox("The selected directory could not be saved.", "Change Directory",
+                             wxOK | wxICON_WARNING, this);
+                return;
+            }
+            refreshList({}, updated.directoryId, true);
+            return;
+        }
+
         const auto selected = selectedInstall();
-        wxDirDialog dialog(this, neosettings::toWx("Choose install folder for " + game->displayName), wxEmptyString,
+        if (!selected) return;
+        const GameDefinition* game = findGame(selected->id);
+        if (game == nullptr) return;
+        wxDirDialog dialog(this,
+                           neosettings::toWx("Choose install folder for " + game->displayName),
+                           neosettings::pathToWx(selected->installPath),
                            wxDD_DEFAULT_STYLE | wxDD_DIR_MUST_EXIST);
         if (dialog.ShowModal() != wxID_OK) return;
-        const auto path = std::filesystem::path(neosettings::toStd(dialog.GetPath()));
-        const auto install = resolver().rememberUserInstall(
+        const auto path = neosettings::pathFromWx(dialog.GetPath());
+        const auto updated = resolver().rememberUserInstall(
             game->id, path,
-            selected && selected->explicitTlk ? selected->tlkPath : std::filesystem::path{},
-            selected ? selected->displayName : std::string{},
-            selected ? selected->installId : std::string{});
-        if (install.installId.empty()) {
+            selected->explicitTlk ? selected->tlkPath : std::filesystem::path{},
+            selected->displayName, selected->installId);
+        if (updated.installId.empty()) {
             showInvalidInstallMessage(*game, path);
             return;
         }
-        refreshList(install.id, install.installId);
+        refreshList(updated.id, updated.installId, false);
 #endif
     }
 
     void onBrowseTlk() {
 #if defined(__EMSCRIPTEN__)
-        wxMessageBox(
-            "Persistent installed-game TLK registration is unavailable in the browser. Imported browser files live in a virtual filesystem and cannot be treated as a durable game installation path.",
-            "Game Directories Unavailable",
-            wxOK | wxICON_INFORMATION,
-            this);
         return;
 #else
-        const GameDefinition* game = requireGame();
-        if (game == nullptr) return;
         const auto selected = selectedInstall();
-        wxFileDialog dialog(this, neosettings::toWx("Choose TLK file for " + game->displayName), wxEmptyString,
-                            wxEmptyString, "TLK files (*.tlk)|*.tlk|All files (*.*)|*.*",
+        if (!selected) return;
+        const GameDefinition* game = findGame(selected->id);
+        if (game == nullptr) return;
+        wxFileDialog dialog(this,
+                            neosettings::toWx("Choose TLK file for " + game->displayName),
+                            wxEmptyString, wxEmptyString,
+                            "TLK files (*.tlk)|*.tlk|All files (*.*)|*.*",
                             wxFD_OPEN | wxFD_FILE_MUST_EXIST);
         if (dialog.ShowModal() != wxID_OK) return;
         const auto install = resolver().rememberUserTlk(
-            game->id, std::filesystem::path(neosettings::toStd(dialog.GetPath())),
-            selected ? selected->installId : std::string{},
-            selected ? selected->displayName : std::string{});
+            game->id, neosettings::pathFromWx(dialog.GetPath()),
+            selected->installId, selected->displayName);
         if (install.installId.empty()) {
             wxMessageBox("The selected TLK file could not be registered.",
                          "Invalid TLK File", wxOK | wxICON_WARNING, this);
             return;
         }
-        refreshList(install.id, install.installId);
+        refreshList(install.id, install.installId, false);
 #endif
     }
 
     void onRename() {
-        const auto selected = requireInstall();
+        if (const auto custom = selectedCustomDirectory()) {
+            wxTextEntryDialog dialog(this, "Directory name:", "Rename Directory",
+                                     neosettings::toWx(custom->displayName));
+            if (dialog.ShowModal() != wxID_OK) return;
+            const std::string name = neosettings::toStd(dialog.GetValue());
+            if (name.empty()) {
+                wxMessageBox("The name cannot be empty.", "Saved Directories",
+                             wxOK | wxICON_INFORMATION, this);
+                return;
+            }
+            if (!resolver().settings().renameCustomDirectory(custom->directoryId, name)) {
+                wxMessageBox("The selected directory could not be renamed.",
+                             "Saved Directories", wxOK | wxICON_ERROR, this);
+                return;
+            }
+            refreshList({}, custom->directoryId, true);
+            return;
+        }
+
+        const auto selected = selectedInstall();
         if (!selected) return;
-        wxTextEntryDialog dialog(this, "Install name:", "Rename Install", neosettings::toWx(selected->displayName));
+        wxTextEntryDialog dialog(this, "Install name:", "Rename Install",
+                                 neosettings::toWx(selected->displayName));
         if (dialog.ShowModal() != wxID_OK) return;
         const std::string name = neosettings::toStd(dialog.GetValue());
         if (name.empty()) {
-            wxMessageBox("The install name cannot be empty.", "Game Directories", wxOK | wxICON_INFORMATION, this);
+            wxMessageBox("The name cannot be empty.", "Saved Directories",
+                         wxOK | wxICON_INFORMATION, this);
             return;
         }
         if (!resolver().settings().renameInstall(selected->id, selected->installId, name)) {
-            wxMessageBox("The selected install could not be renamed.", "Game Directories", wxOK | wxICON_ERROR, this);
+            wxMessageBox("The selected installation could not be renamed.",
+                         "Saved Directories", wxOK | wxICON_ERROR, this);
             return;
         }
-        refreshList(selected->id, selected->installId);
+        refreshList(selected->id, selected->installId, false);
     }
 
     void onSetActive() {
-        const auto selected = requireInstall();
+        const auto selected = selectedInstall();
         if (!selected) return;
         if (!resolver().settings().setActiveInstall(selected->id, selected->installId)) {
             const GameDefinition* game = findGame(selected->id);
             if (game != nullptr && !selected->installPath.empty()) {
                 showInvalidInstallMessage(*game, selected->installPath);
             } else {
-                wxMessageBox("The selected entry has neither a valid installation root nor a readable explicit TLK file.",
-                             "Cannot Activate Entry", wxOK | wxICON_WARNING, this);
+                wxMessageBox(
+                    "The selected entry has neither a valid installation root nor a readable explicit TLK file.",
+                    "Cannot Activate Entry", wxOK | wxICON_WARNING, this);
             }
             return;
         }
-        refreshList(selected->id, selected->installId);
+        refreshList(selected->id, selected->installId, false);
     }
 
     void onRescanSelected() {
-        const GameDefinition* game = requireGame();
-        if (game == nullptr) return;
         const auto selected = selectedInstall();
-        resolver().resolveInstalls(*game, selected && !selected->installPath.empty()
-                                              ? std::optional<std::filesystem::path>(selected->installPath)
-                                              : std::nullopt,
-                                   true);
-        refreshList(game->id, selected ? selected->installId : std::string{});
+        if (!selected) return;
+        const GameDefinition* game = findGame(selected->id);
+        if (game == nullptr) return;
+        resolver().resolveInstalls(
+            *game,
+            selected->installPath.empty()
+                ? std::optional<std::filesystem::path>{}
+                : std::optional<std::filesystem::path>{selected->installPath},
+            true);
+        refreshList(game->id, selected->installId, false);
     }
 
     void onRescanAll() {
@@ -358,14 +528,28 @@ private:
     }
 
     void onClearSelected() {
-        const auto selected = requireInstall();
+        if (const auto custom = selectedCustomDirectory()) {
+            resolver().settings().clearCustomDirectory(custom->directoryId);
+            refreshList();
+            return;
+        }
+        const auto selected = selectedInstall();
         if (!selected) return;
-        GamePathSettings{}.clearInstall(selected->id, selected->installId);
+        resolver().settings().clearInstall(selected->id, selected->installId);
         refreshList(selected->id);
     }
 
     wxListCtrl* list_ = nullptr;
-    std::vector<GameInstall> rows_;
+    wxButton* addInstallButton_ = nullptr;
+    wxButton* addDirectoryButton_ = nullptr;
+    wxButton* changeButton_ = nullptr;
+    wxButton* browseTlkButton_ = nullptr;
+    wxButton* renameButton_ = nullptr;
+    wxButton* setActiveButton_ = nullptr;
+    wxButton* rescanSelectedButton_ = nullptr;
+    wxButton* rescanAllButton_ = nullptr;
+    wxButton* clearButton_ = nullptr;
+    std::vector<Row> rows_;
     GameDirectoryGameIds allowedGameIds_;
 };
 
