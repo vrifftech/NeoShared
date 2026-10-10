@@ -7,6 +7,7 @@
 #include <cerrno>
 #include <climits>
 #include <cstdlib>
+#include <exception>
 #include <map>
 #include <optional>
 #include <set>
@@ -295,7 +296,8 @@ std::optional<TxiDirectiveInfo> findTxiDirective(const std::string& key) {
 
 std::vector<TxiEntry> parseTxiEntries(const std::string& txi) {
     std::vector<TxiEntry> entries;
-    std::istringstream in(txi);
+    const auto view=txiTextView(txi);
+    std::istringstream in(view.text);
     std::string line;
     std::size_t lineNumber = 0;
     const TxiDirectiveInfo* activeList = nullptr;
@@ -365,12 +367,21 @@ std::vector<TxiEntry> parseTxiEntries(const std::string& txi) {
             }
         }
     }
+    for(auto& entry:entries)if(entry.lineNumber&&entry.lineNumber<=view.sourceLines.size())
+        entry.lineNumber=view.sourceLines[entry.lineNumber-1];
     return entries;
 }
 
 std::vector<TxiValidationIssue> validateTxiText(const std::string& txi) {
     std::vector<TxiValidationIssue> issues;
-    std::istringstream in(txi);
+    TxiTextView view;
+    try { view=txiTextView(txi); }
+    catch(const std::exception& e) {
+        // Validation is used while the editor contains an incomplete stream.
+        // A malformed binary header is an issue, not an event-handler throw.
+        return {{TxiIssueSeverity::Error,0,"",e.what()}};
+    }
+    std::istringstream in(view.text);
     std::string line;
     std::size_t lineNumber = 0;
     std::string currentProcedure;
@@ -672,6 +683,8 @@ std::vector<TxiValidationIssue> validateTxiText(const std::string& txi) {
                      "The coordinate list contains fewer rows than numchars.");
         }
     }
+    for(auto& issue:issues)if(issue.lineNumber&&issue.lineNumber<=view.sourceLines.size())
+        issue.lineNumber=view.sourceLines[issue.lineNumber-1];
     return issues;
 }
 

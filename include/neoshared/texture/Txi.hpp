@@ -66,6 +66,27 @@ struct TxiAutocompleteResult {
     std::vector<std::string> suggestions;
 };
 
+// TXI is a mixed text/binary stream. The two native channel lists accept
+// a counted little-endian float payload after the directive's newline. Raw
+// spans include that payload, so editors can preserve it byte-for-byte.
+struct TxiStreamLine {
+    std::size_t begin{}, end{}, next{}, lineNumber{};
+    std::string key, value;
+    bool listData{}, binary{};
+    std::size_t payloadBegin{};
+    std::vector<float> binaryValues;
+};
+struct TxiTextView {
+    std::string text;
+    // One original text-line number per projected text line. Binary elements
+    // refer to their header, not to newline bytes embedded in float payloads.
+    std::vector<std::size_t> sourceLines;
+};
+std::vector<TxiStreamLine> scanTxiStream(std::string_view bytes);
+TxiTextView txiTextView(std::string_view bytes);
+// Remove only terminator/padding NULs outside counted binary payloads.
+std::string trimTxiPadding(std::string bytes);
+
 std::string txiDirectiveValueKindToString(TxiDirectiveValueKind kind);
 std::string txiIssueSeverityToString(TxiIssueSeverity severity);
 const std::vector<TxiDirectiveInfo>& txiDirectiveCatalog();

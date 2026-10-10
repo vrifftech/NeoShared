@@ -78,6 +78,36 @@ struct TextureLayer {
     std::vector<TextureLayer> mipmaps;
 };
 
+// Exact processed-container storage retained independently from the decoded
+// editor image.  The K2 processed upload callers consume these bytes directly;
+// compression, target and mip ownership are separate properties.
+enum class ProcessedSourceEncoding { Gray8, Rgb8, Rgba8 };
+enum class ProcessedCompressionCodec { None, Bc1, Bc3 };
+enum class ProcessedTextureTarget { Texture2D, CubeMap };
+enum class ProcessedMipOwnership { SourceProvided };
+
+struct ProcessedTextureLevel {
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    std::vector<std::uint8_t> bytes;
+};
+
+struct ProcessedTextureSurface {
+    // Source-provided base level followed by its source-provided mip chain.
+    std::vector<ProcessedTextureLevel> levels;
+};
+
+struct ProcessedTexturePayload {
+    ProcessedSourceEncoding encoding = ProcessedSourceEncoding::Rgba8;
+    ProcessedCompressionCodec compression = ProcessedCompressionCodec::None;
+    ProcessedTextureTarget target = ProcessedTextureTarget::Texture2D;
+    ProcessedMipOwnership mipOwnership = ProcessedMipOwnership::SourceProvided;
+    std::uint8_t bytesPerPixel = 4;
+    // Texture2D: one surface per stored frame/TID. CubeMap: six faces in the
+    // renderer's direct +X,-X,+Y,-Y,+Z,-Z target order.
+    std::vector<ProcessedTextureSurface> surfaces;
+};
+
 struct TxiFeatures {
     bool cube = false;
     bool mipmapSpecified = false;
@@ -120,6 +150,14 @@ struct TextureSaveOptions {
     std::uint8_t jpegQuality = 95;
 };
 
+// Container facts retained across display-orientation conversion. Consumers
+// decide whether a source layout is supported; decoding alone does not imply
+// compatibility with a particular game's native texture loader.
+struct TgaSourceLayout {
+    std::uint8_t imageType{}, pixelBits{}, descriptor{}, paletteBits{};
+};
+enum class TxiStorage { Unknown, Sidecar, Embedded };
+
 struct TextureData {
     TextureFileKind kind = TextureFileKind::Unknown;
     std::filesystem::path sourcePath;
@@ -133,6 +171,11 @@ struct TextureData {
     float alphaBlending = 1.0f;
     TextureCompression preferredCompression = TextureCompression::Auto;
     std::string sourceEncoding;
+    std::optional<TgaSourceLayout> tgaSourceLayout;
+    // Present only when the resource decoder retained an exact native
+    // processed payload in addition to decoded display/editing pixels.
+    std::optional<ProcessedTexturePayload> processedPayload;
+    TxiStorage txiStorage{TxiStorage::Unknown};
     DdsDialect ddsDialect = DdsDialect::Auto;
     // Readable does not imply game-compatible. Shown in info/GUI metadata.
     std::vector<std::string> compatibilityWarnings;

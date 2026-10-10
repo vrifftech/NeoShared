@@ -1,6 +1,7 @@
 #include "neoshared/erf/Archive.hpp"
 
 #include "neoshared/erf/Utils.hpp"
+#include "neoshared/erf/Operation.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -720,15 +721,21 @@ std::array<char, 4> make_header(const char* literal) {
 }
 
 void read_exact(std::istream& in, char* data, std::streamsize size, const char* what) {
-    in.read(data, size);
-    if (!in) {
-        std::string detail;
-        if (auto* archive_stream = dynamic_cast<detail::ArchiveInputStream*>(&in)) {
-            detail = archive_stream->last_error();
+    do {
+        checkOperation();
+        const auto count = std::min(size, static_cast<std::streamsize>(kDataSafeIoBufferSize));
+        in.read(data, count);
+        if (!in) {
+            std::string detail;
+            if (auto* archive_stream = dynamic_cast<detail::ArchiveInputStream*>(&in)) {
+                detail = archive_stream->last_error();
+            }
+            throw ErfError(std::string("Unexpected end of archive while reading ") + what +
+                           (detail.empty() ? std::string(".") : std::string(": ") + detail));
         }
-        throw ErfError(std::string("Unexpected end of archive while reading ") + what +
-                       (detail.empty() ? std::string(".") : std::string(": ") + detail));
-    }
+        size -= count;
+        if (size > 0) data += count;
+    } while (size > 0);
 }
 
 std::uint16_t read_u16(std::istream& in) {
@@ -1215,6 +1222,7 @@ void ensure_unique_loaded_resource_filenames(const std::vector<Resource>& resour
     std::unordered_set<std::string> seen;
     seen.reserve(resources.size());
     for (const auto& res : resources) {
+        checkOperation();
         const std::string name = resource_filename_for_archive(res, profile);
         if (!seen.insert(normalized_filename_resource_key(name, disk_format)).second) {
             throw ErfError("Malformed archive: duplicate resource filename " + name + ".");
@@ -1464,6 +1472,7 @@ void ensure_unique_loaded_resource_keys(const std::vector<Resource>& resources, 
     std::unordered_set<std::string> seen;
     seen.reserve(resources.size());
     for (const auto& res : resources) {
+        checkOperation();
         const std::string normalized = string_to_resref(res.resref, extended_resrefs);
         if (normalized.empty()) {
             throw ErfError("Malformed archive: resource key sanitizes to an empty ResRef.");
@@ -1926,11 +1935,15 @@ std::string read_sized_string(std::istream& in, std::uint32_t size) {
         throw ErfError("Localized string size exceeds the safety limit.");
     }
     std::string text(size, '\0');
-    if (size > 0) {
-        in.read(text.data(), static_cast<std::streamsize>(size));
-        if (in.gcount() < static_cast<std::streamsize>(size)) {
+    for (std::size_t offset = 0; offset < text.size();) {
+        checkOperation();
+        const auto count = std::min(text.size() - offset, kDataSafeIoBufferSize);
+        in.read(text.data() + offset, static_cast<std::streamsize>(count));
+        if (in.gcount() < static_cast<std::streamsize>(count)) {
             in.clear();
+            break;
         }
+        offset += count;
     }
     return text;
 }
@@ -2342,6 +2355,7 @@ void copy_stream_bytes(std::istream& in, std::ostream& out, std::uint64_t bytes)
     std::array<char, kDataSafeIoBufferSize> buffer{};
     std::uint64_t remaining = bytes;
     while (remaining > 0) {
+        checkOperation();
         const std::size_t want = static_cast<std::size_t>(std::min<std::uint64_t>(buffer.size(), remaining));
         in.read(buffer.data(), static_cast<std::streamsize>(want));
         const auto got = in.gcount();
@@ -2401,6 +2415,7 @@ void inflate_bytes_to_stream(const std::vector<std::uint8_t>& payload,
     std::uint64_t produced_total = 0;
     int ret = Z_OK;
     do {
+        checkOperation();
         stream.next_out = buffer.data();
         stream.avail_out = static_cast<uInt>(buffer.size());
         ret = inflate(&stream, Z_NO_FLUSH);
@@ -2916,6 +2931,7 @@ bool ErfArchive::is_valid_archive(const std::filesystem::path& filename) {
 }
 
 void ErfArchive::load(const std::filesystem::path& filename) {
+    checkOperation();
     if (!file_exists(filename)) {
         throw ErfError("Unable to load file \"" + path_to_string(filename) + "\", file not found!");
     }
@@ -2995,6 +3011,7 @@ void ErfArchive::release_input_handle() noexcept {
 
 void ErfArchive::load_open_stream(const std::filesystem::path& filename) {
     try {
+        checkOperation();
         const auto archive_size = checked_open_archive_stream_size(archive_stream_, filename);
         Header next_header{};
         const auto first16 = read_char_array<16>(archive_stream_);
@@ -3375,6 +3392,7 @@ void ErfArchive::load_open_stream(const std::filesystem::path& filename) {
             ensure_unique_loaded_resource_keys(resources_, resref32_);
         }
 
+        checkOperation();
         header_ = next_header;
         has_header_ = true;
         filename_ = filename;

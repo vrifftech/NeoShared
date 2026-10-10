@@ -18,6 +18,8 @@ struct TlkResolution {
     std::optional<std::string> text;
     std::uint32_t flags = 0;
     std::filesystem::path source;
+    std::optional<std::size_t> rawTextByteCount, rawTrimmedTextByteCount;
+    std::optional<float> soundLength;
     std::string problem() const;
 };
 
@@ -48,6 +50,8 @@ private:
     std::uint32_t languageId_ = 0;
     std::vector<std::string> strings_;
     std::vector<std::uint32_t> flags_;
+    std::vector<std::uint32_t> textByteCounts_;
+    std::vector<float> soundLengths_;
     std::unordered_map<std::uint32_t, std::string> sparseStrings_;
 };
 

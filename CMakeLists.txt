@@ -14,6 +14,21 @@ target_include_directories(neoshared_path INTERFACE
 )
 target_compile_features(neoshared_path INTERFACE cxx_std_17)
 
+# Portable GLU arithmetic recovered from the supplied Android game library.
+# GL state and game-specific upload selection remain in the consuming tool.
+add_library(neoshared_glu
+    glu/ByteMipmaps.cpp
+    glu/Perspective.cpp
+)
+add_library(neoshared::glu ALIAS neoshared_glu)
+target_include_directories(neoshared_glu PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_compile_features(neoshared_glu PUBLIC cxx_std_17)
+if(MSVC)
+    target_compile_options(neoshared_glu PRIVATE /W4 /permissive- /fp:strict)
+else()
+    target_compile_options(neoshared_glu PRIVATE -Wall -Wextra -Wpedantic -ffp-contract=off -fno-fast-math)
+endif()
+
 add_library(neoshared_tabular
     tabular/TabularData.cpp
 )
@@ -22,6 +37,24 @@ target_include_directories(neoshared_tabular PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/tabular
 )
 target_compile_features(neoshared_tabular PUBLIC cxx_std_17)
+
+# Reusable binary/text 2DA and GDA codec. Neo2DA retains its document/UI policy.
+add_library(neoshared_twoda twoda/Common.cpp twoda/TwoDAFile.cpp)
+add_library(neoshared::twoda ALIAS neoshared_twoda)
+target_include_directories(neoshared_twoda PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(neoshared_twoda PUBLIC neoshared::tabular)
+target_compile_features(neoshared_twoda PUBLIC cxx_std_17)
+
+# BWM/WOK serialized geometry; game room-query policy stays in NeoMDL.
+add_library(neoshared_bwm bwm/BwmFile.cpp)
+add_library(neoshared::bwm ALIAS neoshared_bwm)
+target_include_directories(neoshared_bwm PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_compile_features(neoshared_bwm PUBLIC cxx_std_17)
+
+add_library(neoshared_lip lip/LipFile.cpp)
+add_library(neoshared::lip ALIAS neoshared_lip)
+target_include_directories(neoshared_lip PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_compile_features(neoshared_lip PUBLIC cxx_std_17)
 
 add_library(neoshared_json
     json/SimpleJson.cpp
@@ -153,14 +186,13 @@ if(NEOSHARED_ENABLE_ERF)
     endif()
 endif()
 
-# Binary Odyssey MDL/MDX parsing and transforms have no wxWidgets or tool-repository dependency.
-add_subdirectory(model EXCLUDE_FROM_ALL)
+# KEY/BIF indexing is shared by the archive browser and model resource lookup.
+if(NEOSHARED_ENABLE_ERF)
+    add_subdirectory(bif EXCLUDE_FROM_ALL)
+endif()
 
 # Game textures have no wxWidgets, PNG/JPEG, or tool-repository dependency.
 add_subdirectory(texture EXCLUDE_FROM_ALL)
-
-# Typed, renderer-independent texture/material metadata.
-add_subdirectory(material EXCLUDE_FROM_ALL)
 
 add_library(neoshared_wx INTERFACE)
 add_library(neoshared::wx ALIAS neoshared_wx)

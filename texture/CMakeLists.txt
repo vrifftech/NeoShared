@@ -2,6 +2,7 @@ add_library(neoshared_texture STATIC
     Image.cpp
     FileUtil.cpp
     Txi.cpp
+    TxiStream.cpp
 )
 add_library(neoshared::texture ALIAS neoshared_texture)
 target_include_directories(neoshared_texture PUBLIC

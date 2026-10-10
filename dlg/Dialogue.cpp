@@ -39,8 +39,13 @@ void resolveText(Line& line, const GffStruct& object, const ReadOptions& options
     line.strref = localized->strref;
     const auto id = options.language * 2u + options.gender;
     std::optional<std::string> local;
+    std::optional<std::size_t> localBytes, localTrimmedBytes;
     for (const auto& sub : localized->substrings) if (sub.stringid >= 0 && static_cast<std::uint32_t>(sub.stringid) == id) {
         if (local) throw GffError("Duplicate DLG localized substring");
+        const auto bytes=sub.GetString();
+        localBytes=bytes.size();
+        const auto first=bytes.find_first_not_of(' '),last=bytes.find_last_not_of(' ');
+        localTrimmedBytes=first==std::string::npos?0u:last-first+1u;
         local = decode(sub.GetString(), options.language);
     }
     // The opposite-gender local text is not silently substituted: it may be a
@@ -64,12 +69,15 @@ void resolveText(Line& line, const GffStruct& object, const ReadOptions& options
         line.textProblem = "Embedded dialogue text contains a NUL; confirm/correct the recorded words";
         return;
     }
-    if (local && notBlank(*local)) {
+    if (local && (options.preserveBlankText || notBlank(*local))) {
         line.text = *local; line.textSource = TextSource::Embedded;
+        line.rawTextByteCount=localBytes;line.rawTrimmedTextByteCount=localTrimmedBytes;
         if (external && notBlank(*external) && *external != *local)
             line.textProblem = "Embedded text and TLK text differ; confirm the words actually recorded";
-    } else if (external && notBlank(*external)) {
+    } else if (external && (options.preserveBlankText || notBlank(*external))) {
         line.text = *external; line.textSource = TextSource::TalkTable;
+        line.rawTextByteCount=resolution.rawTextByteCount;
+        line.rawTrimmedTextByteCount=resolution.rawTrimmedTextByteCount;line.textSoundLength=resolution.soundLength;
     } else if (line.strref != 0xffffffffu) {
         if (options.talkTables) line.textProblem = (resolution.status == neotlk::TlkResolutionStatus::Resolved ? "Empty TLK text" : resolution.problem()) + " (StrRef " + std::to_string(line.strref) + ")";
         else if (!tlk || !tlk->loaded()) line.textProblem = "Choose dialog.tlk to resolve StrRef " + std::to_string(line.strref);
@@ -79,6 +87,80 @@ void resolveText(Line& line, const GffStruct& object, const ReadOptions& options
     } else if (!localized->substrings.empty()) {
         line.textProblem = "No embedded text for the selected language/variant";
     } else line.textProblem = "No dialogue text";
+}
+// CResGFF native runtime reads use their supplied default when the field is
+// absent or has another serialized type. The core supplies native defaults.
+template<class Field>
+std::string runtimeString(const GffStruct& object,const char* label) {
+    const auto* value=dynamic_cast<const Field*>(field(object,label));
+    return value?value->GetString():std::string{};
+}
+template<class Field>
+auto numericField(const GffStruct& object, const char* label)
+    -> std::optional<decltype(Field{}.value)> {
+    const auto* raw=field(object,label);
+    if (!raw) return {};
+    const auto* value=dynamic_cast<const Field*>(raw);
+    if (!value) return {};
+    return value->value;
+}
+std::vector<Link> readLinks(const GffStruct& object, const char* label, const ReadOptions& options) {
+    std::vector<Link> result;
+    const auto* raw=field(object,label);
+    if (!raw) return result;
+    const auto* list=dynamic_cast<const GffList*>(raw);
+    if (!list) return result;
+    for (std::size_t i=0;i<list->count();++i) {
+        if (options.checkpoint) options.checkpoint();
+        const auto& item=*list->GetStruct(i);
+        Link link;
+        link.index=numericField<GffUInt32Field>(item,"Index");
+        link.active=runtimeString<GffResRefField>(item,"Active");link.active2=runtimeString<GffResRefField>(item,"Active2");
+        link.negate=numericField<GffByteField>(item,"Not");link.negate2=numericField<GffByteField>(item,"Not2");
+        link.logic=numericField<GffIntField>(item,"Logic");
+        for (std::size_t n=0;n<5;++n) {
+            const auto name="Param"+std::to_string(n+1);
+            link.parameters[n]=numericField<GffIntField>(item,name.c_str());
+            link.parameters2[n]=numericField<GffIntField>(item,(name+"b").c_str());
+        }
+        link.parameterString=runtimeString<GffExoStringField>(item,"ParamStrA");link.parameterString2=runtimeString<GffExoStringField>(item,"ParamStrB");
+        result.push_back(std::move(link));
+    }
+    return result;
+}
+void readRuntimeLine(Line& line, const GffStruct& node, const ReadOptions& options) {
+    line.listener=decode(runtimeString<GffExoStringField>(node,"Listener"),options.language);
+    line.script=runtimeString<GffResRefField>(node,"Script");line.script2=runtimeString<GffResRefField>(node,"Script2");
+    line.delay=numericField<GffUInt32Field>(node,"Delay");
+    line.waitFlags=numericField<GffUInt32Field>(node,"WaitFlags");
+    line.nodeUnskippable=numericField<GffIntField>(node,"NodeUnskippable");
+    line.soundFlags=numericField<GffByteField>(node,"SoundExists");
+    line.alienRaceNode=numericField<GffIntField>(node,"AlienRaceNode");
+    line.emotion=numericField<GffIntField>(node,"Emotion");
+    line.facialAnimation=numericField<GffIntField>(node,"FacialAnim");
+    line.fade.type=numericField<GffByteField>(node,"FadeType");
+    line.fade.color=numericField<GffPositionField>(node,"FadeColor");
+    line.fade.delay=numericField<GffFloatField>(node,"FadeDelay");
+    line.fade.length=numericField<GffFloatField>(node,"FadeLength");
+    auto& camera=line.camera;
+    camera.angle=numericField<GffUInt32Field>(node,"CameraAngle");
+    camera.id=numericField<GffIntField>(node,"CameraID");
+    camera.heightOffset=numericField<GffFloatField>(node,"CamHeightOffset");
+    camera.targetHeightOffset=numericField<GffFloatField>(node,"TarHeightOffset");
+    camera.animation=numericField<GffWordField>(node,"CameraAnimation");
+    camera.videoEffect=numericField<GffIntField>(node,"CamVidEffect");
+    camera.fieldOfView=numericField<GffFloatField>(node,"CamFieldOfView");
+    line.links=readLinks(node,line.kind==NodeKind::Entry?"RepliesList":"EntriesList",options);
+    if (const auto* list=dynamic_cast<const GffList*>(field(node,"AnimList"))) {
+        for (std::size_t i=0;i<list->count();++i) {
+            if (options.checkpoint) options.checkpoint();
+            const auto& item=*list->GetStruct(i);
+            Animation animation;
+            animation.participant=decode(runtimeString<GffExoStringField>(item,"Participant"),options.language);
+            animation.animation=numericField<GffWordField>(item,"Animation");
+            line.animations.push_back(std::move(animation));
+        }
+    }
 }
 void append(Dialogue& result, const GffStruct& root, const char* label, NodeKind kind, const ReadOptions& options) {
     const auto* value = field(root, label);
@@ -102,10 +184,31 @@ void append(Dialogue& result, const GffStruct& root, const char* label, NodeKind
                 else throw GffError("Invalid SoundExists field type");
             }
             resolveText(line, *node, options);
+            if (options.runtimeFields) readRuntimeLine(line,*node,options);
         } catch (const GffError& error) { line.malformed = true; line.textProblem = std::string("Invalid node: ") + error.what(); }
         catch (const std::invalid_argument& error) { line.malformed = true; line.textProblem = std::string("Invalid text: ") + error.what(); }
         result.lines.push_back(std::move(line));
     }
+}
+Dialogue readParsed(const GffFile& file, const ReadOptions& options) {
+    if (file.filetype() != "DLG " || file.isGff4() || (file.version() != "V3.2" && file.version() != "V3.3"))
+        throw GffError("Expected a classic KotOR/KotOR II DLG, not " + file.filetype() + file.version());
+    if (!file.root() || (!field(*file.root(), "EntryList") && !field(*file.root(), "ReplyList")))
+        throw GffError("The DLG does not contain EntryList or ReplyList");
+    Dialogue result;
+    append(result,*file.root(),"EntryList",NodeKind::Entry,options);
+    append(result,*file.root(),"ReplyList",NodeKind::Reply,options);
+    if (options.runtimeFields) {
+        result.startingLinks=readLinks(*file.root(),"StartingList",options);
+        result.cameraModel=runtimeString<GffResRefField>(*file.root(),"CameraModel");
+        result.conversationType=numericField<GffIntField>(*file.root(),"ConversationType");
+        result.alienRaceOwner=numericField<GffIntField>(*file.root(),"AlienRaceOwner");
+        result.skippable=numericField<GffByteField>(*file.root(),"Skippable");
+        result.oldHitCheck=numericField<GffByteField>(*file.root(),"OldHitCheck");
+        result.delayEntry=numericField<GffUInt32Field>(*file.root(),"DelayEntry");
+        result.delayReply=numericField<GffUInt32Field>(*file.root(),"DelayReply");
+    }
+    return result;
 }
 } // namespace
 std::string Line::label() const { return (kind == NodeKind::Entry ? "Entry " : "Reply ") + std::to_string(index); }
@@ -123,13 +226,17 @@ Dialogue read(const std::filesystem::path& path, const ReadOptions& options) {
     if (!input || (header != "DLG V3.2" && header != "DLG V3.3"))
         throw GffError("Expected a classic KotOR/KotOR II DLG header");
     GffFile file; file.LoadFile(path);
-    if (file.filetype() != "DLG " || file.isGff4() || (file.version() != "V3.2" && file.version() != "V3.3"))
-        throw GffError("Expected a classic KotOR/KotOR II DLG, not " + file.filetype() + file.version());
-    if (!file.root() || (!field(*file.root(), "EntryList") && !field(*file.root(), "ReplyList")))
-        throw GffError("The DLG does not contain EntryList or ReplyList");
-    Dialogue result; result.source = path;
-    append(result, *file.root(), "EntryList", NodeKind::Entry, options);
-    append(result, *file.root(), "ReplyList", NodeKind::Reply, options);
+    auto result=readParsed(file,options);result.source=path;
     return result;
+}
+Dialogue readBytes(const std::vector<std::uint8_t>& bytes, const ReadOptions& options) {
+    if (options.gender > 1 || options.language > (std::numeric_limits<std::uint32_t>::max() - 1) / 2)
+        throw std::invalid_argument("Invalid DLG language/variant");
+    if (options.checkpoint) options.checkpoint();
+    if (bytes.size()<56 || bytes.size()>64u*1024u*1024u)
+        throw GffError("Choose a readable DLG file (maximum 64 MiB)");
+    GffFile file;file.LoadBytes(bytes);
+    if (options.checkpoint) options.checkpoint();
+    return readParsed(file,options);
 }
 } // namespace neoshared::dlg

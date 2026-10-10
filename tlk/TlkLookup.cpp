@@ -272,6 +272,7 @@ void TlkLookup::clear() {
     filename_.clear();
     languageId_ = 0;
     strings_.clear();
+    textByteCounts_.clear();soundLengths_.clear();
     flags_.clear(); classicV30_ = false; nativeEncodingUsable_ = false;
     sparseStrings_.clear();
 }
@@ -317,12 +318,15 @@ void TlkLookup::loadImpl(const std::filesystem::path& file, std::optional<TextEn
     } else {
         strings_.resize(table.entries().size());
         flags_.resize(table.entries().size());
+        textByteCounts_.resize(table.entries().size());soundLengths_.resize(table.entries().size());
         for (const TalkString& entry : table.entries()) {
             if (entry.strRef >= strings_.size()) {
                 throw std::runtime_error("TLK entry index exceeds the declared string table size.");
             }
             strings_[static_cast<std::size_t>(entry.strRef)] = entry.text;
             flags_[static_cast<std::size_t>(entry.strRef)] = entry.flags;
+            textByteCounts_[static_cast<std::size_t>(entry.strRef)] = entry.stringSize;
+            soundLengths_[static_cast<std::size_t>(entry.strRef)] = entry.soundLength;
         }
     }
 
@@ -364,6 +368,14 @@ TlkResolution TlkLookup::resolveEntry(std::uint32_t strref) const {
     if (classicV30_) {
         if (!nativeEncodingUsable_) { result.status = TlkResolutionStatus::EncodingUnavailable; return result; }
         result.flags = flags_.at(static_cast<std::size_t>(strref));
+        result.rawTextByteCount=textByteCounts_.at(static_cast<std::size_t>(strref));
+        // ASCII spaces retain one byte in classic source encodings and UTF-8.
+        // Subtract their decoded edge counts from the original encoded size.
+        const auto& value=strings_.at(static_cast<std::size_t>(strref));
+        const auto first=value.find_first_not_of(' '),last=value.find_last_not_of(' ');
+        result.rawTrimmedTextByteCount=first==std::string::npos?0u:
+            *result.rawTextByteCount-first-(value.size()-last-1u);
+        result.soundLength=soundLengths_.at(static_cast<std::size_t>(strref));
         if (result.flags & SKIP_ENTRY) { result.status = TlkResolutionStatus::Skipped; return result; }
         if (!(result.flags & TEXT_PRESENT)) { result.status = TlkResolutionStatus::TextNotPresent; return result; }
         if (raw->find('\0') != std::string::npos) { result.status = TlkResolutionStatus::EmbeddedNul; return result; }

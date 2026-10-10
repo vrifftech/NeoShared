@@ -250,41 +250,11 @@ std::string trim(std::string value) {
 }
 
 std::string sanitizeTxiPayload(std::string value) {
-    while (!value.empty() && value.back() == '\0') value.pop_back();
-    return value;
+    return trimTxiPadding(std::move(value));
 }
 
 bool iequals(const std::string& a, const std::string& b) {
     return asciiLower(a) == asciiLower(b);
-}
-
-std::vector<std::string> splitLines(const std::string& text) {
-    std::vector<std::string> lines;
-    std::istringstream in(text);
-    std::string line;
-    while (std::getline(in, line)) {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        lines.push_back(line);
-    }
-    if (!text.empty() && (text.back() == '\n' || text.back() == '\r')) {
-        // Preserve text-ish behavior without manufacturing an extra key line.
-    }
-    return lines;
-}
-
-std::string firstTokenLower(const std::string& line, std::string* restOut = nullptr) {
-    std::string stripped = trim(line);
-    if (stripped.empty() || stripped[0] == '#' || stripped[0] == ';') {
-        if (restOut) *restOut = {};
-        return {};
-    }
-    std::istringstream input(stripped);
-    std::string key;
-    input >> key;
-    std::string rest;
-    std::getline(input, rest);
-    if (restOut) *restOut = trim(rest);
-    return asciiLower(key);
 }
 
 std::optional<std::uint32_t> parseU32Loose(const std::string& value) {
@@ -329,6 +299,7 @@ std::uint8_t clampByte(double value) {
 bool layerHasAlpha(const TextureLayer& layer) {
     const auto imageHasAlpha = [](const TextureLayer& image) {
         for (std::size_t i = 3; i < image.rgba.size(); i += 4) {
+            if ((i & 262143u) == 3u) checkOperation();
             if (image.rgba[i] != 255) return true;
         }
         return false;
@@ -363,6 +334,7 @@ TextureLayer cropLayer(const TextureLayer& source, std::uint32_t x, std::uint32_
     }
     TextureLayer out = makeLayer(width, height);
     for (std::uint32_t row = 0; row < height; ++row) {
+        checkOperation();
         const std::size_t srcOffset = (static_cast<std::size_t>(y + row) * source.width + x) * 4;
         const std::size_t dstOffset = static_cast<std::size_t>(row) * width * 4;
         copyRgbaRowChecked(source, srcOffset, out, dstOffset, static_cast<std::size_t>(width) * 4);
@@ -405,6 +377,7 @@ TextureLayer composeCanvas(const TextureData& texture) {
             for (std::uint32_t xCell = 0; xCell < features.numX; ++xCell, ++index) {
                 const auto& layer = texture.layers[index];
                 for (std::uint32_t y = 0; y < layer.height; ++y) {
+                    checkOperation();
                     const std::uint64_t dstY = static_cast<std::uint64_t>(yCell) * first.height + y;
                     const std::uint64_t dstX = static_cast<std::uint64_t>(xCell) * first.width;
                     const std::uint64_t dstOffset64 = (dstY * canvas.width + dstX) * UINT64_C(4);
@@ -444,6 +417,7 @@ TextureLayer composeCanvas(const TextureData& texture) {
         }
         validateLayerStorage(layer, "Texture layer");
         for (std::uint32_t y = 0; y < layer.height; ++y) {
+            checkOperation();
             const std::size_t srcOffset = static_cast<std::size_t>(y) * layer.width * 4;
             const std::size_t dstOffset = (static_cast<std::size_t>(layerIndex) * layer.height + y) * canvas.width * 4;
             copyRgbaRowChecked(layer, srcOffset, canvas, dstOffset, static_cast<std::size_t>(layer.width) * 4);
@@ -1514,11 +1488,13 @@ std::vector<std::uint8_t> encodeLayerRaw(const TextureLayer& layer,
 
 TextureLayer decodeRawLayer(const std::uint8_t* data, std::size_t size, std::uint32_t width, std::uint32_t height,
                             std::uint8_t encoding, bool tpcFileOrientation) {
+    checkOperation();
     TextureLayer layer = makeLayer(width, height);
     const std::size_t pixels = static_cast<std::size_t>(width) * height;
     if (encoding == kTpcEncodingGray) {
         if (size < pixels) throw TextureError("TPC grayscale payload is truncated");
         for (std::size_t i = 0; i < pixels; ++i) {
+            if ((i & 65535u) == 0u) checkOperation();
             layer.rgba[i * 4 + 0] = data[i];
             layer.rgba[i * 4 + 1] = data[i];
             layer.rgba[i * 4 + 2] = data[i];
@@ -1527,6 +1503,7 @@ TextureLayer decodeRawLayer(const std::uint8_t* data, std::size_t size, std::uin
     } else if (encoding == kTpcEncodingRgb) {
         if (size < pixels * 3) throw TextureError("TPC RGB payload is truncated");
         for (std::size_t i = 0; i < pixels; ++i) {
+            if ((i & 65535u) == 0u) checkOperation();
             layer.rgba[i * 4 + 0] = data[i * 3 + 0];
             layer.rgba[i * 4 + 1] = data[i * 3 + 1];
             layer.rgba[i * 4 + 2] = data[i * 3 + 2];
@@ -1539,6 +1516,7 @@ TextureLayer decodeRawLayer(const std::uint8_t* data, std::size_t size, std::uin
         if (size < pixels * 4) throw TextureError("TPC BGRA payload is truncated");
         const bool swizzled = isPowerOfTwo(width) && isPowerOfTwo(height);
         for (std::uint32_t y = 0; y < height; ++y) {
+            checkOperation();
             for (std::uint32_t x = 0; x < width; ++x) {
                 const std::size_t destinationPixel = static_cast<std::size_t>(y) * width + x;
                 const std::size_t sourcePixel = swizzled
@@ -1695,6 +1673,9 @@ void validateLayer(const TextureLayer& layer) {
 
 std::string normalizeTxiFooter(std::string txi) {
     txi = sanitizeTxiPayload(std::move(txi));
+    const auto records=scanTxiStream(txi);
+    if(std::any_of(records.begin(),records.end(),[](const auto& line){return line.binary;}))
+        return txi; // Binary float bytes are not whitespace/newlines to normalize.
     txi = trim(txi);
     if (txi.empty()) return {};
     std::string out;
@@ -1944,9 +1925,9 @@ std::string cubeFaceToString(CubeFace face) {
 
 TxiFeatures parseTxiFeatures(const std::string& txi) {
     TxiFeatures features;
-    for (const auto& line : splitLines(txi)) {
-        std::string rest;
-        const std::string key = firstTokenLower(line, &rest);
+    for (const auto& entry : parseTxiEntries(txi)) {
+        if(entry.listData||entry.listTerminator||entry.blankOrComment)continue;
+        const auto& rest=entry.value;const auto& key=entry.key;
         if (key.empty()) continue;
         if (key == "cube") {
             if (auto v = parseU32Loose(rest)) features.cube = *v != 0;
@@ -1982,10 +1963,9 @@ TxiFeatures parseTxiFeatures(const std::string& txi) {
 std::optional<std::string> getTxiValue(const std::string& txi, const std::string& key) {
     const std::string wanted = asciiLower(trim(key));
     std::optional<std::string> result;
-    for (const auto& line : splitLines(txi)) {
-        std::string rest;
-        if (firstTokenLower(line, &rest) == wanted) result = rest;
-    }
+    for (const auto& entry : parseTxiEntries(txi))
+        if(!entry.listData&&!entry.listTerminator&&!entry.blankOrComment&&entry.key==wanted)
+            result=entry.value;
     // Match parseTxiFeatures: the last scalar occurrence is effective.
     return result;
 }
@@ -2004,19 +1984,15 @@ std::string editScalarTxi(const std::string& txi, const std::string& key,
     std::size_t last = std::string::npos;
     std::string newline = "\n";
     bool haveNewline = false;
-    for (std::size_t begin = 0; begin < txi.size();) {
-        auto end = txi.find_first_of("\r\n", begin);
-        if (end == std::string::npos) end = txi.size();
-        auto next = end;
-        if (next < txi.size()) {
-            ++next;
-            if (txi[end] == '\r' && next < txi.size() && txi[next] == '\n') ++next;
-            if (!haveNewline) { newline = txi.substr(end, next - end); haveNewline = true; }
+    const auto records=scanTxiStream(txi);
+    for (const auto& record : records) {
+        const auto begin=record.begin,end=record.end,next=record.next;
+        if (!haveNewline && end<next && !record.binary) {
+            newline=txi.substr(end,next-end);haveNewline=true;
         }
-        const bool match = firstTokenLower(txi.substr(begin, end - begin)) == wanted;
-        if (match) last = lines.size();
-        lines.push_back({begin, end, next, match});
-        begin = next;
+        const bool match=!record.listData&&!record.binary&&record.key==wanted;
+        if(match)last=lines.size();
+        lines.push_back({begin,end,next,match});
     }
     std::string out;
     for (std::size_t i = 0; i < lines.size(); ++i) {
@@ -2035,6 +2011,8 @@ std::string editScalarTxi(const std::string& txi, const std::string& key,
         if (!out.empty() && out.back() != '\r' && out.back() != '\n') out += newline;
         out += directive->name + " " + *value + newline;
     }
+    const auto consumed=records.empty()?0u:records.back().next;
+    out.append(txi,consumed,txi.size()-consumed);
     return out;
 }
 } // namespace
@@ -2454,6 +2432,7 @@ TextureData textureFromRgba(TextureFileKind kind,
     texture.canvasHeight = layer.height;
     texture.layers.push_back(std::move(layer));
     texture.txi = sanitizeTxiPayload(std::move(txi));
+    texture.txiStorage=TxiStorage::Sidecar;
     texture.sourceEncoding = std::move(sourceEncoding);
     refreshHasAlpha(texture);
     applyTxiLayout(texture);
@@ -2532,6 +2511,7 @@ TextureData readTgaTextureBytesInternal(const std::vector<std::uint8_t>& bytes,
     };
 
     auto storePixel = [&](std::size_t linearIndex, const std::array<std::uint8_t, 4>& pixel) {
+        if ((linearIndex & 65535u) == 0u) checkOperation();
         if (linearIndex >= pixelCount) throw TextureError("TGA packet exceeds the declared pixel count");
         const std::uint32_t sx = static_cast<std::uint32_t>(linearIndex % width);
         const std::uint32_t sy = static_cast<std::uint32_t>(linearIndex / width);
@@ -2550,7 +2530,7 @@ TextureData readTgaTextureBytesInternal(const std::vector<std::uint8_t>& bytes,
             layer.rgba[dst + 0] = pixel[0];
             layer.rgba[dst + 1] = pixel[0];
             layer.rgba[dst + 2] = pixel[0];
-            layer.rgba[dst + 3] = 255;
+            layer.rgba[dst + 3] = pixelSize == 16 ? pixel[1] : 255;
         } else if (pixelSize == 16) {
             const std::uint16_t raw = static_cast<std::uint16_t>(pixel[0] | (pixel[1] << 8));
             layer.rgba[dst + 0] = static_cast<std::uint8_t>(((raw >> 10) & 0x1F) << 3);
@@ -2598,6 +2578,8 @@ TextureData readTgaTextureBytesInternal(const std::vector<std::uint8_t>& bytes,
     texture.layers.push_back(std::move(layer));
     texture.txi = std::move(txi);
     texture.sourceEncoding = std::to_string(pixelSize) + "-bit TGA" + (rle ? " RLE" : "");
+    texture.tgaSourceLayout=TgaSourceLayout{imageType,pixelSize,flags,colorMapSize};
+    texture.txiStorage=TxiStorage::Sidecar;
     if ((bytes[17] & 0x30) != 0) {
         texture.compatibilityWarnings.push_back("This TGA uses an origin flag ignored by the supplied game loaders. Explicit conversion writes bottom-origin rows; an unchanged Save preserves the source.");
     }
@@ -2646,7 +2628,7 @@ TextureData readTpcTextureBytesInternal(const std::vector<std::uint8_t>& bytes,
     std::uint32_t layerCount = layout.layerCount;
     std::uint32_t layerWidth = layout.layerWidth;
     std::uint32_t layerHeight = layout.layerHeight;
-    const bool cubeMap = layout.cubeMap;
+    bool cubeMap = layout.cubeMap;
     const TextureCompression compression = layout.compression;
 
     auto mipSize = [&](std::uint32_t w, std::uint32_t h) -> std::size_t {
@@ -2660,6 +2642,16 @@ TextureData readTpcTextureBytesInternal(const std::vector<std::uint8_t>& bytes,
     }
 
     const TxiFeatures features = parseTxiFeatures(txi);
+    // The uncompressed processed cube has no compressed-size header heuristic.
+    // Both supplied K2 callers identify its six face-major surfaces from the
+    // TXI cube flag and the 6:1 processed container dimensions.
+    if (!cubeMap && features.cube && headerWidth != 0 &&
+        headerHeight == headerWidth * 6u) {
+        cubeMap = true;
+        layerCount = 6;
+        layerWidth = headerWidth;
+        layerHeight = headerWidth;
+    }
     bool animated = false;
     if (!cubeMap && iequals(features.procedureType, "cycle") && features.numX > 0 && features.numY > 0 && features.fps > 0.0) {
         animated = true;
@@ -2706,6 +2698,7 @@ TextureData readTpcTextureBytesInternal(const std::vector<std::uint8_t>& bytes,
     texture.canvasWidth = headerWidth;
     texture.canvasHeight = headerHeight;
     texture.txi = txi;
+    texture.txiStorage=TxiStorage::Embedded;
     texture.alphaBlending = alphaBlending;
     texture.preferredCompression = compression;
     texture.compressed = !uncompressed && (compression == TextureCompression::Dxt1 || compression == TextureCompression::Dxt5);
@@ -2714,9 +2707,27 @@ TextureData readTpcTextureBytesInternal(const std::vector<std::uint8_t>& bytes,
     texture.sourceMipMapCount = mipMapCount;
     texture.sourceEncoding = layout.encodingName;
 
+    // Preserve the exact processed storage beside the decoded editor image.
+    // Xbox swizzled BGRA is not a K2 desktop processed upload layout.
+    std::optional<ProcessedTexturePayload> processedPayload;
+    if (encoding != kTpcEncodingSwizzledBgra) {
+        ProcessedTexturePayload payload;
+        payload.encoding = encoding == kTpcEncodingGray ? ProcessedSourceEncoding::Gray8 :
+                           encoding == kTpcEncodingRgb ? ProcessedSourceEncoding::Rgb8 :
+                           ProcessedSourceEncoding::Rgba8;
+        payload.compression = compression == TextureCompression::Dxt1 ? ProcessedCompressionCodec::Bc1 :
+                              compression == TextureCompression::Dxt5 ? ProcessedCompressionCodec::Bc3 :
+                              ProcessedCompressionCodec::None;
+        payload.target = cubeMap ? ProcessedTextureTarget::CubeMap : ProcessedTextureTarget::Texture2D;
+        payload.bytesPerPixel = encoding == kTpcEncodingGray ? 1u : encoding == kTpcEncodingRgb ? 3u : 4u;
+        payload.surfaces.resize(layerCount);
+        processedPayload = std::move(payload);
+    }
+
     std::size_t offset = 128;
     const std::size_t payloadLimit = txiOffset;
     for (std::uint32_t layerIndex = 0; layerIndex < layerCount; ++layerIndex) {
+        checkOperation();
         std::uint32_t w = layerWidth;
         std::uint32_t h = layerHeight;
         TextureLayer layer;
@@ -2725,6 +2736,14 @@ TextureData readTpcTextureBytesInternal(const std::vector<std::uint8_t>& bytes,
             const std::size_t size = mipSize(w, h);
             if (offset + size > payloadLimit) {
                 throw TextureError("TPC payload is truncated before a declared mipmap");
+            }
+            if (processedPayload) {
+                ProcessedTextureLevel nativeLevel;
+                nativeLevel.width = w;
+                nativeLevel.height = h;
+                nativeLevel.bytes.assign(bytes.begin() + static_cast<std::ptrdiff_t>(offset),
+                                         bytes.begin() + static_cast<std::ptrdiff_t>(offset + size));
+                processedPayload->surfaces[layerIndex].levels.push_back(std::move(nativeLevel));
             }
             TextureLayer decoded;
             if (!uncompressed && compression == TextureCompression::Dxt1) {
@@ -2751,6 +2770,7 @@ TextureData readTpcTextureBytesInternal(const std::vector<std::uint8_t>& bytes,
         // Processed TPC stores the renderer face order directly.
         texture.cubeFaces = allCubeFaces();
     }
+    texture.processedPayload = std::move(processedPayload);
     if (offset != payloadLimit) throw TextureError("TPC declared payload does not match its decoded layer/mip spans");
     texture.compatibilityWarnings = tpcGameLayoutIssues(layout, features, animated, cubeMap,
                                                        layerWidth, layerHeight, layerCount, mipMapCount,
@@ -2774,6 +2794,7 @@ TextureLayer decodeTxbRawLayer(const std::uint8_t* data,
     const bool swizzled = isPowerOfTwo(width) && isPowerOfTwo(height);
     TextureLayer layer = makeLayer(width, height);
     for (std::uint32_t y = 0; y < height; ++y) {
+        checkOperation();
         for (std::uint32_t x = 0; x < width; ++x) {
             const std::size_t destinationPixel = static_cast<std::size_t>(y) * width + x;
             const std::size_t sourcePixel = swizzled
@@ -2861,6 +2882,7 @@ TextureData readTxbTextureBytesInternal(const std::vector<std::uint8_t>& bytes,
     const std::size_t txiOffset = static_cast<std::size_t>(128) + dataSize;
     if (txiOffset < bytes.size()) {
         texture.txi = sanitizeTxiPayload(std::string(bytes.begin() + static_cast<std::ptrdiff_t>(txiOffset), bytes.end()));
+        texture.txiStorage=TxiStorage::Embedded;
     }
     texture.notes = "Xbox TXB input is supported for viewing and conversion; NeoTPC does not write TXB containers. ";
     refreshHasAlpha(texture);
@@ -3156,6 +3178,7 @@ TextureLayer decodeDdsMip(const std::uint8_t* data,
 
     TextureLayer layer = makeLayer(width, height);
     for (std::uint32_t y = 0; y < height; ++y) {
+        checkOperation();
         const auto* row = data + static_cast<std::size_t>(y) * rowPitch;
         for (std::uint32_t x = 0; x < width; ++x) {
             const std::size_t index = static_cast<std::size_t>(y) * width + x;
@@ -3218,6 +3241,7 @@ TextureData readDdsTextureBytesInternal(const std::vector<std::uint8_t>& bytes,
     texture.kind = TextureFileKind::Dds;
     texture.sourcePath = path;
     texture.txi = sanitizeTxiPayload(std::move(txi));
+    texture.txiStorage=TxiStorage::Sidecar;
 
     if (bytes.size() >= 128 && bytes[0] == 'D' && bytes[1] == 'D' && bytes[2] == 'S' && bytes[3] == ' ') {
         if (readLE32(bytes, 4) != 124) throw TextureError("DDS header size is not 124");
@@ -3584,6 +3608,7 @@ static TextureData readTxiTexture(const std::filesystem::path& path) {
     texture.kind = TextureFileKind::Txi;
     texture.sourcePath = path;
     texture.txi = sanitizeTxiPayload(std::string(bytes.begin(), bytes.end()));
+    texture.txiStorage=TxiStorage::Sidecar;
     texture.sourceEncoding = "TXI text";
     texture.notes = "TXI-only document; open the matching TGA/TPC/TXB/DDS to preview pixels.";
     return texture;
@@ -3602,6 +3627,7 @@ std::string readTextureSidecar(const std::filesystem::path& path) {
 }
 
 TextureData readTextureFile(const std::filesystem::path& path) {
+    checkOperation();
     const std::string ext = extensionLower(path);
     if (ext == "txi") return readTxiTexture(path);
     const auto bytes = readFileBytes(path);
@@ -3615,12 +3641,14 @@ TextureData readTextureFile(const std::filesystem::path& path) {
 TextureData decodeTextureBytes(const std::vector<std::uint8_t>& bytes,
                              const std::filesystem::path& virtualPath,
                              std::string sidecarTxi) {
+    checkOperation();
     const std::string ext = extensionLower(virtualPath);
     if (ext == "txi") {
         TextureData texture;
         texture.kind = TextureFileKind::Txi;
         texture.sourcePath = virtualPath;
         texture.txi = sanitizeTxiPayload(std::string(bytes.begin(), bytes.end()));
+    texture.txiStorage=TxiStorage::Sidecar;
         texture.sourceEncoding = "TXI text";
         texture.notes = "TXI-only document; open the matching TGA/TPC/TXB/DDS to preview pixels.";
         return texture;
@@ -3869,6 +3897,7 @@ std::string textureMetadataText(const TextureData& texture, const TextureSaveOpt
 }
 
 void setTextureAlpha(TextureData& texture, std::uint8_t alpha) {
+    texture.processedPayload.reset();
     for (auto& layer : texture.layers) {
         for (std::size_t i = 3; i < layer.rgba.size(); i += 4) { if((i & 262143u)==3)checkOperation(); layer.rgba[i] = alpha; }
         for (auto& mip : layer.mipmaps) {
@@ -3879,6 +3908,7 @@ void setTextureAlpha(TextureData& texture, std::uint8_t alpha) {
 }
 
 void scaleTextureAlpha(TextureData& texture, double scale) {
+    texture.processedPayload.reset();
     if (!std::isfinite(scale) || scale < 0.0) {
         throw TextureError("Alpha scale must be a finite, non-negative number");
     }
@@ -3892,6 +3922,7 @@ void scaleTextureAlpha(TextureData& texture, double scale) {
 }
 
 void invertTextureAlpha(TextureData& texture) {
+    texture.processedPayload.reset();
     for (auto& layer : texture.layers) {
         for (std::size_t i = 3; i < layer.rgba.size(); i += 4) { if((i & 262143u)==3)checkOperation(); layer.rgba[i] = static_cast<std::uint8_t>(255 - layer.rgba[i]); }
         for (auto& mip : layer.mipmaps) {
@@ -3902,10 +3933,12 @@ void invertTextureAlpha(TextureData& texture) {
 }
 
 void flipTextureHorizontal(TextureData& texture) {
+    texture.processedPayload.reset();
     for (auto& layer : texture.layers) layer = flipLayerHorizontalCopy(std::move(layer));
 }
 
 void flipTextureVertical(TextureData& texture) {
+    texture.processedPayload.reset();
     for (auto& layer : texture.layers) layer = flipLayerVerticalCopy(std::move(layer));
 }
 
