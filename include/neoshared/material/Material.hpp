@@ -33,6 +33,9 @@ struct TxiProperties {
     std::optional<float> waterAlpha;
 
     std::optional<BumpMapKind> bumpMapKind;
+    // Engine Parse<int> keeps the complete initialized integer, including
+    // values outside the UI enum. Processed textures accept any nonzero kind.
+    std::optional<std::int32_t> engineBumpMapKind;
     std::optional<bool> diffuseBump;
     std::optional<bool> specularBump;
     std::optional<float> bumpMapScaling;
@@ -60,15 +63,18 @@ struct TxiProperties {
     std::optional<std::int16_t> defaultWidth;
     std::optional<std::int16_t> defaultHeight;
     std::optional<float> fps;
-    // NeoMDL preview extensions; not established Odyssey TXI tokens.
-    std::optional<float> scrollX;
-    std::optional<float> scrollY;
 };
 
 enum class MappingStatus { Mapped, Unmapped, Invalid, NonDirective };
 struct MappedTxiEntry {
-    texture::TxiEntry source;
+    neoshared::texture::TxiEntry source;
     MappingStatus status{MappingStatus::NonDirective};
+};
+
+struct EngineMaterialTextureNames {
+    std::string bumpMap;
+    std::string bumpyShiny;
+    std::string environmentMap;
 };
 
 struct TxiMetadata {
@@ -77,22 +83,23 @@ struct TxiMetadata {
     std::string sourceText;
     TxiProperties properties;
     std::vector<MappedTxiEntry> entries;
-    std::vector<texture::TxiValidationIssue> issues;
+    std::vector<neoshared::texture::TxiValidationIssue> issues;
+    // Material::Init has its own first-token parser. Keep that initialized
+    // binding state separate from the editor's complete directive values.
+    std::optional<EngineMaterialTextureNames> engineTextureNames;
 };
 
-// Limits are checked before calling the shared TXI tokenizer/validator. The
-// functions below throw std::length_error rather than silently truncate input.
-inline constexpr std::size_t kMaxMaterialTxiBytes = 1024u * 1024u;
-inline constexpr std::size_t kMaxMaterialTxiLines = 16384u;
-inline constexpr std::size_t kMaxMaterialTxiLineBytes = 4096u;
 TxiMetadata parseMaterialTxi(const std::string& text);
 
-enum class PixelAlpha { Opaque, Binary, Fractional };
+
+TxiMetadata parseAsciiMaterialTxi(const std::string& text, bool kotor1);
+
+enum class PixelAlpha { Opaque, Packed, Fractional };
 
 struct TextureFacts {
-    texture::TextureFileKind kind{texture::TextureFileKind::Unknown};
-    texture::TextureCompression compression{texture::TextureCompression::Auto};
-    texture::DdsDialect ddsDialect{texture::DdsDialect::Auto};
+    neoshared::texture::TextureFileKind kind{neoshared::texture::TextureFileKind::Unknown};
+    neoshared::texture::TextureCompression compression{neoshared::texture::TextureCompression::Auto};
+    neoshared::texture::DdsDialect ddsDialect{neoshared::texture::DdsDialect::Auto};
     std::uint32_t width{};
     std::uint32_t height{};
     std::uint32_t layerWidth{};
@@ -105,6 +112,10 @@ struct TextureFacts {
     bool cubeMap{};
     bool animated{};
     bool compressed{};
+    // Source storage, before the decoder expands display pixels to RGBA.
+    // Zero means the engine source byte layout has not been established.
+    std::uint8_t engineBytesPerPixel{};
+    bool engineProcessed{};
     // Only populated for a TPC/TXB or game-dialect DDS with a finite header
     // value. NOT pixel opacity, material alpha, or an alpha-test threshold.
     std::optional<float> headerAlphaBlending;
@@ -116,7 +127,7 @@ struct TextureMetadata {
 };
 
 // Copies small metadata only, never pixels or mipmaps. Does not mutate texture.
-TextureMetadata makeTextureMetadata(const texture::TextureData& texture);
+TextureMetadata makeTextureMetadata(const neoshared::texture::TextureData& texture);
 using TextureMetadataPtr = std::shared_ptr<const TextureMetadata>;
 using TextureMetadataLookup = std::function<TextureMetadataPtr(const std::string&)>;
 
