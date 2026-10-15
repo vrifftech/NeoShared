@@ -120,7 +120,7 @@ struct TxiFeatures {
     std::uint32_t numY = 0;
     std::uint32_t defaultWidth = 0;
     std::uint32_t defaultHeight = 0;
-    double fps = 0.0;
+    double fps = 1.0;
 };
 
 // Common conversion policy. jpegQuality is carried for interchange adapters;
@@ -231,6 +231,7 @@ struct TgaTxiPairPaths {
 void replaceTpcEmbeddedTxi(const std::filesystem::path& tpcPath,
                            const std::string& txi);
 
+std::string readTpcTxiBytes(const std::vector<std::uint8_t>& bytes);
 std::vector<std::uint8_t> patchTpcTxiBytes(const std::vector<std::uint8_t>& original, const std::string& txi);
 // Editors may retain exact whitespace; both paths perform the same layout checks.
 std::vector<std::uint8_t> patchTpcTxiBytes(const std::vector<std::uint8_t>& original, const std::string& txi, bool preserveFormatting);

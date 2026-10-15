@@ -2,6 +2,7 @@
 
 #include "neotlk/TextEncoding.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cctype>
 #include <limits>
@@ -268,11 +269,18 @@ std::string encodeTextBytes(std::string_view utf8, TextEncoding encoding) {
 
 TextEncoding detectClassicPreferredEncoding(std::uint32_t languageId,
                                             bool jadeV40,
-                                            const std::vector<std::string>& /*rawPayloads*/) {
-    // V3 has no per-entry encoding tag. In the supported Western/Polish
-    // language set, use one policy for the whole table. Byte patterns are not
-    // evidence: e.g. CP1252 pound signs and Spanish enye also occur in CP1250.
+                                            const std::vector<std::string>& rawPayloads) {
+    // V3 has no per-entry encoding tag. Retain the Western/Polish code-page
+    // policy even when individual payloads happen to validate as UTF-8.
     if (jadeV40) return TextEncoding::Utf8;
+    // The supplied dialogja.tlk establishes a Japanese V3 UTF-8 variant.
+    // Japanese also has legacy CP932 tables: language 131 alone is insufficient
+    // when opening a file, and mixed/invalid payloads must not be guessed per row.
+    if (languageId == kJapaneseLanguageId &&
+        std::all_of(rawPayloads.begin(), rawPayloads.end(),
+                    [](const std::string& raw) { return isValidUtf8(raw); })) {
+        return TextEncoding::Utf8;
+    }
     return languageId == 5u ? TextEncoding::Windows1250 : TextEncoding::Windows1252;
 }
 

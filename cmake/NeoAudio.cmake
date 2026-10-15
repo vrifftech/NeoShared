@@ -27,7 +27,7 @@ file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/neoshared_miniaudio.cpp" "#define MINIAU
 add_library(neoshared_audio_codec STATIC "${CMAKE_CURRENT_BINARY_DIR}/neoshared_miniaudio.cpp")
 target_include_directories(neoshared_audio_codec SYSTEM PUBLIC "${NEOSHARED_MINIAUDIO_ROOT}")
 target_compile_definitions(neoshared_audio_codec PUBLIC
-    MA_NO_RESOURCE_MANAGER MA_NO_ENGINE MA_NO_NODE_GRAPH MA_NO_GENERATION MA_NO_ENCODING MA_NO_FLAC)
+    MA_NO_RESOURCE_MANAGER MA_NO_GENERATION MA_NO_ENCODING MA_NO_FLAC)
 if(EMSCRIPTEN)
     # Use miniaudio's native Emscripten/WebAudio backend and its own threading
     # stubs. MA_NO_THREADING disables device APIs; never combine it with ma_device.
@@ -55,7 +55,6 @@ add_library(neoshared_audio STATIC
     "${_neoshared_audio_source}/Audio.cpp"
     "${_neoshared_audio_source}/Codecs.cpp"
     "${_neoshared_audio_source}/PlaybackCore.cpp"
-    "${_neoshared_audio_source}/OpenALPlayback.cpp"
     "${_neoshared_audio_source}/PlaybackDevice.cpp")
 add_library(neoshared::audio ALIAS neoshared_audio)
 target_link_libraries(neoshared_audio PUBLIC neoshared::path neoshared_audio_codec)

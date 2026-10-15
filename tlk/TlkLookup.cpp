@@ -307,8 +307,7 @@ void TlkLookup::loadImpl(const std::filesystem::path& file, std::optional<TextEn
     TalkTable table(neoshared::pathToUtf8(file));
     if (interpretation) table.reinterpretTextEncoding(*interpretation);
     classicV30_ = table.storageFormat() == TlkStorageFormat::ClassicV30;
-    nativeEncodingUsable_ = !classicV30_ || (table.preferredTextEncoding() != TextEncoding::Utf8 &&
-        (table.language() <= 5u || interpretation.has_value()));
+    nativeEncodingUsable_ = table.hasNativeTextEncoding();
     languageId_ = table.supportsLanguageId() ? table.language() : 0u;
     if (table.hasSparseStrRefs()) {
         sparseStrings_.reserve(table.entries().size());
@@ -353,7 +352,7 @@ std::string TlkResolution::problem() const {
     case TlkResolutionStatus::TextNotPresent: return "TLK entry has TEXT_PRESENT disabled; stored text is not spoken text";
     case TlkResolutionStatus::Skipped: return "TLK entry is skipped (0x8000); a usable fallback table is required";
     case TlkResolutionStatus::EmbeddedNul: return "TLK text contains an embedded NUL; native display truncates it. Confirm/correct the complete recorded words";
-    case TlkResolutionStatus::EncodingUnavailable: return "Choose a supported native code page; UTF-8 inspection and unverified language defaults are not effective native text";
+    case TlkResolutionStatus::EncodingUnavailable: return "Choose a supported native encoding; unverified language defaults and UTF-8 inspection for non-Japanese V3 tables are not effective native text";
     case TlkResolutionStatus::ContextUnavailable: return "The supplied language/variant/fallback context is incomplete or not a classic KotOR table";
     }
     return "Unresolved talk-table text";

@@ -3717,6 +3717,11 @@ void replaceTpcEmbeddedTxi(const std::filesystem::path& tpcPath,
     saveTpcWithEmbeddedTxi(readFileBytes(tpcPath), txi, tpcPath);
 }
 
+std::string readTpcTxiBytes(const std::vector<std::uint8_t>& bytes) {
+    const auto layout = inspectTpcContainer(bytes);
+    return {bytes.begin() + static_cast<std::ptrdiff_t>(layout.txiOffset), bytes.end()};
+}
+
 std::vector<std::uint8_t> patchTpcTxiBytes(const std::vector<std::uint8_t>& original, const std::string& txi) {
     return patchTpcTxiBytes(original, txi, false);
 }

@@ -1194,9 +1194,17 @@ void TalkTable::reinterpretTextEncoding(TextEncoding encoding) {
     modified_ = false; // View policy only. Source representation is untouched.
 }
 
+bool TalkTable::hasNativeTextEncoding() const noexcept {
+    if (storageFormat_ != TlkStorageFormat::ClassicV30) return true;
+    if (preferredTextEncoding_ == TextEncoding::Utf8)
+        return languageId_ == kJapaneseLanguageId;
+    return languageId_ <= 5u || encodingOverride_;
+}
+
 void TalkTable::setTextEncoding(TextEncoding encoding) {
-    if (storageFormat_ != TlkStorageFormat::ClassicV30 || encoding == TextEncoding::Utf8)
-        throw NeoTLKError("Native V3 output requires one supported code page (Windows-1252 or Windows-1250). Unicode formats and interchange remain UTF-8.");
+    if (storageFormat_ != TlkStorageFormat::ClassicV30 ||
+        (encoding == TextEncoding::Utf8 && languageId_ != kJapaneseLanguageId))
+        throw NeoTLKError("Native V3 output requires Windows-1252, Windows-1250, or UTF-8 for Japanese language 131. Unicode formats and interchange remain UTF-8.");
     for (const auto& e : entries_) (void)encodeTextBytes(e.text, encoding);
     const auto before = modelHash();
     for (auto& e : entries_) e.textEncoding = encoding;
@@ -1208,9 +1216,9 @@ void TalkTable::setTextEncoding(TextEncoding encoding) {
 std::vector<std::string> TalkTable::nativeCompatibilityIssues() const {
     std::vector<std::string> issues;
     if (storageFormat_ != TlkStorageFormat::ClassicV30) return issues;
-    if (preferredTextEncoding_ == TextEncoding::Utf8)
-        issues.push_back("UTF-8 interpretation is for inspection/interchange; edited native V3 output must use a supported code page.");
-    if (languageId_ > 5u && !encodingOverride_)
+    if (preferredTextEncoding_ == TextEncoding::Utf8 && !hasNativeTextEncoding())
+        issues.push_back("UTF-8 native V3 output is supported for Japanese language 131 only; other languages must use a supported code page.");
+    if (preferredTextEncoding_ != TextEncoding::Utf8 && !hasNativeTextEncoding())
         issues.push_back("This native language has no verified default code page here. Select a supported interpretation explicitly; UTF-8 is not inferred from the language ID.");
     for (const auto& e : entries_) {
         if (e.text.find('\0') != std::string::npos)
@@ -1656,7 +1664,14 @@ void TalkTable::loadClassicStream(std::istream& input, std::streamoff fileSize) 
 
         validateStringPayloadRanges(loadedEntries, loadedStringEntriesOffset, fileSize);
 
-        loadedPreferredEncoding = detectClassicPreferredEncoding(loadedLanguageId, false, {});
+        // Only the Japanese UTF-8 candidate needs payload validation. Pass all
+        // entries, including hidden text, so one bad row prevents UTF-8 detection.
+        std::vector<std::string> rawPayloads;
+        if (loadedLanguageId == kJapaneseLanguageId) {
+            rawPayloads.reserve(loadedEntries.size());
+            for (const auto& entry : loadedEntries) rawPayloads.push_back(entry.text);
+        }
+        loadedPreferredEncoding = detectClassicPreferredEncoding(loadedLanguageId, false, rawPayloads);
         for (TalkString& entry : loadedEntries) {
             const std::string raw = std::move(entry.text);
             entry.textEncoding = detectClassicEntryEncoding(raw, loadedPreferredEncoding, loadedLanguageId);

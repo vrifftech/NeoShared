@@ -102,11 +102,12 @@ public:
     bool deleteReindexesStrRefs() const noexcept { return !hasSparseStrRefs(); }
     TlkStorageFormat storageFormat() const noexcept { return storageFormat_; }
     TextEncoding preferredTextEncoding() const noexcept { return preferredTextEncoding_; }
+    bool hasNativeTextEncoding() const noexcept;
     std::string textEncodingSummary() const;
     // Interpretation only: requires an unchanged file, preserves source bytes.
-    // UTF-8 may be inspected explicitly; edited V3 output requires a code page.
+    // UTF-8 may be inspected explicitly; Japanese V3 also supports native UTF-8.
     void reinterpretTextEncoding(TextEncoding encoding);
-    // Explicit table-wide Unicode -> native-code-page conversion, all-or-nothing.
+    // Explicit table-wide native encoding conversion, all-or-nothing.
     void setTextEncoding(TextEncoding encoding);
     std::vector<std::string> nativeCompatibilityIssues() const;
     UInt32 count() const;

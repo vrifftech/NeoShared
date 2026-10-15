@@ -46,7 +46,7 @@ target_link_libraries(neoshared_twoda PUBLIC neoshared::tabular)
 target_compile_features(neoshared_twoda PUBLIC cxx_std_17)
 
 # BWM/WOK serialized geometry; game room-query policy stays in NeoMDL.
-add_library(neoshared_bwm bwm/BwmFile.cpp)
+add_library(neoshared_bwm bwm/BwmFile.cpp bwm/BwmBuild.cpp)
 add_library(neoshared::bwm ALIAS neoshared_bwm)
 target_include_directories(neoshared_bwm PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(neoshared_bwm PUBLIC cxx_std_17)
