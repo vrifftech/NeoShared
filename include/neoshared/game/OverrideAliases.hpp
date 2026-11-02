@@ -29,6 +29,7 @@ struct OverrideRoot {
     std::filesystem::path iniPath;
     std::size_t precedence{};
     bool fromIni{};
+    int maximumDepth{-1};
 };
 
 namespace detail {
@@ -260,14 +261,14 @@ inline bool aliasOrdinal(std::string key, std::size_t& ordinal) {
     }
 }
 
-inline std::vector<std::pair<std::string, std::string>> parseAliasSection(
+inline std::map<std::string, std::string> parseAliasSection(
     const std::filesystem::path& iniPath) {
     std::ifstream input(iniPath, std::ios::binary);
     if (!input) return {};
     std::string line;
     bool inAlias = false;
     bool firstLine = true;
-    std::map<std::size_t, std::pair<std::string, std::string>> values;
+    std::map<std::string, std::string> values;
     while (std::getline(input, line)) {
         if (firstLine) {
             firstLine = false;
@@ -291,14 +292,9 @@ inline std::vector<std::pair<std::string, std::string>> parseAliasSection(
                                    (value.front() == '\'' && value.back() == '\'')))
             value = value.substr(1u, value.size() - 2u);
         if (value.empty()) continue;
-        std::size_t ordinal{};
-        if (!aliasOrdinal(key, ordinal)) continue;
-        values[ordinal] = {ordinal == 0u ? "OVERRIDE" : std::to_string(ordinal) + "OVERRIDE", value};
+        values[lowerAscii(key)] = value;
     }
-    std::vector<std::pair<std::string, std::string>> result;
-    result.reserve(values.size());
-    for (auto& [ordinal, entry] : values) result.push_back(std::move(entry));
-    return result;
+    return values;
 }
 
 inline std::filesystem::path resolveAliasPath(std::string value,
@@ -329,8 +325,13 @@ inline std::vector<OverrideRoot> discover(
     std::set<std::string> seenPaths;
     std::size_t precedence = 0u;
     for (const auto& iniPath : detail::iniCandidates(game, installRoot)) {
-        const auto aliases = detail::parseAliasSection(iniPath);
-        for (const auto& [alias, value] : aliases) {
+        std::map<std::size_t,std::pair<std::string,std::string>> aliases;
+        for(const auto& [key,value]:detail::parseAliasSection(iniPath)) {
+            std::size_t ordinal{};
+            if(detail::aliasOrdinal(key,ordinal))aliases.emplace(ordinal,std::pair{ordinal==0?"OVERRIDE":std::to_string(ordinal)+"OVERRIDE",value});
+        }
+        for (const auto& [ordinal, entry] : aliases) {
+            const auto& [alias,value]=entry;
             auto path = detail::resolveAliasPath(value, iniPath);
             if (!seenPaths.insert(detail::pathKey(path)).second) continue;
             result.push_back(OverrideRoot{alias, std::move(path), iniPath, precedence++, true});
@@ -346,6 +347,33 @@ inline std::vector<OverrideRoot> discover(
         if (seenPaths.insert(detail::pathKey(*fallback)).second)
             result.push_back(OverrideRoot{"OVERRIDE", *fallback, {}, precedence++, false});
     }
+    return result;
+}
+
+inline std::map<std::string,std::filesystem::path> directoryAliases(const std::filesystem::path& root,Game game) {
+    std::map<std::string,std::filesystem::path> result;
+    for(const auto& ini:detail::iniCandidates(game,root))for(const auto& [name,value]:detail::parseAliasSection(ini))
+        result.emplace(name,detail::resolveAliasPath(value,ini));
+    return result;
+}
+
+inline std::vector<std::filesystem::path> contentRoots(const std::filesystem::path& installRoot,
+    Game game,const std::string& language) {
+    std::vector<std::filesystem::path> result;std::set<std::string> seen;
+    if(game!=Game::Kotor2)return result;
+    std::vector<std::filesystem::path> documents;
+    for(const auto& ini:detail::iniCandidates(game,installRoot)) {
+        const auto aliases=detail::parseAliasSection(ini);const auto entry=aliases.find("documents");
+        documents.push_back(entry==aliases.end()?ini.parent_path():detail::resolveAliasPath(entry->second,ini));
+    }
+    if(documents.empty())documents.push_back(installRoot);
+    const auto add=[&](const std::filesystem::path& parent,const std::string& name) {
+        if(const auto path=detail::findDirectory(parent,name);path&&seen.insert(detail::pathKey(*path)).second)result.push_back(*path);
+    };
+    for(const auto& directory:documents)if(const auto dlc=detail::findDirectory(directory,"dlc")) {
+        add(*dlc,"mods_"+detail::lowerAscii(language));add(*dlc,"mods_english");add(*dlc,language);
+    }
+    if(const auto localized=detail::findDirectory(installRoot,"localized")) {add(*localized,language);add(*localized,"English");}
     return result;
 }
 

@@ -3,6 +3,7 @@
 #include <neoshared/bif/JobControl.hpp>
 
 #include <neoshared/PathUtf8.hpp>
+#include <neoshared/erf/Archive.hpp>
 #include <neoshared/erf/Utils.hpp>
 
 #include <algorithm>
@@ -46,20 +47,27 @@ inline bool streamInputRange(
     // the same BIF for every resource.
     struct CachedInput {
         std::filesystem::path path;
-        std::ifstream stream;
+        InputSnapshot snapshot;
+        neoshared::erf::detail::ArchiveInputStream stream;
     };
     thread_local CachedInput cached;
 
-    if (!cached.stream.is_open() || cached.path != path) {
+    if (!cached.stream.is_open() || cached.path != path ||
+        !neoshared::erf::same_file_revision(cached.snapshot, snapshot)) {
         cached.stream.close();
         cached.stream.clear();
         cached.path = path;
-        cached.stream.open(path, std::ios::binary);
-        if (!cached.stream.is_open()) {
+        if (!cached.stream.open_file(path)) {
             error = "Unable to open archive: " +
                     neoshared::pathToUtf8(path);
             return false;
         }
+        if (!neoshared::erf::same_file_revision(cached.stream.file_identity(), snapshot)) {
+            cached.stream.close();
+            error = "Archive changed since indexing; rescan the session";
+            return false;
+        }
+        cached.snapshot = snapshot;
     }
 
     cached.stream.clear();

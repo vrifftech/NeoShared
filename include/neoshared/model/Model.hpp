@@ -204,7 +204,7 @@ struct DanglyMeshData {
     float period{};
 };
 
-// Defaults follow the supplied K2 PartLight constructors. Authored finite
+// Defaults follow the K2 PartLight constructors. Authored finite
 // values are retained; rendering clamps only its own display inputs.
 struct NodeLightState {
     std::array<float,3> color{};
@@ -264,7 +264,7 @@ struct CameraNodeData {
 };
 
 struct TriggerNodeData {
-    // The supplied K2 implementation has a base-node-only MdlNodeTrigger:
+    // The K2 implementation has a base-node-only MdlNodeTrigger:
     // InternalParseField is empty and InternalCreateInstance returns null.
     // Runtime PartTrigger volumes are created separately from game-object
     // footprint points through AurPartTriggerCreate.
@@ -343,8 +343,8 @@ struct Mesh {
     // engine's w,x,y,z storage order to this API's x,y,z,w order.
     std::vector<Quaternion> inverseBindOrientations;
     std::vector<Vec3> inverseBindTranslations;
-    // Parsed for diagnostics and future parity work. The supplied K2 binaries
-    // do not consume this array in the normal RenderSkinned path.
+    // Parsed for diagnostics and future parity work. The K2 renderer
+    // does not consume this array in the normal RenderSkinned path.
     std::vector<std::int32_t> boneConstantIndices;
     std::vector<MeshFace> faces;
     std::vector<Vertex> vertices;
@@ -390,7 +390,7 @@ struct Animation {
 // A resolved clip in a derived-model -> supermodel hierarchy. modelIndex is an
 // index into the hierarchy supplied to findAnimation()/enumerateAnimations().
 // positionScale is the product of animationScale values on the descendants
-// traversed before the clip owner, matching FindAnimScale in the K2 binaries.
+// traversed before the clip owner, matching FindAnimScale in the K2 engine.
 struct AnimationReference {
     std::size_t modelIndex{};
     std::size_t animationIndex{};
@@ -436,7 +436,7 @@ struct DeformedMesh {
 };
 
 // Semantic counterpart of K2 PartDanglyMesh plus VertexPrimitiveDangly.
-// The supplied macOS x86-64/i386 implementations store the previous part
+// The runtime implementations store the previous part
 // position/orientation on PartDanglyMesh, generated local positions on the
 // part, and one persistent local velocity per vertex on VertexPrimitiveDangly.
 struct DanglyMeshState {
@@ -527,9 +527,8 @@ std::optional<AabbHit> hitTestAabb(const Model& model, std::size_t nodeIndex,
                                    const Vec3& start, const Vec3& end,
                                    const AabbHitOptions& options = {});
 
-// Reproduces the K2 PartDanglyMesh runtime recovered from the supplied macOS
-// x86-64/i386 executable, using the Android binary to cross-check the node and
-// part layouts. K1 behavior is intentionally left unchanged/uninferred.
+// Simulates K2 PartDanglyMesh node and part state.
+// K1 behavior is intentionally left unchanged.
 DanglySimulationState makeDanglySimulationState(const Model& model, const Pose& pose);
 void resetDanglySimulation(const Model& model, const Pose& pose,
                            DanglySimulationState& state);

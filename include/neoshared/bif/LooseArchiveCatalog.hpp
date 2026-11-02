@@ -86,7 +86,6 @@ struct LooseResourceInfo {
     // Direct loose file stored beneath an override alias rather than inside an archive.
     bool overrideFile{};
     std::filesystem::path directPath;
-    InputSnapshot directSnapshot;
     std::filesystem::path overrideRelativePath;
 };
 
@@ -159,10 +158,11 @@ private:
     std::vector<LooseArchiveInfo> archives_;
     std::vector<LooseResourceInfo> resources_;
     // Every valid archive retains the canonical parsed NeoShared object.
-    // Native objects release their descriptor/Windows lock after indexing and
-    // after each read; browser objects retain only the range callback. Invalid
+    // Native objects release their handle after indexing; reads reuse the
+    // most recent native reader. Browser objects retain the range callback. Invalid
     // entries keep a null slot so archive/resource indices remain stable.
     std::vector<std::shared_ptr<neoshared::erf::ErfArchive>> archiveReaders_;
+    mutable std::shared_ptr<neoshared::erf::ErfArchive> activeNativeReader_;
     std::shared_ptr<std::mutex> readerMutex_{std::make_shared<std::mutex>()};
     std::vector<std::string> messages_;
     std::string lastError_;

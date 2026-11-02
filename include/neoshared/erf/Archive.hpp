@@ -43,6 +43,7 @@ public:
     bool open_file(const std::filesystem::path& filename);
     bool open_reader(std::uint64_t size, ArchiveRangeReader reader);
     bool is_open() const noexcept;
+    FileIdentity file_identity() const;
     void close() noexcept;
     // Releases any browser range cache without closing the backing reader.
     // Native file streams are unaffected.
@@ -171,6 +172,7 @@ public:
     // next resource read. Reader-backed archives retain their callback and
     // only discard the transient range cache.
     void release_input_handle() noexcept;
+    const FileIdentity& input_identity() const noexcept { return loaded_file_identity_; }
     void save(std::filesystem::path filename = {}, std::string filetype_override = {});
     void reset(bool destroying = false);
 
@@ -289,9 +291,6 @@ private:
     // freed object reference rather than nil. Track that narrow dangling-reference
     // boundary separately from an ordinary nil/closed stream.
     bool archive_stream_reference_dangling_ = false;
-#if defined(_WIN32)
-    void* archive_lock_handle_ = nullptr;
-#endif
     bool loaded_ = false;
     bool dirty_ = false;
     bool newfile_ = false;

@@ -36,7 +36,7 @@ void appendSceneLights(const Model& model, const Pose& pose, const Mat4& base,
 // priority first, then nearest surface. Stable ties preserve traversal order.
 std::vector<std::size_t> selectSceneLights(const std::vector<SceneLight>& lights,
     Vec3 center, float surfaceRadius, bool dynamicSurface, std::size_t maximum = 8);
-// Smooth finite-radius attenuation (viewer equation, not reverse-engineered).
+// Smooth finite-radius attenuation (viewer equation).
 float lightAttenuation(float distance, float radius, bool fading) noexcept;
 
 enum class FogMode : std::uint8_t { Disabled, Linear, Exponential, ExponentialSquared };

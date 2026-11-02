@@ -38,12 +38,12 @@ struct ParticleLimits {
     float maximumLifetime{120.0f}; // negative authored lifetime remains immortal
     ParticleQuality quality{ParticleQuality::Full};
 };
-// Exact reduced-quality birth-rate constraint recovered from the K2 runtime.
+// Exact reduced-quality birth-rate constraint from the K2 runtime.
 // Full quality returns the authored rate unchanged. Viewer safety limits are
 // applied separately by advanceEmitter().
 float emitterBirthRateForQuality(const EmitterNodeData& data,
     const NodeEmitterState& state, EmitterUpdate update, ParticleQuality quality) noexcept;
-// The binaries use the Win-compatible 15-bit LCG, shared by scene effects.
+// The engine use the Win-compatible 15-bit LCG, shared by scene effects.
 // An explicit stream makes replay reproducible without process-global state.
 struct ParticleRandom {
     std::uint32_t state{1};
@@ -73,7 +73,7 @@ struct ParticleEnvironment {
     float objectAlpha{1};   // Gob alpha multiplier
     float tileAlpha{1};     // caller-resolved tile/fade multiplier
 };
-// K2 scene-space emitter support recovered from PartEmitter::CalculateRadius,
+// K2 scene-space emitter support from PartEmitter::CalculateRadius,
 // AddEmitterToRooms, PartOutside and EmitterOrderCmp. These records are kept
 // independent of NeoMDL so archive viewers or future area tools can supply an
 // actual room/portal graph without reimplementing the runtime rules.

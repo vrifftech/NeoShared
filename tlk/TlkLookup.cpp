@@ -391,7 +391,7 @@ std::optional<std::string> TlkLookup::resolve(std::uint32_t strref) const {
 TlkResolution resolveKotorText(const KotorTlkContext& context, std::uint32_t strref,
                               std::uint32_t languageId, TlkGender gender) {
     if (strref == 0xffffffffu) return {};
-    // This mask is recovered from FetchInternal, not a generic/sparse TLK rule.
+    // This mask is from FetchInternal, not a generic/sparse TLK rule.
     const auto index = strref & 0x00ffffffu;
     TlkResolution last;
     auto visit = [&](const std::vector<const TlkLookup*>& tables) {

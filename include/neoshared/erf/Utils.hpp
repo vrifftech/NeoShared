@@ -56,6 +56,7 @@ std::string resource_stem_from_text(const std::string& filename);
 
 bool file_exists(const std::filesystem::path& path);
 bool directory_exists(const std::filesystem::path& path);
+std::filesystem::path make_unique_temp_directory(const std::filesystem::path& root, const std::filesystem::path& label);
 bool paths_refer_to_same_existing_file(const std::filesystem::path& a, const std::filesystem::path& b);
 bool paths_refer_to_same_existing_file_or_location(const std::filesystem::path& a, const std::filesystem::path& b);
 void copy_file_overwrite(const std::filesystem::path& source, const std::filesystem::path& destination);
@@ -63,6 +64,12 @@ FileIdentity copy_file_overwrite_limited(const std::filesystem::path& source, co
 FileIdentity copy_file_create_new_limited(const std::filesystem::path& source, const std::filesystem::path& destination, std::uintmax_t max_bytes, const FileIdentity* expected_source_identity = nullptr);
 std::uintmax_t regular_file_size_after_open(const std::filesystem::path& path);
 FileIdentity capture_regular_file_identity(const std::filesystem::path& path);
+#if defined(_WIN32)
+FileIdentity capture_open_file_identity(void* handle);
+#else
+FileIdentity capture_open_file_identity(int fd);
+#endif
+bool same_file_revision(const FileIdentity& current, const FileIdentity& expected);
 bool same_regular_file_identity(const std::filesystem::path& path, const FileIdentity& expected);
 // Identity alone is appropriate for owned-temp cleanup. Indexed readers also
 // require the size and modification/change revision captured before indexing.
