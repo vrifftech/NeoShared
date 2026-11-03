@@ -352,6 +352,7 @@ public:
     void NewFile(const std::string& type, const std::filesystem::path& filename = {});
     void LoadFile(const std::filesystem::path& filename);
     void LoadBytes(const std::vector<std::uint8_t>& bytes);
+    std::vector<std::uint8_t> SaveBytes();
     void SaveFile(const std::filesystem::path& filename = {});
 
     GffField* GetFieldByLabel(const std::string& fieldPath);
@@ -436,7 +437,7 @@ private:
     void ValidateCanonicalLayout(std::uint64_t fileSize) const;
     void LoadData(const std::string& data, const std::filesystem::path& filename);
     void LoadGff4Data(const std::string& data, const std::filesystem::path& filename);
-    void SaveGff4File(const std::filesystem::path& outFilename);
+    std::vector<std::uint8_t> SaveGff4Bytes();
     std::unique_ptr<GffStruct> LoadGff4Struct(UInt32 templateIndex, UInt32 dataOffset, const std::string& label);
     std::unique_ptr<GffField> LoadGff4Field(const Gff4FieldTemplate& fieldTemplate, UInt32 structDataOffset);
     std::unique_ptr<GffStruct> LoadFileStruct(UInt32 offset);

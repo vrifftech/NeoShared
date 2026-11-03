@@ -563,15 +563,14 @@ public:
 
 class GffFile::BinaryWriter {
 public:
-    explicit BinaryWriter(const std::filesystem::path& path)
-        : file(path) {}
+    explicit BinaryWriter(std::size_t size) : bytes(size) {}
 
     void seek(UInt32 offset) {
-        file.seek(offset);
+        offset_ = offset;
     }
 
     UInt32 position() {
-        const auto pos = file.position();
+        const auto pos = offset_;
         if (pos > std::numeric_limits<UInt32>::max()) {
             throw GffError("GFF output grew beyond a 32-bit offset.");
         }
@@ -581,11 +580,12 @@ public:
     template <typename T>
     void write(const T& value) {
         static_assert(std::is_trivially_copyable<T>::value, "POD required");
-        file.writePod(value);
+        writeBytes(reinterpret_cast<const char*>(&value), sizeof(T));
     }
 
     void writeBytes(const char* data, std::size_t size) {
-        file.writeBytes(data, size);
+        std::copy_n(data, size, reinterpret_cast<char*>(bytes.data() + offset_));
+        offset_ += size;
     }
 
     void writeZero(std::size_t size) {
@@ -597,11 +597,9 @@ public:
         }
     }
 
-    void close() {
-        file.close();
-    }
-
-    SafeOutputFile file;
+    std::vector<std::uint8_t> bytes;
+private:
+    std::size_t offset_{};
 };
 
 GffFile::~GffFile() = default;
@@ -2489,8 +2487,7 @@ void GffFile::SaveProcessLabels() {
     }
 }
 
-void GffFile::SaveGff4File(const std::filesystem::path& outFilename) {
-    const std::filesystem::path target = ResolveOutputTarget(outFilename.empty() ? filename_ : outFilename);
+std::vector<std::uint8_t> GffFile::SaveGff4Bytes() {
     if (!rootStruct_) throw GffError("Unable to save GFF V4: missing root struct.");
     if (gff4Templates_.empty()) throw GffError("Unable to save GFF V4: missing preserved struct templates.");
 
@@ -2828,35 +2825,19 @@ void GffFile::SaveGff4File(const std::filesystem::path& outFilename) {
     if (output.size() != dataOffset) throw GffError("Internal GFF V4 writer header size mismatch.");
     output.insert(output.end(), dataBlock.begin(), dataBlock.end());
 
-    const std::filesystem::path temp = MakeSiblingTempPath(target, "gff4");
-    try {
-        std::ofstream out(temp, std::ios::binary | std::ios::trunc);
-        if (!out) throw GffError("Unable to open temporary GFF V4 file for writing: " + temp.string());
-        out.write(reinterpret_cast<const char*>(output.data()), static_cast<std::streamsize>(output.size()));
-        if (!out) throw GffError("Unable to write temporary GFF V4 file: " + temp.string());
-        out.close();
-        FlushFileToDisk(temp);
-        ReplaceFileWithTemp(temp, target);
-        isDirty_ = false;
-    } catch (...) {
-        RemoveFileNoThrow(temp);
-        throw;
-    }
+    return output;
 }
 
-void GffFile::SaveFile(const std::filesystem::path& outFilename) {
+std::vector<std::uint8_t> GffFile::SaveBytes() {
     if (!isLoaded_) {
         throw GffError("Unable to save, no file has been loaded that can be saved!");
     }
     if (isGff4_) {
-        SaveGff4File(outFilename);
-        return;
+        return SaveGff4Bytes();
     }
 
-    const std::filesystem::path target = ResolveOutputTarget(outFilename.empty() ? filename_ : outFilename);
     const Header previousHeader = header_;
-    const SaveData previousSaveData = saveData_;
-    std::filesystem::path temp;
+    SaveData previousSaveData = std::move(saveData_);
 
     header_ = Header{};
     saveData_ = SaveData{};
@@ -2886,8 +2867,8 @@ void GffFile::SaveFile(const std::filesystem::path& outFilename) {
         header_.listindexoffset = checkedUInt32Add(header_.fieldindexoffset, header_.fieldindexcount, "computing List Indices offset");
         header_.listindexcount = checkedUInt32Add(checkedUInt32Mul(saveData_.ListIndexCount, 4u, "computing List Indices struct-index byte count"), checkedUInt32Mul(saveData_.ListCount, 4u, "computing List Indices count byte count"), "computing List Indices byte count");
 
-        temp = MakeSiblingTempPath(target, "gff");
-        writer_ = std::make_unique<BinaryWriter>(temp);
+        writer_ = std::make_unique<BinaryWriter>(
+            static_cast<std::size_t>(header_.listindexoffset) + header_.listindexcount);
 
         writer_->writeBytes(header_.filetype.data(), 4);
         writer_->writeBytes(header_.fileversion.data(), 4);
@@ -2913,17 +2894,32 @@ void GffFile::SaveFile(const std::filesystem::path& outFilename) {
         SaveProcessLabels();
         SaveProcessStruct(*rootStruct_);
 
-        writer_->close();
+        auto output = std::move(writer_->bytes);
         writer_.reset();
-        FlushFileToDisk(temp);
-        ReplaceFileWithTemp(temp, target);
-
-        isDirty_ = false;
+        header_ = previousHeader;
+        saveData_ = std::move(previousSaveData);
+        return output;
     } catch (...) {
         writer_.reset();
-        RemoveFileNoThrow(temp);
         header_ = previousHeader;
-        saveData_ = previousSaveData;
+        saveData_ = std::move(previousSaveData);
+        throw;
+    }
+}
+
+void GffFile::SaveFile(const std::filesystem::path& outFilename) {
+    const auto output = SaveBytes();
+    const auto target = ResolveOutputTarget(outFilename.empty() ? filename_ : outFilename);
+    const auto temp = MakeSiblingTempPath(target, isGff4_ ? "gff4" : "gff");
+    try {
+        SafeOutputFile file(temp);
+        file.writeBytes(output.data(), output.size());
+        file.close();
+        FlushFileToDisk(temp);
+        ReplaceFileWithTemp(temp, target);
+        isDirty_ = false;
+    } catch (...) {
+        RemoveFileNoThrow(temp);
         throw;
     }
 }
