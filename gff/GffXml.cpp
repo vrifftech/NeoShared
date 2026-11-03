@@ -313,7 +313,7 @@ std::unique_ptr<GffField> parseFieldNode(const neoxml::Node& node) {
     if (node.name == "resref") {
         requireLabel();
         if (node.attribute("base64") == "true") return std::make_unique<GffResRefField>(label, bytesToString(base64Decode(node.text)));
-        return std::make_unique<GffResRefField>(label, trim(node.text));
+        return std::make_unique<GffResRefField>(label, node.text);
     }
     if (node.name == "locstring") {
         requireLabel();

@@ -234,7 +234,13 @@ void writeGffFieldJson(std::ostringstream& out, const neoxml::Node& node, int le
 
     out << ",\n";
     indent(out, level + 1);
-    if (type == "CExoString" || type == "CResRef" || type == "DWORD64" || type == "Int64") {
+    if (type == "CExoString" || type == "CResRef") {
+        if (node.attribute("base64") == "true") {
+            out << jsonMember("encoding", neojson::quote("base64")) << "\n";
+            indent(out, level + 1);
+        }
+        out << jsonMember("value", neojson::quote(node.text), false) << "\n";
+    } else if (type == "DWORD64" || type == "Int64") {
         out << jsonMember("value", neojson::quote(scalarXmlText(node)), false) << "\n";
     } else {
         out << jsonMember("value", numberOrQuoted(scalarXmlText(node)), false) << "\n";
@@ -316,6 +322,9 @@ void writeGffJsonFieldAsXml(std::ostringstream& out, const neojson::Value& value
     indent(out, level);
     out << '<' << tag;
     if (requireLabel || !label.empty()) out << " label=\"" << escapeXmlAttr(label) << "\"";
+    if ((tag == "exostring" || tag == "resref") && lowerAscii(optionalString(value, "encoding")) == "base64") {
+        out << " base64=\"true\"";
+    }
 
     if (tag == "list") {
         const neojson::Value* items = value.find("items");
