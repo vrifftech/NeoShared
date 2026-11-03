@@ -1,5 +1,7 @@
 add_library(neoshared_texture STATIC
     Image.cpp
+    BcDecode.cpp
+    Pvrtc.cpp
     FileUtil.cpp
     Txi.cpp
     TxiStream.cpp

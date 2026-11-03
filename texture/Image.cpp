@@ -5,6 +5,7 @@
 #include "neoshared/texture/FileUtil.hpp"
 #include "neoshared/texture/Error.hpp"
 #include "neoshared/texture/ParserLimits.hpp"
+#include "BlockDecode.hpp"
 
 #include <algorithm>
 #include <array>
@@ -33,6 +34,7 @@ constexpr std::uint8_t kTpcEncodingGray = 0x01;
 constexpr std::uint8_t kTpcEncodingRgb = 0x02;
 constexpr std::uint8_t kTpcEncodingRgba = 0x04;
 constexpr std::uint8_t kTpcEncodingSwizzledBgra = 0x0C;
+constexpr std::uint8_t kTpcPvrtcFlag = 0x10;
 constexpr std::uint8_t kTxbEncodingBgra = 0x04;
 constexpr std::uint8_t kTxbEncodingGray = 0x09;
 constexpr std::uint8_t kTxbEncodingDxt1 = 0x0A;
@@ -2052,9 +2054,10 @@ static bool looksLikeTpcHeader(const std::vector<std::uint8_t>& header) {
     const std::uint16_t width = static_cast<std::uint16_t>(header[8] | (header[9] << 8));
     const std::uint16_t height = static_cast<std::uint16_t>(header[10] | (header[11] << 8));
     const std::uint8_t encoding = header[12];
+    const auto baseEncoding = encoding & ~kTpcPvrtcFlag;
     const std::uint8_t mipmaps = header[13];
     return width > 0 && height > 0 && width < 0x8000 && height < 0x8000 &&
-           (encoding == kTpcEncodingGray || encoding == kTpcEncodingRgb || encoding == kTpcEncodingRgba || encoding == kTpcEncodingSwizzledBgra) &&
+           (encoding == kTpcPvrtcFlag || baseEncoding == kTpcEncodingGray || baseEncoding == kTpcEncodingRgb || baseEncoding == kTpcEncodingRgba || encoding == kTpcEncodingSwizzledBgra) &&
            mipmaps < 32;
 }
 
@@ -2068,6 +2071,7 @@ struct TpcContainerLayout {
     std::uint8_t encoding = 0;
     std::uint8_t mipMapCount = 1;
     bool uncompressed = true;
+    bool pvrtc = false;
     bool cubeMap = false;
     std::uint32_t layerCount = 1;
     std::uint32_t layerWidth = 0;
@@ -2080,6 +2084,7 @@ struct TpcContainerLayout {
 std::size_t tpcMipPayloadSize(const TpcContainerLayout& layout,
                               std::uint32_t width,
                               std::uint32_t height) {
+    if (layout.pvrtc) return static_cast<std::size_t>(std::max(width, 8u)) * std::max(height, 8u) / 2u;
     if (!layout.uncompressed && layout.compression == TextureCompression::Dxt1) {
         return dxt1Size(width, height);
     }
@@ -2155,7 +2160,8 @@ TpcContainerLayout inspectTpcContainer(const std::vector<std::uint8_t>& bytes) {
     layout.headerHeight = readLE16(bytes, 10);
     layout.encoding = bytes[12];
     layout.mipMapCount = bytes[13] == 0 ? 1 : bytes[13];
-    layout.uncompressed = layout.dataSize == 0;
+    layout.pvrtc = (layout.encoding & kTpcPvrtcFlag) != 0;
+    layout.uncompressed = !layout.pvrtc && layout.dataSize == 0;
     layout.layerWidth = layout.headerWidth;
     layout.layerHeight = layout.headerHeight;
 
@@ -2173,7 +2179,21 @@ TpcContainerLayout inspectTpcContainer(const std::vector<std::uint8_t>& bytes) {
         layout.layerHeight = layout.headerHeight / 6;
     }
 
-    if (layout.uncompressed) {
+    if (layout.pvrtc) {
+        layout.compression = TextureCompression::Auto;
+        layout.encodingName = (layout.encoding & kTpcEncodingRgba) ? "PVRTC4 RGBA" : "PVRTC4 RGB";
+        auto remaining = layout.dataSize;
+        auto width = layout.headerWidth;
+        auto height = layout.headerHeight;
+        layout.mipMapCount = 0;
+        while (layout.mipMapCount < fullMipCount(layout.headerWidth, layout.headerHeight) &&
+               remaining >= tpcMipPayloadSize(layout, width, height)) {
+            remaining -= static_cast<std::uint32_t>(tpcMipPayloadSize(layout, width, height));
+            ++layout.mipMapCount;
+            width = std::max(1u, width / 2);
+            height = std::max(1u, height / 2);
+        }
+    } else if (layout.uncompressed) {
         if (layout.encoding == kTpcEncodingGray) {
             layout.compression = TextureCompression::Gray;
             layout.encodingName = "raw grayscale";
@@ -2206,7 +2226,9 @@ TpcContainerLayout inspectTpcContainer(const std::vector<std::uint8_t>& bytes) {
         payloadSize = next;
     };
 
-    if (!layout.uncompressed) {
+    if (layout.pvrtc) {
+        addPayload(layout.dataSize);
+    } else if (!layout.uncompressed) {
         if (!layout.cubeMap) {
             addPayload(layout.dataSize);
             std::uint32_t width = layout.layerWidth;
@@ -2293,7 +2315,7 @@ std::vector<std::string> tpcGameLayoutIssues(const TpcContainerLayout& layout,
     } else if (features.numX > 1 || features.numY > 1 || iequals(features.procedureType, "cycle")) {
         issues.push_back("TXI requests animation/grid subdivision without matching stored animation frames.");
     }
-    const bool gameCubeHeuristic = !layout.uncompressed && layout.headerWidth &&
+    const bool gameCubeHeuristic = !layout.pvrtc && !layout.uncompressed && layout.headerWidth &&
                                    layout.headerHeight / layout.headerWidth == 6;
     if (gameCubeHeuristic && !cube) issues.push_back("The header height/width quotient is 6: the game treats this payload as six faces before reading TXI. Use a different atlas grid.");
     if (cube && (width != height || layers != 6)) issues.push_back("A game cubemap requires six square faces.");
@@ -2310,6 +2332,7 @@ std::vector<std::string> tpcGameLayoutIssues(const TpcContainerLayout& layout,
         else if (mip) gameBytes += static_cast<std::uint64_t>((w + 3) / 4) * ((h + 3) / 4) * (bpp == 3 ? 8 : 16) * faces;
         w /= 2; h /= 2;
     }
+    if (layout.pvrtc) gameBytes = layout.dataSize;
     if (gameBytes != payloadBytes) {
         issues.push_back("Game TXI boundary differs from the encoded payload (game " + std::to_string(gameBytes) +
                          " bytes, stored " + std::to_string(payloadBytes) +
@@ -2327,7 +2350,7 @@ std::vector<std::string> tpcGameLayoutIssues(const TpcContainerLayout& layout,
         w = std::max<std::uint32_t>(1, w / 2); h = std::max<std::uint32_t>(1, h / 2);
     }
     if (storedStride * layers != payloadBytes) issues.push_back("Stored mip/face spans do not account for the entire image payload.");
-    if (!animated && !layout.uncompressed && layout.dataSize != tpcMipPayloadSize(layout, width, height)) {
+    if (!layout.pvrtc && !animated && !layout.uncompressed && layout.dataSize != tpcMipPayloadSize(layout, width, height)) {
         issues.push_back("Compressed static/cube header size is not the size of its base level.");
     }
     if (animated) {
@@ -2467,8 +2490,8 @@ TextureData readTgaTextureBytesInternal(const std::vector<std::uint8_t>& bytes,
 
     std::vector<std::array<std::uint8_t, 4>> palette;
     if (colorMapType != 0) {
-        if (colorMapSize != 24 && colorMapSize != 32) throw TextureError("Only 24/32-bit TGA palettes are supported");
-        const std::size_t entryBytes = colorMapSize / 8;
+        if (colorMapSize != 15 && colorMapSize != 16 && colorMapSize != 24 && colorMapSize != 32) throw TextureError("Unsupported TGA palette entry size");
+        const std::size_t entryBytes = (colorMapSize + 7u) / 8u;
         std::uint64_t paletteBytes = 0;
         if (!parser::checkedMultiply(colorMapLength, entryBytes, paletteBytes) ||
             !parser::rangeWithin(bytes.size(), offset, paletteBytes)) {
@@ -2476,11 +2499,17 @@ TextureData readTgaTextureBytesInternal(const std::vector<std::uint8_t>& bytes,
         }
         palette.reserve(colorMapLength);
         for (std::uint16_t i = 0; i < colorMapLength; ++i) {
-            const std::uint8_t b = bytes[offset++];
-            const std::uint8_t g = bytes[offset++];
-            const std::uint8_t r = bytes[offset++];
-            const std::uint8_t a = entryBytes == 4 ? bytes[offset++] : 255;
-            palette.push_back({r, g, b, a});
+            if (entryBytes == 2) {
+                const auto pixel = readLE16(bytes, offset);
+                palette.push_back({maskedChannelToByte(pixel, 0x7C00u),
+                                   maskedChannelToByte(pixel, 0x03E0u),
+                                   maskedChannelToByte(pixel, 0x001Fu),
+                                   static_cast<std::uint8_t>(colorMapSize == 15 || (flags & 0x0F) == 0 || (pixel & 0x8000u) ? 255 : 0)});
+            } else {
+                palette.push_back({bytes[offset + 2], bytes[offset + 1], bytes[offset],
+                                   static_cast<std::uint8_t>(entryBytes == 4 ? bytes[offset + 3] : 255)});
+            }
+            offset += entryBytes;
         }
     }
 
@@ -2647,7 +2676,7 @@ TextureData readTpcTextureBytesInternal(const std::vector<std::uint8_t>& bytes,
     // The uncompressed processed cube has no compressed-size header heuristic.
     // Both supplied K2 callers identify its six face-major surfaces from the
     // TXI cube flag and the 6:1 processed container dimensions.
-    if (!cubeMap && features.cube && headerWidth != 0 &&
+    if (!layout.pvrtc && !cubeMap && features.cube && headerWidth != 0 &&
         headerHeight == headerWidth * 6u) {
         cubeMap = true;
         layerCount = 6;
@@ -2655,7 +2684,7 @@ TextureData readTpcTextureBytesInternal(const std::vector<std::uint8_t>& bytes,
         layerHeight = headerWidth;
     }
     bool animated = false;
-    if (!cubeMap && iequals(features.procedureType, "cycle") && features.numX > 0 && features.numY > 0) {
+    if (!layout.pvrtc && !cubeMap && iequals(features.procedureType, "cycle") && features.numX > 0 && features.numY > 0) {
         animated = true;
         const auto frameCount = checkedAnimationFrameCount(features);
         layerCount = static_cast<std::uint32_t>(frameCount);
@@ -2703,7 +2732,7 @@ TextureData readTpcTextureBytesInternal(const std::vector<std::uint8_t>& bytes,
     texture.txiStorage=TxiStorage::Embedded;
     texture.alphaBlending = alphaBlending;
     texture.preferredCompression = compression;
-    texture.compressed = !uncompressed && (compression == TextureCompression::Dxt1 || compression == TextureCompression::Dxt5);
+    texture.compressed = layout.pvrtc || (!uncompressed && (compression == TextureCompression::Dxt1 || compression == TextureCompression::Dxt5));
     texture.cubeMap = cubeMap;
     texture.animated = animated;
     texture.sourceMipMapCount = mipMapCount;
@@ -2712,7 +2741,7 @@ TextureData readTpcTextureBytesInternal(const std::vector<std::uint8_t>& bytes,
     // Preserve the exact processed storage beside the decoded editor image.
     // Xbox swizzled BGRA is not a K2 desktop processed upload layout.
     std::optional<ProcessedTexturePayload> processedPayload;
-    if (encoding != kTpcEncodingSwizzledBgra) {
+    if (!layout.pvrtc && encoding != kTpcEncodingSwizzledBgra) {
         ProcessedTexturePayload payload;
         payload.encoding = encoding == kTpcEncodingGray ? ProcessedSourceEncoding::Gray8 :
                            encoding == kTpcEncodingRgb ? ProcessedSourceEncoding::Rgb8 :
@@ -2748,7 +2777,13 @@ TextureData readTpcTextureBytesInternal(const std::vector<std::uint8_t>& bytes,
                 processedPayload->surfaces[layerIndex].levels.push_back(std::move(nativeLevel));
             }
             TextureLayer decoded;
-            if (!uncompressed && compression == TextureCompression::Dxt1) {
+            if (layout.pvrtc) {
+                decoded = makeLayer(w, h);
+                detail::decodePvrtc4(bytes.data() + offset, w, h, decoded.rgba.data());
+                if (!(encoding & kTpcEncodingRgba))
+                    for (std::size_t i = 3; i < decoded.rgba.size(); i += 4) decoded.rgba[i] = 255;
+                decoded = flipLayerVerticalCopy(std::move(decoded));
+            } else if (!uncompressed && compression == TextureCompression::Dxt1) {
                 decoded = flipLayerVerticalCopy(decodeDxt1(bytes.data() + offset, size, w, h, true));
             } else if (!uncompressed && compression == TextureCompression::Dxt5) {
                 decoded = flipLayerVerticalCopy(decodeDxt5(bytes.data() + offset, size, w, h));
@@ -3055,8 +3090,17 @@ enum class DdsStorage {
     Dxt1,
     Dxt3,
     Dxt5,
+    Bc4,
+    Bc4Signed,
+    Bc5,
+    Bc5Signed,
+    Bc7,
+    Rgba32,
     Bgra32,
+    Bgrx32,
     Bgr24,
+    R8,
+    Rg8,
     A1R5G5B5,
     R5G6B5,
     Argb4444,
@@ -3064,11 +3108,20 @@ enum class DdsStorage {
 
 std::size_t ddsMipSize(DdsStorage storage, std::uint32_t width, std::uint32_t height) {
     switch (storage) {
-    case DdsStorage::Dxt1: return dxt1Size(width, height);
+    case DdsStorage::Dxt1:
+    case DdsStorage::Bc4:
+    case DdsStorage::Bc4Signed: return dxt1Size(width, height);
     case DdsStorage::Dxt3:
-    case DdsStorage::Dxt5: return dxt5Size(width, height);
-    case DdsStorage::Bgra32: return static_cast<std::size_t>(width) * height * 4;
+    case DdsStorage::Dxt5:
+    case DdsStorage::Bc5:
+    case DdsStorage::Bc5Signed:
+    case DdsStorage::Bc7: return dxt5Size(width, height);
+    case DdsStorage::Rgba32:
+    case DdsStorage::Bgra32:
+    case DdsStorage::Bgrx32: return static_cast<std::size_t>(width) * height * 4;
     case DdsStorage::Bgr24: return static_cast<std::size_t>(width) * height * 3;
+    case DdsStorage::R8: return static_cast<std::size_t>(width) * height;
+    case DdsStorage::Rg8:
     case DdsStorage::A1R5G5B5:
     case DdsStorage::R5G6B5:
     case DdsStorage::Argb4444: return static_cast<std::size_t>(width) * height * 2;
@@ -3078,14 +3131,23 @@ std::size_t ddsMipSize(DdsStorage storage, std::uint32_t width, std::uint32_t he
 
 std::size_t ddsRawBytesPerPixel(DdsStorage storage) {
     switch (storage) {
-    case DdsStorage::Bgra32: return 4;
+    case DdsStorage::Rgba32:
+    case DdsStorage::Bgra32:
+    case DdsStorage::Bgrx32: return 4;
     case DdsStorage::Bgr24: return 3;
+    case DdsStorage::R8: return 1;
+    case DdsStorage::Rg8:
     case DdsStorage::A1R5G5B5:
     case DdsStorage::R5G6B5:
     case DdsStorage::Argb4444: return 2;
     case DdsStorage::Dxt1:
     case DdsStorage::Dxt3:
-    case DdsStorage::Dxt5: return 0;
+    case DdsStorage::Dxt5:
+    case DdsStorage::Bc4:
+    case DdsStorage::Bc4Signed:
+    case DdsStorage::Bc5:
+    case DdsStorage::Bc5Signed:
+    case DdsStorage::Bc7: return 0;
     }
     return 0;
 }
@@ -3179,16 +3241,52 @@ TextureLayer decodeDdsMip(const std::uint8_t* data,
     if (storage == DdsStorage::Dxt5) return decodeDxt5(data, required, width, height);
 
     TextureLayer layer = makeLayer(width, height);
+    if (bytesPerPixel == 0) {
+        const bool signedChannels = storage == DdsStorage::Bc4Signed || storage == DdsStorage::Bc5Signed;
+        const unsigned channels = storage == DdsStorage::Bc4 || storage == DdsStorage::Bc4Signed ? 1u : 2u;
+        for (std::uint32_t y = 0; y < height; y += 4) {
+            checkOperation();
+            for (std::uint32_t x = 0; x < width; x += 4) {
+                std::uint8_t pixels[64]{};
+                if (storage == DdsStorage::Bc7) {
+                    detail::decodeBc7(data, pixels, 16);
+                    data += 16;
+                } else {
+                    for (unsigned c = 0; c < channels; ++c) {
+                        detail::decodeBc4(data, pixels + c, 16, 4, signedChannels);
+                        data += 8;
+                    }
+                    for (unsigned i = 0; i < 16; ++i) {
+                        if (signedChannels)
+                            for (unsigned c = 0; c < channels; ++c)
+                                pixels[i * 4 + c] = static_cast<std::uint8_t>(((int(static_cast<std::int8_t>(pixels[i * 4 + c])) + 127) * 255 + 127) / 254);
+                        pixels[i * 4 + 3] = 255;
+                    }
+                }
+                for (std::uint32_t by = 0; by < std::min(4u, height - y); ++by)
+                    std::copy_n(pixels + by * 16, std::min(4u, width - x) * 4u,
+                                layer.rgba.data() + (static_cast<std::size_t>(y + by) * width + x) * 4u);
+            }
+        }
+        return layer;
+    }
     for (std::uint32_t y = 0; y < height; ++y) {
         checkOperation();
         const auto* row = data + static_cast<std::size_t>(y) * rowPitch;
         for (std::uint32_t x = 0; x < width; ++x) {
             const std::size_t index = static_cast<std::size_t>(y) * width + x;
-            if (storage == DdsStorage::Bgra32) {
+            if (storage == DdsStorage::Rgba32) {
+                std::copy_n(row + x * 4u, 4, layer.rgba.data() + index * 4u);
+            } else if (storage == DdsStorage::R8 || storage == DdsStorage::Rg8) {
+                layer.rgba[index * 4 + 0] = row[x * bytesPerPixel];
+                layer.rgba[index * 4 + 1] = storage == DdsStorage::Rg8 ? row[x * bytesPerPixel + 1] : 0;
+                layer.rgba[index * 4 + 2] = 0;
+                layer.rgba[index * 4 + 3] = 255;
+            } else if (storage == DdsStorage::Bgra32 || storage == DdsStorage::Bgrx32) {
                 layer.rgba[index * 4 + 0] = row[x * 4 + 2];
                 layer.rgba[index * 4 + 1] = row[x * 4 + 1];
                 layer.rgba[index * 4 + 2] = row[x * 4 + 0];
-                layer.rgba[index * 4 + 3] = row[x * 4 + 3];
+                layer.rgba[index * 4 + 3] = storage == DdsStorage::Bgrx32 ? 255 : row[x * 4 + 3];
             } else if (storage == DdsStorage::Bgr24) {
                 layer.rgba[index * 4 + 0] = row[x * 3 + 2];
                 layer.rgba[index * 4 + 1] = row[x * 3 + 1];
@@ -3266,55 +3364,103 @@ TextureData readDdsTextureBytesInternal(const std::vector<std::uint8_t>& bytes,
         const std::uint32_t gMask = readLE32(bytes, 96);
         const std::uint32_t bMask = readLE32(bytes, 100);
         const std::uint32_t aMask = readLE32(bytes, 104);
+        const bool dx10 = (pfFlags & 0x4u) && fourcc == "DX10";
+        const std::size_t payloadOffset = dx10 ? 148 : 128;
+        std::uint32_t alphaMode = 0;
+        bool srgb = false;
 
         DdsStorage storage;
-        if ((pfFlags & 0x4u) && fourcc == "DXT1") {
+        if (dx10 && (readLE32(bytes, 132) == 3 || (readLE32(bytes, 132) == 2 && height == 1)) &&
+            readLE32(bytes, 140) == 1) {
+            const auto format = readLE32(bytes, 128);
+            alphaMode = readLE32(bytes, 144) & 7u;
+            switch (format) {
+            case 28: case 29:
+                storage = DdsStorage::Rgba32; texture.sourceEncoding = "DDS DX10 RGBA32"; break;
+            case 49:
+                storage = DdsStorage::Rg8; texture.sourceEncoding = "DDS DX10 RG8"; break;
+            case 61:
+                storage = DdsStorage::R8; texture.sourceEncoding = "DDS DX10 R8"; break;
+            case 71: case 72:
+                storage = DdsStorage::Dxt1; texture.sourceEncoding = "DDS DX10 BC1"; break;
+            case 74: case 75:
+                storage = DdsStorage::Dxt3; texture.sourceEncoding = "DDS DX10 BC2"; break;
+            case 77: case 78:
+                storage = DdsStorage::Dxt5; texture.sourceEncoding = "DDS DX10 BC3"; break;
+            case 80: case 81:
+                storage = format == 80 ? DdsStorage::Bc4 : DdsStorage::Bc4Signed;
+                texture.sourceEncoding = format == 80 ? "DDS DX10 BC4 UNORM" : "DDS DX10 BC4 SNORM"; break;
+            case 83: case 84:
+                storage = format == 83 ? DdsStorage::Bc5 : DdsStorage::Bc5Signed;
+                texture.sourceEncoding = format == 83 ? "DDS DX10 BC5 UNORM" : "DDS DX10 BC5 SNORM"; break;
+            case 85:
+                storage = DdsStorage::R5G6B5; texture.sourceEncoding = "DDS DX10 R5G6B5"; break;
+            case 86:
+                storage = DdsStorage::A1R5G5B5; texture.sourceEncoding = "DDS DX10 A1R5G5B5"; break;
+            case 87: case 91:
+                storage = DdsStorage::Bgra32; texture.sourceEncoding = "DDS DX10 BGRA32"; break;
+            case 88: case 93:
+                storage = DdsStorage::Bgrx32; texture.sourceEncoding = "DDS DX10 BGRX32"; break;
+            case 98: case 99:
+                storage = DdsStorage::Bc7; texture.sourceEncoding = "DDS DX10 BC7"; break;
+            case 115:
+                storage = DdsStorage::Argb4444; texture.sourceEncoding = "DDS DX10 ARGB4444"; break;
+            default:
+                throw TextureError("Unsupported DDS DXGI format: " + std::to_string(format));
+            }
+            srgb = format == 29 || format == 72 || format == 75 || format == 78 ||
+                   format == 91 || format == 93 || format == 99;
+            if (srgb) texture.sourceEncoding += " sRGB";
+        } else if ((pfFlags & 0x4u) && fourcc == "DXT1") {
             storage = DdsStorage::Dxt1;
-            texture.preferredCompression = TextureCompression::Dxt1;
-            texture.compressed = true;
             texture.sourceEncoding = "DDS DXT1";
         } else if ((pfFlags & 0x4u) && fourcc == "DXT3") {
             storage = DdsStorage::Dxt3;
-            texture.preferredCompression = TextureCompression::Dxt3;
-            texture.compressed = true;
             texture.sourceEncoding = "DDS DXT3";
         } else if ((pfFlags & 0x4u) && fourcc == "DXT5") {
             storage = DdsStorage::Dxt5;
-            texture.preferredCompression = TextureCompression::Dxt5;
-            texture.compressed = true;
             texture.sourceEncoding = "DDS DXT5";
+        } else if ((pfFlags & 0x4u) && (fourcc == "ATI1" || fourcc == "BC4U" || fourcc == "BC4S")) {
+            storage = fourcc == "BC4S" ? DdsStorage::Bc4Signed : DdsStorage::Bc4;
+            texture.sourceEncoding = fourcc == "BC4S" ? "DDS BC4 SNORM" : "DDS BC4 UNORM";
+        } else if ((pfFlags & 0x4u) && (fourcc == "ATI2" || fourcc == "BC5U" || fourcc == "BC5S")) {
+            storage = fourcc == "BC5S" ? DdsStorage::Bc5Signed : DdsStorage::Bc5;
+            texture.sourceEncoding = fourcc == "BC5S" ? "DDS BC5 SNORM" : "DDS BC5 UNORM";
         } else if ((pfFlags & 0x40u) && bitCount == 32 && rMask == 0x00FF0000 &&
                    gMask == 0x0000FF00 && bMask == 0x000000FF && aMask == 0xFF000000) {
             storage = DdsStorage::Bgra32;
-            texture.preferredCompression = TextureCompression::None;
             texture.sourceEncoding = "DDS BGRA32";
         } else if ((pfFlags & 0x40u) && bitCount == 24 && rMask == 0x00FF0000 &&
                    gMask == 0x0000FF00 && bMask == 0x000000FF) {
             storage = DdsStorage::Bgr24;
-            texture.preferredCompression = TextureCompression::None;
             texture.sourceEncoding = "DDS BGR24";
         } else if ((pfFlags & 0x40u) && (pfFlags & 0x1u) && bitCount == 16 &&
                    rMask == 0x7C00u && gMask == 0x03E0u && bMask == 0x001Fu && aMask == 0x8000u) {
             storage = DdsStorage::A1R5G5B5;
-            texture.preferredCompression = TextureCompression::None;
             texture.sourceEncoding = "DDS A1R5G5B5";
         } else if ((pfFlags & 0x40u) && !(pfFlags & 0x1u) && bitCount == 16 &&
                    rMask == 0xF800u && gMask == 0x07E0u && bMask == 0x001Fu) {
             storage = DdsStorage::R5G6B5;
-            texture.preferredCompression = TextureCompression::None;
             texture.sourceEncoding = "DDS R5G6B5";
         } else if ((pfFlags & 0x40u) && (pfFlags & 0x1u) && bitCount == 16 &&
                    rMask == 0x0F00u && gMask == 0x00F0u && bMask == 0x000Fu && aMask == 0xF000u) {
             storage = DdsStorage::Argb4444;
-            texture.preferredCompression = TextureCompression::None;
             texture.sourceEncoding = "DDS ARGB4444";
         } else {
             throw TextureError("Unsupported DDS pixel format");
         }
+        texture.preferredCompression = storage == DdsStorage::Dxt1 ? TextureCompression::Dxt1 :
+                                       storage == DdsStorage::Dxt3 ? TextureCompression::Dxt3 :
+                                       storage == DdsStorage::Dxt5 ? TextureCompression::Dxt5 : TextureCompression::None;
+        texture.compressed = ddsRawBytesPerPixel(storage) == 0;
 
         const std::uint32_t caps2 = readLE32(bytes, 112);
         std::uint32_t faceCount = 1;
-        if ((caps2 & 0x00000200u) != 0) {
+        if (dx10 && (readLE32(bytes, 136) & 0x4u)) {
+            texture.cubeFaces = allCubeFaces();
+            faceCount = 6;
+            texture.cubeMap = true;
+        } else if (!dx10 && (caps2 & 0x00000200u) != 0) {
             const std::uint32_t faceBits = caps2 & 0x0000FC00u;
             texture.cubeFaces.clear();
             for (const auto face : kAllCubeFaces) {
@@ -3332,10 +3478,10 @@ TextureData readDdsTextureBytesInternal(const std::vector<std::uint8_t>& bytes,
         if (bytesPerPixel != 0 && (flags & 0x00000008u) != 0) {
             topPitch = declaredPitch;
             rowAlignment = inferDdsRowAlignment(width, height, mipmaps, faceCount, bytesPerPixel,
-                                                topPitch, bytes.size() - 128);
+                                                topPitch, bytes.size() - payloadOffset);
         }
 
-        std::size_t offset = 128;
+        std::size_t offset = payloadOffset;
         for (std::uint32_t face = 0; face < faceCount; ++face) {
             TextureLayer layer;
             std::uint32_t mipWidth = width;
@@ -3349,6 +3495,19 @@ TextureData readDdsTextureBytesInternal(const std::vector<std::uint8_t>& bytes,
                     : checkedDdsSurfaceSize(rowPitch, mipHeight);
                 if (!parser::rangeWithin(bytes.size(), offset, size)) throw TextureError("DDS surface payload is truncated");
                 auto decoded = decodeDdsMip(bytes.data() + offset, size, mipWidth, mipHeight, storage, rowPitch);
+                if (alphaMode == 2 || alphaMode == 3) {
+                    for (std::size_t i = 0; i < decoded.rgba.size(); i += 4) {
+                        if (alphaMode == 3) decoded.rgba[i + 3] = 255;
+                        else if (decoded.rgba[i + 3] != 0)
+                            for (unsigned c = 0; c < 3; ++c) {
+                                double color = decoded.rgba[i + c] / 255.0;
+                                if (srgb) color = srgbToLinear(color);
+                                color *= 255.0 / decoded.rgba[i + 3];
+                                if (srgb) color = linearToSrgb(color);
+                                decoded.rgba[i + c] = clampByte(color * 255.0);
+                            }
+                    }
+                }
                 if (mip == 0) layer = std::move(decoded);
                 else layer.mipmaps.push_back(std::move(decoded));
                 offset += size;
@@ -3665,10 +3824,10 @@ TextureData decodeTextureBytes(const std::vector<std::uint8_t>& bytes,
 std::string gameTextureCodecSupportReport() {
     std::ostringstream out;
     out << "Texture image codec support:\n";
-    out << "  TPC: storage-checked raw/grayscale/DXT1/DXT5 output; square animation frames; base-only rectangular static output; legacy/Xbox input remains readable\n";
+    out << "  TPC: raw/grayscale/DXT1/DXT5 output; PVRTC4 and legacy/Xbox input; square animation frames; base-only rectangular static output\n";
     out << "  TXB: built-in read-only conversion support for Xbox swizzled BGRA/grayscale and DXT1/DXT5 textures\n";
-    out << "  DDS: game 20-byte-header DXT1/DXT5 output (default for new files), or explicit standard DDS interchange; imported dialect is retained\n";
-    out << "  TGA: origin-aware input, bottom-origin game output, raw cube-strip conversion\n";
+    out << "  DDS: game 20-byte-header DXT1/DXT5 output; standard DDS input includes DX10, BC4/BC5/BC7 and 2D/cubemap surfaces; imported dialect is retained\n";
+    out << "  TGA: 15/16/24/32-bit palettes, origin-aware input, bottom-origin game output, raw cube-strip conversion\n";
     out << "  TXI: built-in read/write, sidecar handling, and TPC embedding\n";
     return out.str();
 }
