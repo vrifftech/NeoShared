@@ -66,9 +66,9 @@ struct TxiAutocompleteResult {
     std::vector<std::string> suggestions;
 };
 
-// TXI is a mixed text/binary stream. The two native channel lists accept
-// a counted little-endian float payload after the directive's newline. Raw
-// spans include that payload, so editors can preserve it byte-for-byte.
+// TXI is a mixed text/binary stream. Channel lists and font-coordinate lists
+// accept counted little-endian floats after the directive's newline, with
+// three floats per font coordinate. Raw spans preserve the complete payload.
 struct TxiStreamLine {
     std::size_t begin{}, end{}, next{}, lineNumber{};
     std::string key, value;

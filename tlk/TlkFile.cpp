@@ -1586,10 +1586,6 @@ void TalkTable::loadClassicStream(std::istream& input, std::streamoff fileSize) 
     loadedLanguageId = readU32LE(input);
     loadedStringCount = readU32LE(input);
 
-    if (loadedStringCount < 1) {
-        throw NeoTLKError("No entries found in the specified TLK file!");
-    }
-
     try {
         loadedEntries.reserve(loadedStringCount);
     } catch (const std::exception&) {
@@ -1917,10 +1913,6 @@ void TalkTable::save(const std::string& filename) {
 
     if (!isFourChar(fileType_, "TLK ")) {
         throw NeoTLKError("There is no valid TLK file currently open to save!");
-    }
-
-    if (entries_.empty() && !isDragonAgeV02()) {
-        throw NeoTLKError("There is no current data in the TLK file to write!");
     }
 
     const std::filesystem::path requestedOutputPath = userPathFromString(outputFilename);

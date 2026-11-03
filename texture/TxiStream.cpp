@@ -63,25 +63,25 @@ std::vector<TxiStreamLine> scanTxiStream(std::string_view bytes) {
         } else if(const auto d=findTxiDirective(line.key);d&&
                   (d->valueKind==TxiDirectiveValueKind::FloatList||d->valueKind==TxiDirectiveValueKind::Vector3List)) {
             const auto c=count(line.value);
-            const bool channel=line.key=="channelscale"||line.key=="channeltranslate";
-            if(channel&&c.present&&c.binary) {
-                if(c.value<0||std::size_t(c.value)>maxChannels)
-                    throw TextureError("Binary TXI channel count outside 0..4096");
+            const std::size_t components=d->valueKind==TxiDirectiveValueKind::Vector3List?3u:1u;
+            if(c.present&&c.binary) {
+                if(c.value<0||std::size_t(c.value)>(components==1?maxChannels:maxRows))
+                    throw TextureError("Binary TXI list count exceeds its row limit");
                 const auto n=std::size_t(c.value);
                 // A binary block starts at the cursor AFTER the complete CRLF
                 // delimiter; its contents must never be processed as lines.
                 if(n && (line.next==line.end || bytes[line.next-1]!='\n'))
-                    throw TextureError("Binary TXI channel header requires the native LF delimiter");
-                if(n>(bytes.size()-line.next)/4u)throw TextureError("Truncated binary TXI channel array");
-                line.binary=true;line.payloadBegin=line.next;line.binaryValues.reserve(n);
-                for(std::size_t i=0;i<n;++i) {
+                    throw TextureError("Binary TXI list header requires the native LF delimiter");
+                if(n>(bytes.size()-line.next)/(4u*components))throw TextureError("Truncated binary TXI list");
+                line.binary=true;line.payloadBegin=line.next;line.binaryValues.reserve(n*components);
+                for(std::size_t i=0;i<n*components;++i) {
                     const auto* p=reinterpret_cast<const unsigned char*>(bytes.data()+line.next+4u*i);
                     const std::uint32_t bits=std::uint32_t(p[0])|(std::uint32_t(p[1])<<8u)|
                         (std::uint32_t(p[2])<<16u)|(std::uint32_t(p[3])<<24u);
                     float f;static_assert(sizeof(f)==4,"TXI requires IEEE binary32");
                     std::memcpy(&f,&bits,4);line.binaryValues.push_back(f);
                 }
-                line.next+=4u*n;
+                line.next+=4u*n*components;
             } else if(c.present&&!c.binary&&c.value>=0) {
                 if(std::size_t(c.value)>maxRows)throw TextureError("TXI counted list exceeds row bound");
                 remaining=std::size_t(c.value);
@@ -105,10 +105,15 @@ TxiTextView txiTextView(std::string_view bytes) {
     for(const auto& line:scanTxiStream(bytes)) {
         if(!line.binary)append(std::string(bytes.substr(line.begin,line.end-line.begin)),line.lineNumber);
         else {
-            append(line.key+" "+std::to_string(line.binaryValues.size()),line.lineNumber);
-            for(float f:line.binaryValues) {
+            const std::size_t components=findTxiDirective(line.key)->valueKind==TxiDirectiveValueKind::Vector3List?3u:1u;
+            append(line.key+" "+std::to_string(line.binaryValues.size()/components),line.lineNumber);
+            for(std::size_t i=0;i<line.binaryValues.size();i+=components) {
                 std::ostringstream value;value.imbue(std::locale::classic());
-                value<<std::setprecision(std::numeric_limits<float>::max_digits10)<<f;
+                value<<std::setprecision(std::numeric_limits<float>::max_digits10);
+                for(std::size_t component=0;component<components;++component) {
+                    if(component)value<<' ';
+                    value<<line.binaryValues[i+component];
+                }
                 append(value.str(),line.lineNumber);
             }
         }

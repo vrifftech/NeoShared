@@ -2,6 +2,7 @@
 
 #include "NeoGameInstallResolver.hpp"
 #include "NeoWindowPlacement.hpp"
+#include "NeoWxUi.hpp"
 
 #include <wx/button.h>
 #include <wx/choicdlg.h>
@@ -41,6 +42,7 @@ public:
           allowedGameIds_(std::move(allowedGameIds)) {
         buildLayout();
         refreshList();
+        wxui::applyTheme(this, wxui::currentDarkMode());
     }
 
 private:

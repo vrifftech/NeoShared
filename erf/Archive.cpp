@@ -3371,11 +3371,15 @@ void ErfArchive::load_open_stream(const std::filesystem::path& filename) {
                 }
 
                 seekg_from_u32_offset(archive_stream_, next_header.offsetreslist);
+                std::vector<std::pair<std::uint32_t, std::uint32_t>> resourceLocations(next_header.entrycount);
+                for (auto& location : resourceLocations) {
+                    location.first = read_u32(archive_stream_);
+                    location.second = read_u32(archive_stream_);
+                }
                 for (auto& res : resources_) {
-                    i_num = read_u32(archive_stream_);
-                    res.data_offset = i_num;
-                    i_num = read_u32(archive_stream_);
-                    res.data_size = i_num;
+                    const auto& location = resourceLocations.at(res.resid);
+                    res.data_offset = location.first;
+                    res.data_size = location.second;
                     if (res.data_size > 0) {
                         ensure_archive_extent(res.data_offset, res.data_size, archive_size, "ERF resource payload");
                         ensure_payload_does_not_overlap_metadata(res.data_offset, res.data_size,

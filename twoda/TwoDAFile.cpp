@@ -231,9 +231,8 @@ void writeBounded2DAString(std::ostream& out, const std::string& text, const std
     detail::writeBytes(out, text.data(), text.size());
 }
 
-void writeText2DACell(std::ostream& out, const std::string& text, bool whitespaceTokens = false) {
-    const bool quote = text.find_first_of("\t\r\n\"") != std::string::npos ||
-        (whitespaceTokens && (text.empty() || text.find(' ') != std::string::npos));
+void writeText2DACell(std::ostream& out, const std::string& text) {
+    const bool quote = text.empty() || text.find_first_of(" \t\r\n\"") != std::string::npos;
     if (!quote) {
         detail::writeBytes(out, text.data(), text.size());
         return;
@@ -1144,8 +1143,6 @@ void TwoDAFile::loadGDA(std::istream& in, const std::filesystem::path& filename)
     gdaColumnLabel_ = columnTemplate.label;
     gdaRowLabel_ = rowTemplate.label;
     nativeFormat_ = NativeFormat::GDA;
-    unknown1_ = 0;
-    unknown2_ = 0;
     loaded_ = true;
     dirty_ = false;
     validateShape();
@@ -1247,8 +1244,6 @@ void TwoDAFile::loadStream(std::istream& in, const std::filesystem::path& filena
             if (!sawColumns || candidate.columnLabels_.empty()) {
                 throw TwoDAError("Specified text 2DA file does not contain column labels.", 2);
             }
-            candidate.unknown1_ = 0;
-            candidate.unknown2_ = 0;
             candidate.nativeFormat_ = NativeFormat::Text2DA;
             candidate.loaded_ = true;
             candidate.dirty_ = false;
@@ -1383,13 +1378,7 @@ void TwoDAFile::loadStream(std::istream& in, const std::filesystem::path& filena
     }
 
     const std::uint64_t size = detail::fileSize(in);
-    if (detail::tellg(in) + 2u <= size) {
-        in.read(&parsed.unknown1_, 1);
-        in.read(&parsed.unknown2_, 1);
-        if (!in) {
-            throw TwoDAError("Specified file is not a valid binary 2DA file.", 2);
-        }
-    }
+    detail::readUInt16LE(in, "2DA string table size");
 
     const std::uint64_t dataOffset = detail::tellg(in);
     if (rowCount > 0) {
@@ -1461,12 +1450,12 @@ void TwoDAFile::saveText2DA(const std::filesystem::path& filename) const {
                 if (c != 0) {
                     detail::writeBytes(out, &tab, 1);
                 }
-                writeText2DACell(out, columnLabels_[c], !defaultDeclaration_.empty());
+                writeText2DACell(out, columnLabels_[c]);
             }
             detail::writeBytes(out, &newline, 1);
 
             for (std::size_t r = 0; r < rowLabels_.size(); ++r) {
-                writeText2DACell(out, rowLabels_[r], !defaultDeclaration_.empty());
+                writeText2DACell(out, rowLabels_[r]);
                 // Missing tokens copy DEFAULT verbatim; writing an explicit
                 // **** instead would normalize it to empty in the native loader.
                 auto writtenColumns = columnLabels_.size();
@@ -1474,7 +1463,7 @@ void TwoDAFile::saveText2DA(const std::filesystem::path& filename) const {
                 for (std::size_t c = 0; c < writtenColumns; ++c) {
                     detail::writeBytes(out, &tab, 1);
                     const auto& value = entries_[r][c];
-                    writeText2DACell(out, value, !defaultDeclaration_.empty() || value.empty());
+                    writeText2DACell(out, value);
                 }
                 detail::writeBytes(out, &newline, 1);
             }
@@ -1530,8 +1519,7 @@ void TwoDAFile::saveBinary2DA(const std::filesystem::path& filename) const {
                 }
             }
 
-            detail::writeBytes(out, &unknown1_, 1);
-            detail::writeBytes(out, &unknown2_, 1);
+            detail::writeUInt16LE(out, 0);
 
             const std::uint64_t dataOffset = detail::tellp(out);
             std::vector<std::vector<std::uint64_t>> offsets(rowLabels_.size(),
@@ -1558,16 +1546,19 @@ void TwoDAFile::saveBinary2DA(const std::filesystem::path& filename) const {
                 }
             }
 
+            const auto stringTableSize = detail::tellp(out) - dataOffset;
+            if (stringTableSize > std::numeric_limits<std::uint16_t>::max()) {
+                throw std::runtime_error("Refusing to save 2DA string table larger than 65535 bytes.");
+            }
+
             out.seekp(static_cast<std::streamoff>(offsetPos), std::ios::beg);
             for (std::size_t r = 0; r < rowLabels_.size(); ++r) {
                 for (std::size_t c = 0; c < columnLabels_.size(); ++c) {
                     const auto rel = offsets[r][c];
-                    if (rel > std::numeric_limits<std::uint16_t>::max()) {
-                        throw std::runtime_error("Refusing to save 2DA string table with offsets larger than 65535 bytes.");
-                    }
                     detail::writeUInt16LE(out, static_cast<std::uint16_t>(rel));
                 }
             }
+            detail::writeUInt16LE(out, static_cast<std::uint16_t>(stringTableSize));
         });
     } catch (const std::exception& ex) {
         throw TwoDAError(std::string("Unable to save 2DA file: ") + ex.what(), 0);

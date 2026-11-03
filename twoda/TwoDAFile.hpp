@@ -95,8 +95,6 @@ private:
     bool loaded_ = false;
     bool dirty_ = false;
     std::filesystem::path filename_;
-    char unknown1_ = '\0';
-    char unknown2_ = '\0';
     NativeFormat nativeFormat_ = NativeFormat::Binary2DA;
     std::string gdaVersion_ = "V0.2";
     std::array<char, 4> gdaTopLabel_{{'g', 't', 'o', 'p'}};

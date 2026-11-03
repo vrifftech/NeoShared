@@ -253,8 +253,8 @@ const std::vector<TxiDirectiveInfo>& txiDirectiveCatalog() {
         {"envmapalpha", "Basic texture", TxiDirectiveValueKind::Float, "float · normally 0..1", "1.0", "Sets environment-map alpha or strength.", "", {}},
         {"diffusebumpintensity", "Basic texture", TxiDirectiveValueKind::Float, "float · normally >=0; 1.0 is neutral", "1.0", "Scales diffuse bump-lighting strength.", "Only effective when isdiffusebumpmap is enabled.", {}},
         {"specularbumpintensity", "Basic texture", TxiDirectiveValueKind::Float, "float · normally >=0; 1.0 is neutral", "1.0", "Scales specular bump-lighting strength.", "Only effective when isspecularbumpmap is enabled.", {}},
-        {"channelscale", "Base controller", TxiDirectiveValueKind::FloatList, "float list · count + rows, or rows followed by endlist", "empty", "Scales the generated signal into output channels.", "Entries map to R, G, B, and A in order.", {}},
-        {"channeltranslate", "Base controller", TxiDirectiveValueKind::FloatList, "float list · count + rows, or rows followed by endlist", "empty", "Adds a per-channel bias after procedural signal scaling.", "Entries map to R, G, B, and A in order.", {}},
+        {"channelscale", "Base controller", TxiDirectiveValueKind::FloatList, "float list · counted rows, counted binary floats, or endlist", "empty", "Scales the generated signal into output channels.", "Entries map to R, G, B, and A in order.", {}},
+        {"channeltranslate", "Base controller", TxiDirectiveValueKind::FloatList, "float list · counted rows, counted binary floats, or endlist", "empty", "Adds a per-channel bias after procedural signal scaling.", "Entries map to R, G, B, and A in order.", {}},
         {"distort", "Base controller", TxiDirectiveValueKind::Integer, "integer · 0 off | nonzero on", "0", "Enables post-generation spatial distortion.", "", {}},
         {"distortangle", "Base controller", TxiDirectiveValueKind::Integer, "integer · 0 signed offsets | nonzero angle mode", "1", "Selects how distortion bytes are interpreted as displacement vectors.", "", {}},
         {"distortionamplitude", "Base controller", TxiDirectiveValueKind::Float, "float · normally >=0, in texels", "5.0", "Sets spatial-distortion strength.", "", {}},
@@ -273,15 +273,15 @@ const std::vector<TxiDirectiveInfo>& txiDirectiveCatalog() {
         {"waterheight", "Water controller", TxiDirectiveValueKind::Integer, "integer · >0; 2^n-1 recommended", "31", "Sets the vertical procedural-water simulation extent or mask.", "Requires proceduretype water before this line.", {}},
         {"arturowidth", "Arturo controller", TxiDirectiveValueKind::Integer, "integer · >0; 2^n-1 recommended", "15", "Sets the horizontal extent of the Arturo procedural image.", "Requires proceduretype arturo before this line.", {}},
         {"arturoheight", "Arturo controller", TxiDirectiveValueKind::Integer, "integer · >0; 2^n-1 recommended", "15", "Sets the vertical extent of the Arturo procedural image.", "Requires proceduretype arturo before this line.", {}},
-        {"fps", "Cycle controller", TxiDirectiveValueKind::Float, "float · >0", "1.0", "Sets the playback rate for cycle animation.", "Requires proceduretype cycle; zero causes division by zero in the engine calculation.", {}},
+        {"fps", "Cycle controller", TxiDirectiveValueKind::Float, "float · >0 rate | 0 paused | <0 advances each frame", "1.0", "Sets the playback rate for cycle animation.", "Requires proceduretype cycle; playback rate does not change the stored frame layout.", {}},
         {"numchars", "Font metadata", TxiDirectiveValueKind::Integer, "integer · >=0", "0", "Sets the number of glyph records in the font atlas.", "Coordinate lists should contain at least this many entries.", {}},
         {"fontheight", "Font metadata", TxiDirectiveValueKind::Float, "float · normally >=0", "0", "Sets the core font or glyph height metric.", "", {}},
         {"baselineheight", "Font metadata", TxiDirectiveValueKind::Float, "float · normally >=0", "0", "Sets the baseline and vertical placement metric.", "", {}},
         {"texturewidth", "Font metadata", TxiDirectiveValueKind::Float, "float · >0", "0", "Sets the atlas-width metric used for glyph scaling and spacing.", "", {}},
         {"spacingr", "Font metadata", TxiDirectiveValueKind::Float, "float · normally >=0", "0", "Adds right-side horizontal glyph spacing.", "", {}},
         {"spacingb", "Font metadata", TxiDirectiveValueKind::Float, "float · normally >=0", "0", "Adds bottom or vertical spacing and contributes to ideal line height.", "", {}},
-        {"upperleftcoords", "Font metadata", TxiDirectiveValueKind::Vector3List, "vector3 list · count + x y z rows, or rows followed by endlist", "empty", "Stores each glyph's upper-left atlas coordinate and third metadata component.", "X and Y are normally 0..1 and should not exceed the matching lower-right coordinate.", {}},
-        {"lowerrightcoords", "Font metadata", TxiDirectiveValueKind::Vector3List, "vector3 list · count + x y z rows, or rows followed by endlist", "empty", "Stores each glyph's lower-right atlas coordinate and third metadata component.", "X and Y are normally 0..1 and should not precede the matching upper-left coordinate.", {}},
+        {"upperleftcoords", "Font metadata", TxiDirectiveValueKind::Vector3List, "vector3 list · counted x y z rows, counted binary triples, or endlist", "empty", "Stores each glyph's upper-left atlas coordinate and third metadata component.", "X and Y are normally 0..1 and should not exceed the matching lower-right coordinate.", {}},
+        {"lowerrightcoords", "Font metadata", TxiDirectiveValueKind::Vector3List, "vector3 list · counted x y z rows, counted binary triples, or endlist", "empty", "Stores each glyph's lower-right atlas coordinate and third metadata component.", "X and Y are normally 0..1 and should not precede the matching upper-left coordinate.", {}},
     };
     return catalog;
 }
@@ -617,10 +617,7 @@ std::vector<TxiValidationIssue> validateTxiText(const std::string& txi) {
 
         if (floatValue) {
             const double number = *floatValue;
-            if (key == "fps" && number <= 0.0) {
-                addIssue(issues, TxiIssueSeverity::Error, lineNumber, key,
-                         "fps must be greater than zero.");
-            } else if (key == "texturewidth" && number <= 0.0) {
+            if (key == "texturewidth" && number <= 0.0) {
                 addIssue(issues, TxiIssueSeverity::Warning, lineNumber, key,
                          "texturewidth is normally greater than zero.");
             } else if (key == "gamma" && number <= 0.0) {

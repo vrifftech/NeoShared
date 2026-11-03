@@ -439,7 +439,7 @@ void applyTxiLayout(TextureData& texture, bool inferCubeFromAspect = false) {
     texture.canvasHeight = canvas.height;
 
     const bool explicitAnimation = asciiLower(features.procedureType) == "cycle" &&
-                                   features.numX > 0 && features.numY > 0 && features.fps > 0.0;
+                                   features.numX > 0 && features.numY > 0;
     const bool inferredCube = inferCubeFromAspect && !explicitAnimation && canvas.width > 0 &&
                               canvas.height == static_cast<std::uint64_t>(canvas.width) * 6u;
     if ((features.cube || inferredCube) && canvas.width > 0) {
@@ -2280,7 +2280,7 @@ std::vector<std::string> tpcGameLayoutIssues(const TpcContainerLayout& layout,
     if (cube && !features.mipmap) issues.push_back("Processed cubemap with mipmap 0 repeats face zero in the game.");
     if (animated) {
         if (width != height) issues.push_back("Rectangular animation frames do not match the game's square, width-derived frame stride. Use square frames; the atlas itself may be rectangular.");
-        if (features.numX == 0 || features.numY == 0 || features.fps <= 0 ||
+        if (features.numX == 0 || features.numY == 0 ||
             static_cast<std::uint64_t>(features.numX) * features.numY != layers ||
             static_cast<std::uint64_t>(width) * features.numX != layout.headerWidth ||
             static_cast<std::uint64_t>(height) * features.numY != layout.headerHeight) {
@@ -2455,6 +2455,7 @@ TextureData readTgaTextureBytesInternal(const std::vector<std::uint8_t>& bytes,
     const std::uint8_t idLength = bytes[0];
     const std::uint8_t colorMapType = bytes[1];
     const std::uint8_t imageType = bytes[2];
+    const std::uint16_t colorMapFirst = readLE16(bytes, 3);
     const std::uint16_t colorMapLength = readLE16(bytes, 5);
     const std::uint8_t colorMapSize = bytes[7];
     const std::uint16_t width = readLE16(bytes, 12);
@@ -2522,7 +2523,8 @@ TextureData readTgaTextureBytesInternal(const std::vector<std::uint8_t>& bytes,
             throw TextureError("TGA pixel destination exceeds the decoded image buffer");
         }
         if (indexed) {
-            const std::size_t index = pixel[0];
+            const std::uint32_t rawIndex = pixel[0] | (pixelSize == 16 ? std::uint32_t(pixel[1]) << 8u : 0u);
+            const std::uint32_t index = rawIndex - colorMapFirst;
             if (index >= palette.size()) throw TextureError("TGA palette index is out of range");
             std::copy(palette[index].begin(), palette[index].end(),
                       layer.rgba.begin() + static_cast<std::ptrdiff_t>(dst));
@@ -2533,10 +2535,10 @@ TextureData readTgaTextureBytesInternal(const std::vector<std::uint8_t>& bytes,
             layer.rgba[dst + 3] = pixelSize == 16 ? pixel[1] : 255;
         } else if (pixelSize == 16) {
             const std::uint16_t raw = static_cast<std::uint16_t>(pixel[0] | (pixel[1] << 8));
-            layer.rgba[dst + 0] = static_cast<std::uint8_t>(((raw >> 10) & 0x1F) << 3);
-            layer.rgba[dst + 1] = static_cast<std::uint8_t>(((raw >> 5) & 0x1F) << 3);
-            layer.rgba[dst + 2] = static_cast<std::uint8_t>((raw & 0x1F) << 3);
-            layer.rgba[dst + 3] = (raw & 0x8000) ? 255 : 0;
+            layer.rgba[dst + 0] = maskedChannelToByte(raw, 0x7C00u);
+            layer.rgba[dst + 1] = maskedChannelToByte(raw, 0x03E0u);
+            layer.rgba[dst + 2] = maskedChannelToByte(raw, 0x001Fu);
+            layer.rgba[dst + 3] = (flags & 0x0F) == 0 || (raw & 0x8000) ? 255 : 0;
         } else {
             layer.rgba[dst + 0] = pixel[2];
             layer.rgba[dst + 1] = pixel[1];
@@ -2653,7 +2655,7 @@ TextureData readTpcTextureBytesInternal(const std::vector<std::uint8_t>& bytes,
         layerHeight = headerWidth;
     }
     bool animated = false;
-    if (!cubeMap && iequals(features.procedureType, "cycle") && features.numX > 0 && features.numY > 0 && features.fps > 0.0) {
+    if (!cubeMap && iequals(features.procedureType, "cycle") && features.numX > 0 && features.numY > 0) {
         animated = true;
         const auto frameCount = checkedAnimationFrameCount(features);
         layerCount = static_cast<std::uint32_t>(frameCount);
@@ -2906,7 +2908,7 @@ static std::vector<std::uint8_t> encodeTpcTexture(const TextureData& input, cons
 
     const TxiFeatures features = parseTxiFeatures(texture.txi);
     const bool animated = texture.animated || (iequals(features.procedureType, "cycle") && features.numX > 0 &&
-                                                features.numY > 0 && features.fps > 0.0 && layers.size() > 1);
+                                                features.numY > 0 && layers.size() > 1);
     const bool cube = texture.cubeMap || (features.cube && layers.size() == 6);
     if (compression == TextureCompression::Dxt3) {
         throw TextureError("DXT3 is a DDS encoding; Odyssey TPC supports DXT1 or DXT5 compression");
@@ -3406,8 +3408,8 @@ TextureData readDdsTextureBytesInternal(const std::vector<std::uint8_t>& bytes,
         if (mipCount == 0) throw TextureError("BioWare DDS contains no complete mipmap");
         if (offset != bytes.size()) throw TextureError("BioWare DDS has unexplained trailing payload");
         const auto baseSize = ddsMipSize(storage, width, height);
-        if (dataSize != baseSize && dataSize != bytes.size() - 20) {
-            texture.compatibilityWarnings.push_back("BioWare DDS size field does not match its base or total payload.");
+        if (dataSize != baseSize) {
+            texture.compatibilityWarnings.push_back("BioWare DDS size field must match the base mip payload; a total-chain size misaligns subsequent mip levels in the game.");
         }
         if (parseTxiFeatures(texture.txi).mipmap && mipCount != fullMipCount(width, height)) {
             texture.compatibilityWarnings.push_back("BioWare DDS has an incomplete mip chain while mipmapping is enabled.");
