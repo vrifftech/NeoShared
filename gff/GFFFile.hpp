@@ -8,6 +8,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace neogff {
@@ -70,6 +71,17 @@ public:
 
 protected:
     Fixed16Chars label_{};
+
+private:
+    friend class GffFile;
+    struct SourceLocation {
+        std::shared_ptr<const char> owner;
+        UInt32 fieldIndex = 0xFFFFFFFFu;
+        UInt32 labelIndex = 0;
+        UInt32 dataOffset = 0;
+        UInt32 dataCapacity = 0;
+    };
+    mutable SourceLocation sourceLocation_;
 };
 
 class GffStruct : public GffField {
@@ -110,6 +122,10 @@ public:
     const std::vector<std::unique_ptr<GffField>>& allFields() const { return fields_; }
 
 private:
+    friend class GffFile;
+    mutable UInt32 sourceStructIndex_ = 0;
+    mutable UInt32 sourceFieldIndicesOffset_ = 0;
+    mutable UInt32 sourceFieldIndicesCapacity_ = 0;
     std::vector<std::unique_ptr<GffField>> fields_;
 };
 
@@ -409,23 +425,27 @@ private:
     };
 
     struct SaveData {
+        struct StructSlot {
+            UInt32 index = 0;
+            UInt32 fieldsOffset = 0;
+            UInt32 fieldsCapacity = 0;
+        };
+        struct FieldSlot {
+            UInt32 index = 0;
+            UInt32 labelIndex = 0;
+            UInt32 dataOffset = 0;
+            UInt32 dataCapacity = 0;
+        };
         UInt32 StructCount = 0;
         UInt32 FieldCount = 0;
         UInt32 FieldIndexCount = 0;
         UInt32 ListIndexCount = 0;
-        UInt32 ListCount = 0;
         UInt32 DataBlockSize = 0;
         std::vector<Fixed16Chars> FieldLabels;
+        std::unordered_map<const GffStruct*, StructSlot> StructSlots;
+        std::unordered_map<const GffField*, FieldSlot> FieldSlots;
 
-        UInt32 CurrStructIndex = 0;
-        UInt32 CurrStructOffset = 0;
-        UInt32 CurrFieldIndex = 0;
-        UInt32 CurrFieldOffset = 0;
-        UInt32 CurrFieldDataOffset = 0;
-        UInt32 CurrFieldIndexOffset = 0;
-        UInt32 CurrListIndexOffset = 0;
-
-        void AddLabel(const Fixed16Chars& label);
+        UInt32 AddLabel(const Fixed16Chars& label);
     };
 
     void ResetAll();
@@ -444,7 +464,6 @@ private:
     std::unique_ptr<GffField> LoadFileField(UInt32 offset);
     std::unique_ptr<GffField> LoadComplexField(UInt32 type, UInt32 dataOrOffset);
 
-    UInt32 SaveGetLabelIndex(const Fixed16Chars& label) const;
     UInt32 SaveProcessList(const GffList& list);
     UInt32 SaveProcessComplexFieldData(const GffField& field);
     UInt32 SaveProcessField(const GffField& field);
@@ -461,6 +480,8 @@ private:
     FourChar fileversionRaw_{};
     std::filesystem::path filename_;
     std::unique_ptr<GffStruct> rootStruct_;
+    std::shared_ptr<const char> sourceId_;
+    std::vector<std::uint8_t> sourceBytes_;
     std::vector<UInt32> loadingStructs_; // Active path, not a global visited set.
     std::size_t currField_ = 0;
     bool isLoaded_ = false;

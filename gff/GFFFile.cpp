@@ -152,12 +152,6 @@ UInt32 checkedUInt32Mul(UInt32 lhs, UInt32 rhs, const char* context) {
     return static_cast<UInt32>(lhs * rhs);
 }
 
-UInt32 checkedUInt32Sub(UInt32 lhs, UInt32 rhs, const char* context) {
-    if (lhs < rhs) {
-        throw GffError(std::string("GFF 32-bit offset/count underflow while ") + context + ".");
-    }
-    return static_cast<UInt32>(lhs - rhs);
-}
 
 UInt32 checkedSizeToUInt32(std::size_t value, const char* context) {
     if (value > static_cast<std::size_t>(std::numeric_limits<UInt32>::max())) {
@@ -588,14 +582,6 @@ public:
         offset_ += size;
     }
 
-    void writeZero(std::size_t size) {
-        static const std::array<char, 16> zeros{};
-        while (size > 0) {
-            const std::size_t chunk = std::min<std::size_t>(size, zeros.size());
-            writeBytes(zeros.data(), chunk);
-            size -= chunk;
-        }
-    }
 
     std::vector<std::uint8_t> bytes;
 private:
@@ -1242,6 +1228,8 @@ void GffFile::ResetAll() {
     isDirty_ = false;
     filename_.clear();
     rootStruct_.reset();
+    sourceId_ = std::make_shared<const char>(0);
+    sourceBytes_.assign(GFF_HEADER_SIZE, 0);
     filetypeRaw_.fill('\0');
     fileversionRaw_.fill('\0');
     reader_.reset();
@@ -1352,6 +1340,8 @@ void GffFile::LoadData(const std::string& data, const std::filesystem::path& fil
     const FourChar previousFileVersion = fileversionRaw_;
     const std::filesystem::path previousFilename = filename_;
     auto previousRootStruct = std::move(rootStruct_);
+    auto previousSourceId = std::move(sourceId_);
+    auto previousSourceBytes = std::move(sourceBytes_);
     const std::size_t previousCurrField = currField_;
     const bool previousLoaded = isLoaded_;
     const bool previousDirty = isDirty_;
@@ -1369,6 +1359,8 @@ void GffFile::LoadData(const std::string& data, const std::filesystem::path& fil
         fileversionRaw_ = previousFileVersion;
         filename_ = previousFilename;
         rootStruct_ = std::move(previousRootStruct);
+        sourceId_ = std::move(previousSourceId);
+        sourceBytes_ = std::move(previousSourceBytes);
         currField_ = previousCurrField;
         isLoaded_ = previousLoaded;
         isDirty_ = previousDirty;
@@ -1422,6 +1414,7 @@ void GffFile::LoadData(const std::string& data, const std::filesystem::path& fil
         ValidateCanonicalLayout(reader_->data.size());
 
         rootStruct_ = LoadFileStruct(header_.structoffset);
+        sourceBytes_.assign(data.begin(), data.end());
         isLoaded_ = true;
         isDirty_ = false;
         reader_.reset();
@@ -1560,6 +1553,7 @@ std::unique_ptr<GffField> GffFile::LoadFileField(UInt32 offset) {
     reader_->seek(offset);
     const UInt32 type = reader_->read<UInt32>();
     const UInt32 labelIndex = reader_->read<UInt32>();
+    UInt32 sourceDataOffset = 0;
 
     std::unique_ptr<GffField> field;
 
@@ -1617,6 +1611,7 @@ std::unique_ptr<GffField> GffFile::LoadFileField(UInt32 offset) {
     case FIELD_TYPE_POSITION:
     case FIELD_TYPE_JADE_STRREF: {
         const UInt32 dataOrOffset = reader_->read<UInt32>();
+        sourceDataOffset = dataOrOffset;
         field = LoadComplexField(type, dataOrOffset);
         break;
     }
@@ -1627,6 +1622,7 @@ std::unique_ptr<GffField> GffFile::LoadFileField(UInt32 offset) {
     }
     case FIELD_TYPE_LIST: {
         const UInt32 dataOrOffset = reader_->read<UInt32>();
+        sourceDataOffset = dataOrOffset;
         requireSectionRange(header_.listindexcount, dataOrOffset, 4, "LIST index header");
         const UInt32 listOffset = checkedUInt32Add(header_.listindexoffset, dataOrOffset, "resolving LIST index offset");
         reader_->seek(listOffset);
@@ -1659,6 +1655,9 @@ std::unique_ptr<GffField> GffFile::LoadFileField(UInt32 offset) {
     reader_->readBytes(label.data(), label.size());
     field->SetLabelRaw(label);
     field->fieldtype = type;
+    field->sourceLocation_ = {sourceId_, (offset - header_.fieldoffset) / 12u, labelIndex, sourceDataOffset,
+        type == FIELD_TYPE_LIST ? static_cast<UInt32>((checkedGffCast<GffList>(*field).count() + 1u) * 4u)
+                                : IsComplexField(*field) ? GetFieldDataSize(*field) : 0u};
     return field;
 }
 
@@ -1690,6 +1689,10 @@ std::unique_ptr<GffStruct> GffFile::LoadFileStruct(UInt32 offset) {
     }
 
     structure->fieldtype = FIELD_TYPE_STRUCT;
+    structure->sourceLocation_.owner = sourceId_;
+    structure->sourceStructIndex_ = (offset - header_.structoffset) / 12u;
+    structure->sourceFieldIndicesOffset_ = fieldCount > 1 ? dataOrOffset : 0;
+    structure->sourceFieldIndicesCapacity_ = fieldCount > 1 ? fieldCount * 4u : 0;
     return structure;
 }
 
@@ -2371,11 +2374,11 @@ bool GffFile::ChangeFieldValue(std::string path, const std::string& value) {
     return true;
 }
 
-void GffFile::SaveData::AddLabel(const Fixed16Chars& label) {
-    if (std::find(FieldLabels.begin(), FieldLabels.end(), label) != FieldLabels.end()) {
-        return;
-    }
-    FieldLabels.push_back(label);
+UInt32 GffFile::SaveData::AddLabel(const Fixed16Chars& label) {
+    const auto found = std::find(FieldLabels.begin(), FieldLabels.end(), label);
+    const auto index = static_cast<UInt32>(found - FieldLabels.begin());
+    if (found == FieldLabels.end()) FieldLabels.push_back(label);
+    return index;
 }
 
 bool GffFile::IsComplexField(const GffField& field) const {
@@ -2426,58 +2429,66 @@ UInt32 GffFile::GetFieldDataSize(const GffField& field) const {
 }
 
 void GffFile::SaveParseStruct(const GffStruct& structure) {
+    const auto reserve = [](UInt32& used, UInt32 size) {
+        const UInt32 offset = used;
+        used = checkedUInt32Add(used, size, "allocating GFF storage");
+        return offset;
+    };
+    const auto resizeBlock = [&](UInt32& offset, UInt32& capacity, UInt32 size, UInt32& used) {
+        if (size > capacity) {
+            if (offset + capacity == used) used = checkedUInt32Add(offset, size, "growing GFF storage");
+            else offset = reserve(used, size);
+            capacity = size;
+        }
+    };
+    const bool existing = structure.sourceLocation_.owner == sourceId_;
+    SaveData::StructSlot structureSlot;
+    structureSlot.index = existing ? structure.sourceStructIndex_ : reserve(saveData_.StructCount, 1u);
+    structureSlot.fieldsOffset = existing ? structure.sourceFieldIndicesOffset_ : 0;
+    structureSlot.fieldsCapacity = existing ? structure.sourceFieldIndicesCapacity_ : 0;
+    const UInt32 fieldsSize = structure.count() > 1
+        ? checkedUInt32Mul(checkedCountToUInt32(structure.count(), "counting struct fields"), 4u, "sizing field indexes") : 0;
+    resizeBlock(structureSlot.fieldsOffset, structureSlot.fieldsCapacity, fieldsSize, saveData_.FieldIndexCount);
+    saveData_.StructSlots.emplace(&structure, structureSlot);
+
     for (std::size_t i = 0; i < structure.count(); ++i) {
         const GffField* fieldPtr = structure.GetField(i);
-        saveData_.FieldCount = checkedUInt32Add(saveData_.FieldCount, 1u, "counting fields for save");
         if (!fieldPtr) {
             throw GffError("Access violation reading null GFF field while parsing struct " + structure.GetLabel() + " for save!");
         }
         const GffField& field = *fieldPtr;
-
-        saveData_.AddLabel(field.GetLabelRaw());
+        const auto& source = field.sourceLocation_;
+        const bool existingField = source.owner == sourceId_ && source.fieldIndex != 0xFFFFFFFFu;
+        SaveData::FieldSlot fieldSlot;
+        fieldSlot.index = existingField ? source.fieldIndex : reserve(saveData_.FieldCount, 1u);
+        fieldSlot.labelIndex = existingField && saveData_.FieldLabels[source.labelIndex] == field.GetLabelRaw()
+            ? source.labelIndex : saveData_.AddLabel(field.GetLabelRaw());
+        fieldSlot.dataOffset = existingField ? source.dataOffset : 0;
+        fieldSlot.dataCapacity = existingField ? source.dataCapacity : 0;
+        const UInt32 dataSize = field.fieldtype == FIELD_TYPE_LIST
+            ? checkedUInt32Add(4u, checkedUInt32Mul(checkedCountToUInt32(checkedGffCast<GffList>(field).count(),
+                "counting list entries"), 4u, "sizing list indexes"), "sizing list indexes")
+            : IsComplexField(field) ? GetFieldDataSize(field) : 0;
+        resizeBlock(fieldSlot.dataOffset, fieldSlot.dataCapacity, dataSize, field.fieldtype == FIELD_TYPE_LIST
+            ? saveData_.ListIndexCount : saveData_.DataBlockSize);
+        saveData_.FieldSlots.emplace(&field, fieldSlot);
 
         if (field.fieldtype == FIELD_TYPE_STRUCT) {
-            saveData_.StructCount = checkedUInt32Add(saveData_.StructCount, 1u, "counting structs for save");
-            const auto& nested = checkedGffCast<GffStruct>(field);
-            if (nested.count() > 1) {
-                saveData_.FieldIndexCount = checkedUInt32Add(saveData_.FieldIndexCount, checkedCountToUInt32(nested.count(), "counting nested field indexes"), "counting nested field indexes");
-            }
-            SaveParseStruct(nested);
+            SaveParseStruct(checkedGffCast<GffStruct>(field));
         } else if (field.fieldtype == FIELD_TYPE_LIST) {
-            saveData_.ListCount = checkedUInt32Add(saveData_.ListCount, 1u, "counting lists for save");
-            const auto& list = checkedGffCast<GffList>(field);
-            if (list.count() > 0) {
-                saveData_.ListIndexCount = checkedUInt32Add(saveData_.ListIndexCount, checkedCountToUInt32(list.count(), "counting list indexes"), "counting list indexes");
-            }
-            SaveParseList(list);
-        } else if (IsComplexField(field)) {
-            saveData_.DataBlockSize = checkedUInt32Add(saveData_.DataBlockSize, GetFieldDataSize(field), "counting field data bytes");
+            SaveParseList(checkedGffCast<GffList>(field));
         }
     }
 }
 
 void GffFile::SaveParseList(const GffList& list) {
     for (std::size_t i = 0; i < list.count(); ++i) {
-        const GffStruct* structurePtr = list.GetStruct(i);
-        saveData_.StructCount = checkedUInt32Add(saveData_.StructCount, 1u, "counting structs for save");
-        if (!structurePtr) {
+        const GffStruct* structure = list.GetStruct(i);
+        if (!structure) {
             throw GffError("Access violation reading null GFF STRUCT while parsing LIST " + list.GetLabel() + " for save!");
         }
-        const GffStruct& structure = *structurePtr;
-        if (structure.count() > 1) {
-            saveData_.FieldIndexCount = checkedUInt32Add(saveData_.FieldIndexCount, checkedCountToUInt32(structure.count(), "counting field indexes"), "counting field indexes");
-        }
-        SaveParseStruct(structure);
+        SaveParseStruct(*structure);
     }
-}
-
-UInt32 GffFile::SaveGetLabelIndex(const Fixed16Chars& label) const {
-    for (std::size_t i = 0; i < saveData_.FieldLabels.size(); ++i) {
-        if (saveData_.FieldLabels[i] == label) {
-            return static_cast<UInt32>(i);
-        }
-    }
-    return 0;
 }
 
 void GffFile::SaveProcessLabels() {
@@ -2843,12 +2854,16 @@ std::vector<std::uint8_t> GffFile::SaveBytes() {
     saveData_ = SaveData{};
 
     try {
-        saveData_.StructCount = checkedUInt32Add(saveData_.StructCount, 1u, "counting structs for save");
+        saveData_.StructCount = previousHeader.structcount;
+        saveData_.FieldCount = previousHeader.fieldcount;
+        saveData_.FieldIndexCount = previousHeader.fieldindexcount;
+        saveData_.ListIndexCount = previousHeader.listindexcount;
+        saveData_.DataBlockSize = previousHeader.fielddatacount;
+        saveData_.FieldLabels.resize(previousHeader.labelcount);
+        for (std::size_t i = 0; i < saveData_.FieldLabels.size(); ++i)
+            std::memcpy(saveData_.FieldLabels[i].data(), sourceBytes_.data() + previousHeader.labeloffset + i * 16u, 16u);
         if (!rootStruct_) {
             throw GffError("Access violation reading GFF root struct while saving file.");
-        }
-        if (rootStruct_->count() > 1) {
-            saveData_.FieldIndexCount = checkedUInt32Add(saveData_.FieldIndexCount, checkedCountToUInt32(rootStruct_->count(), "counting root field indexes"), "counting root field indexes");
         }
         SaveParseStruct(*rootStruct_);
 
@@ -2863,12 +2878,24 @@ std::vector<std::uint8_t> GffFile::SaveBytes() {
         header_.fielddataoffset = checkedUInt32Add(header_.labeloffset, checkedUInt32Mul(header_.labelcount, 16u, "computing Field Data offset"), "computing Field Data offset");
         header_.fielddatacount = saveData_.DataBlockSize;
         header_.fieldindexoffset = checkedUInt32Add(header_.fielddataoffset, header_.fielddatacount, "computing Field Indices offset");
-        header_.fieldindexcount = checkedUInt32Mul(saveData_.FieldIndexCount, 4u, "computing Field Indices byte count");
+        header_.fieldindexcount = saveData_.FieldIndexCount;
         header_.listindexoffset = checkedUInt32Add(header_.fieldindexoffset, header_.fieldindexcount, "computing List Indices offset");
-        header_.listindexcount = checkedUInt32Add(checkedUInt32Mul(saveData_.ListIndexCount, 4u, "computing List Indices struct-index byte count"), checkedUInt32Mul(saveData_.ListCount, 4u, "computing List Indices count byte count"), "computing List Indices byte count");
+        header_.listindexcount = saveData_.ListIndexCount;
 
         writer_ = std::make_unique<BinaryWriter>(
             static_cast<std::size_t>(header_.listindexoffset) + header_.listindexcount);
+
+        const auto copySection = [&](UInt32 source, UInt32 target, std::size_t size) {
+            writer_->seek(target);
+            writer_->writeBytes(reinterpret_cast<const char*>(sourceBytes_.data() + source), size);
+        };
+        copySection(previousHeader.structoffset, header_.structoffset, static_cast<std::size_t>(previousHeader.structcount) * 12u);
+        copySection(previousHeader.fieldoffset, header_.fieldoffset, static_cast<std::size_t>(previousHeader.fieldcount) * 12u);
+        copySection(previousHeader.labeloffset, header_.labeloffset, static_cast<std::size_t>(previousHeader.labelcount) * 16u);
+        copySection(previousHeader.fielddataoffset, header_.fielddataoffset, previousHeader.fielddatacount);
+        copySection(previousHeader.fieldindexoffset, header_.fieldindexoffset, previousHeader.fieldindexcount);
+        copySection(previousHeader.listindexoffset, header_.listindexoffset, previousHeader.listindexcount);
+        writer_->seek(0);
 
         writer_->writeBytes(header_.filetype.data(), 4);
         writer_->writeBytes(header_.fileversion.data(), 4);
@@ -2885,18 +2912,20 @@ std::vector<std::uint8_t> GffFile::SaveBytes() {
         writer_->write(header_.listindexoffset);
         writer_->write(header_.listindexcount);
 
-        saveData_.CurrStructOffset = header_.structoffset;
-        saveData_.CurrFieldOffset = header_.fieldoffset;
-        saveData_.CurrFieldDataOffset = header_.fielddataoffset;
-        saveData_.CurrFieldIndexOffset = header_.fieldindexoffset;
-        saveData_.CurrListIndexOffset = header_.listindexoffset;
-
         SaveProcessLabels();
         SaveProcessStruct(*rootStruct_);
 
         auto output = std::move(writer_->bytes);
         writer_.reset();
-        header_ = previousHeader;
+        sourceBytes_ = output;
+        for (const auto& [structure, slot] : saveData_.StructSlots) {
+            structure->sourceLocation_.owner = sourceId_;
+            structure->sourceStructIndex_ = slot.index;
+            structure->sourceFieldIndicesOffset_ = slot.fieldsOffset;
+            structure->sourceFieldIndicesCapacity_ = slot.fieldsCapacity;
+        }
+        for (const auto& [field, slot] : saveData_.FieldSlots)
+            field->sourceLocation_ = {sourceId_, slot.index, slot.labelIndex, slot.dataOffset, slot.dataCapacity};
         saveData_ = std::move(previousSaveData);
         return output;
     } catch (...) {
@@ -2925,21 +2954,19 @@ void GffFile::SaveFile(const std::filesystem::path& outFilename) {
 }
 
 UInt32 GffFile::SaveProcessStruct(const GffStruct& structure) {
-    writer_->seek(saveData_.CurrStructOffset);
-    const UInt32 resultIndex = saveData_.CurrStructIndex;
-    saveData_.CurrStructIndex = checkedUInt32Add(saveData_.CurrStructIndex, 1u, "advancing save struct index");
-    saveData_.CurrStructOffset = checkedUInt32Add(saveData_.CurrStructOffset, 12u, "advancing save struct offset");
+    const auto& slot = saveData_.StructSlots.at(&structure);
+    const UInt32 resultIndex = slot.index;
+    writer_->seek(header_.structoffset + resultIndex * 12u);
 
     writer_->write(structure.typeid_);
     const UInt32 dataOrOffsetPosition = writer_->position();
-    UInt32 placeholder = 0xFFFFFFFFu;
-    writer_->write(placeholder);
+    if (structure.sourceLocation_.owner == sourceId_) writer_->seek(dataOrOffsetPosition + 4u);
+    else writer_->write(UInt32{0xFFFFFFFFu});
     writer_->write(checkedCountToUInt32(structure.count(), "writing struct field count"));
 
     if (structure.count() > 1) {
-        const UInt32 fieldIndexOffset = saveData_.CurrFieldIndexOffset - header_.fieldindexoffset;
-        UInt32 nextIndexPosition = saveData_.CurrFieldIndexOffset;
-        saveData_.CurrFieldIndexOffset = checkedUInt32Add(saveData_.CurrFieldIndexOffset, checkedUInt32Mul(checkedCountToUInt32(structure.count(), "reserving field index table"), 4u, "reserving field index table"), "reserving field index table");
+        const UInt32 fieldIndexOffset = slot.fieldsOffset;
+        UInt32 nextIndexPosition = header_.fieldindexoffset + fieldIndexOffset;
 
         for (std::size_t i = 0; i < structure.count(); ++i) {
             const GffField* child = structure.GetField(i);
@@ -2976,32 +3003,30 @@ UInt32 GffFile::SaveProcessFieldSlot(const GffField* field, const std::string& s
 }
 
 UInt32 GffFile::SaveProcessField(const GffField& field) {
-    writer_->seek(saveData_.CurrFieldOffset);
-    const UInt32 resultIndex = saveData_.CurrFieldIndex;
-    saveData_.CurrFieldIndex = checkedUInt32Add(saveData_.CurrFieldIndex, 1u, "advancing save field index");
-    saveData_.CurrFieldOffset = checkedUInt32Add(saveData_.CurrFieldOffset, 12u, "advancing save field offset");
+    const auto& slot = saveData_.FieldSlots.at(&field);
+    const UInt32 resultIndex = slot.index;
+    writer_->seek(header_.fieldoffset + resultIndex * 12u);
 
     writer_->write(field.fieldtype);
-    const UInt32 labelIndex = SaveGetLabelIndex(field.GetLabelRaw());
-    writer_->write(labelIndex);
+    writer_->write(slot.labelIndex);
     const UInt32 dataOrOffsetPosition = writer_->position();
 
     switch (field.fieldtype) {
     case FIELD_TYPE_BYTE:
         writer_->write(checkedGffCast<GffByteField>(field).value);
-        writer_->writeZero(3);
+        writer_->seek(dataOrOffsetPosition + 4u);
         break;
     case FIELD_TYPE_CHAR:
         writer_->write(checkedGffCast<GffCharField>(field).value);
-        writer_->writeZero(3);
+        writer_->seek(dataOrOffsetPosition + 4u);
         break;
     case FIELD_TYPE_WORD:
         writer_->write(checkedGffCast<GffWordField>(field).value);
-        writer_->writeZero(2);
+        writer_->seek(dataOrOffsetPosition + 4u);
         break;
     case FIELD_TYPE_SHORT:
         writer_->write(checkedGffCast<GffShortField>(field).value);
-        writer_->writeZero(2);
+        writer_->seek(dataOrOffsetPosition + 4u);
         break;
     case FIELD_TYPE_DWORD:
         writer_->write(checkedGffCast<GffUInt32Field>(field).value);
@@ -3047,9 +3072,8 @@ UInt32 GffFile::SaveProcessField(const GffField& field) {
 }
 
 UInt32 GffFile::SaveProcessComplexFieldData(const GffField& field) {
-    writer_->seek(saveData_.CurrFieldDataOffset);
-    const UInt32 resultOffset = checkedUInt32Sub(saveData_.CurrFieldDataOffset, header_.fielddataoffset, "computing field data relative offset");
-    saveData_.CurrFieldDataOffset = checkedUInt32Add(saveData_.CurrFieldDataOffset, GetFieldDataSize(field), "advancing field data write offset");
+    const UInt32 resultOffset = saveData_.FieldSlots.at(&field).dataOffset;
+    writer_->seek(header_.fielddataoffset + resultOffset);
 
     switch (field.fieldtype) {
     case FIELD_TYPE_DWORD64: {
@@ -3128,9 +3152,8 @@ UInt32 GffFile::SaveProcessComplexFieldData(const GffField& field) {
 }
 
 UInt32 GffFile::SaveProcessList(const GffList& list) {
-    writer_->seek(saveData_.CurrListIndexOffset);
-    const UInt32 resultOffset = checkedUInt32Sub(saveData_.CurrListIndexOffset, header_.listindexoffset, "computing list relative offset");
-    saveData_.CurrListIndexOffset = checkedUInt32Add(saveData_.CurrListIndexOffset, checkedUInt32Add(4u, checkedUInt32Mul(checkedCountToUInt32(list.count(), "reserving list index table"), 4u, "reserving list index table"), "reserving list index table"), "reserving list index table");
+    const UInt32 resultOffset = saveData_.FieldSlots.at(&list).dataOffset;
+    writer_->seek(header_.listindexoffset + resultOffset);
 
     writer_->write(checkedCountToUInt32(list.count(), "writing list struct count"));
     UInt32 nextIndexPosition = writer_->position();
