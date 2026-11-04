@@ -20,6 +20,7 @@ neoshared::ResourceDocument readResourceDocument(const KeyBifArchive& key,
         if(!archive.resolvedPath.empty())result.protectedInputs.push_back(archive.resolvedPath);
     }
     if(selected.source==ResourceSource::KeyBif) {
+        result.priority=neoshared::ResourcePriority::Key;
         if(selected.resourceIndex>=key.resources().size())throw std::out_of_range("Invalid BIF resource selection.");
         const auto& item=key.resources()[selected.resourceIndex];
         if(item.bifIndex>=key.bifs().size())throw std::out_of_range("Invalid BIF owner.");
@@ -32,6 +33,8 @@ neoshared::ResourceDocument readResourceDocument(const KeyBifArchive& key,
         const auto& item=loose.resources()[selected.resourceIndex];
         if(item.archiveIndex>=loose.archives().size())throw std::out_of_range("Invalid archive owner.");
         const auto& owner=loose.archives()[item.archiveIndex];
+        result.priority=item.overrideFile?neoshared::ResourcePriority::Directory:
+            owner.kind==LooseArchiveKind::Rim?neoshared::ResourcePriority::Image:neoshared::ResourcePriority::Archive;
         source=owner.browserBacked?std::filesystem::path(owner.browserRelativePath):owner.resolvedPath;
         result.fileName=item.fileName();result.type=item.type;id=item.resourceId;ready=item.extractable;memberIndex=item.archiveResourceIndex;
         byteCount=item.size;
@@ -42,6 +45,7 @@ neoshared::ResourceDocument readResourceDocument(const KeyBifArchive& key,
         }
     }
     if(!ready)throw std::runtime_error("The selected resource is unavailable or inconsistent. Rescan before opening it.");
+    result.sourcePath=source;
     // Length-prefix components: separators inside a path cannot collide with
     // another tuple. Include the archive, not just ResRef or global row index.
     const auto component=[](const std::string& value){return std::to_string(value.size())+":"+value;};
