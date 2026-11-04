@@ -4,6 +4,10 @@
 
 `NeoShared` contains the reusable and wxWidgets infrastructure consumed by the independent Neo tool repositories.
 
+Support is offered in the OpenKotOR Discord.
+
+[![OpenKotOR Discord](https://discordapp.com/api/guilds/739590575359262792/widget.png?style=banner2)](https://discord.gg/OpenKotOR)
+
 ## Checkout layout
 
 Clone `neoshared` beside each tool repository:
