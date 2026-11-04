@@ -271,6 +271,7 @@ void TlkLookup::clear() {
     loaded_ = false;
     filename_.clear();
     languageId_ = 0;
+    textEncoding_ = TextEncoding::Windows1252;
     strings_.clear();
     textByteCounts_.clear();soundLengths_.clear();
     flags_.clear(); classicV30_ = false; nativeEncodingUsable_ = false;
@@ -299,6 +300,7 @@ void TlkLookup::loadImpl(const std::filesystem::path& file, std::optional<TextEn
     clear();
     if (isGff4TlkV05) {
         sparseStrings_ = loadGff4TlkV05(file);
+        textEncoding_ = TextEncoding::Utf8;
         filename_ = file;
         loaded_ = true;
         return;
@@ -307,6 +309,7 @@ void TlkLookup::loadImpl(const std::filesystem::path& file, std::optional<TextEn
     TalkTable table(neoshared::pathToUtf8(file));
     if (interpretation) table.reinterpretTextEncoding(*interpretation);
     classicV30_ = table.storageFormat() == TlkStorageFormat::ClassicV30;
+    textEncoding_ = table.preferredTextEncoding();
     nativeEncodingUsable_ = table.hasNativeTextEncoding();
     languageId_ = table.supportsLanguageId() ? table.language() : 0u;
     if (table.hasSparseStrRefs()) {
@@ -413,6 +416,10 @@ TlkResolution resolveKotorText(const KotorTlkContext& context, std::uint32_t str
     if (context.maleTables.empty() && (context.femaleTables.empty() || gender == TlkGender::Male))
         last.status = TlkResolutionStatus::ContextUnavailable;
     return last;
+}
+
+std::optional<std::string> TlkLookup::resolveKotor(std::uint32_t strref) const {
+    return resolveKotorText({{this}, {}}, strref, languageId_).text;
 }
 
 } // namespace neotlk

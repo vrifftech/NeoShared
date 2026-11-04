@@ -550,7 +550,8 @@ std::string serializeRetainedExportPayload(
                << entry.fileId << '\t'
                << entry.offset << '\t'
                << entry.size << '\t'
-               << percentEncode(entry.outputPath);
+               << percentEncode(entry.outputPath) << '\t'
+               << (entry.decodedBytes.empty() ? 0 : reinterpret_cast<std::uintptr_t>(entry.decodedBytes.data()));
     }
     return output.str();
 }

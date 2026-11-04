@@ -2,6 +2,7 @@
 
 #include "GFFFile.hpp"
 #include "GffTypeNames.hpp"
+#include "GffText.hpp"
 #include <neotlk/TlkLookup.hpp>
 
 #include <filesystem>
@@ -32,6 +33,8 @@ public:
     void loadTlk(const std::filesystem::path& file);
     void clearTlk();
     const neotlk::TlkLookup& tlk() const noexcept { return tlk_; }
+    neotlk::TextEncoding textEncoding(int stringId = -1) const;
+    void updateTextFormat();
 
     std::vector<GffFieldRow> rows() const;
     neotabular::Table toTable() const;
@@ -58,6 +61,7 @@ public:
 private:
     GffFile file_;
     neotlk::TlkLookup tlk_;
+    bool unicodeText_ = false;
 };
 
 std::unique_ptr<GffField> createField(const std::string& label,

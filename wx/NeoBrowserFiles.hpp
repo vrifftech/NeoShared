@@ -10,7 +10,7 @@
 
 namespace neobrowser {
 
-inline constexpr unsigned kBrowserFileApiVersion = 11u;
+inline constexpr unsigned kBrowserFileApiVersion = 12u;
 
 struct OpenFilesResult {
     std::vector<std::filesystem::path> paths;
@@ -193,6 +193,7 @@ struct RetainedExportEntry {
     std::uint64_t offset = 0;
     std::uint64_t size = 0;
     std::string outputPath;
+    std::vector<std::uint8_t> decodedBytes;
 };
 
 struct RetainedExportResult {
@@ -212,7 +213,7 @@ struct RetainedExportResult {
 
 using RetainedExportCallback = std::function<void(RetainedExportResult)>;
 
-// Exports byte ranges directly from retained browser files. DirectDownload
+// Exports retained file ranges or decoded resource bytes. DirectDownload
 // creates one Blob slice, ZipDownload writes a store-only ZIP incrementally,
 // and Directory streams each range into a selected writable directory. Large
 // source files are never materialized in MEMFS.

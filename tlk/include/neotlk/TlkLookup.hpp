@@ -33,6 +33,7 @@ public:
     const std::filesystem::path& filename() const noexcept { return filename_; }
     std::uint32_t languageId() const noexcept { return languageId_; }
     bool isClassicV30() const noexcept { return classicV30_; }
+    TextEncoding textEncoding() const noexcept { return textEncoding_; }
     std::size_t count() const noexcept { return strings_.empty() ? sparseStrings_.size() : strings_.size(); }
 
     // Exact index / sparse ID. Raw access is for inspection, not dialogue text.
@@ -40,6 +41,7 @@ public:
     // Single-table effective text. No silent StrRef mask or implicit fallback.
     TlkResolution resolveEntry(std::uint32_t strref) const;
     std::optional<std::string> resolve(std::uint32_t strref) const;
+    std::optional<std::string> resolveKotor(std::uint32_t strref) const;
 
 private:
     void loadImpl(const std::filesystem::path& file, std::optional<TextEncoding> interpretation);
@@ -48,6 +50,7 @@ private:
     bool nativeEncodingUsable_ = false;
     std::filesystem::path filename_;
     std::uint32_t languageId_ = 0;
+    TextEncoding textEncoding_ = TextEncoding::Windows1252;
     std::vector<std::string> strings_;
     std::vector<std::uint32_t> flags_;
     std::vector<std::uint32_t> textByteCounts_;

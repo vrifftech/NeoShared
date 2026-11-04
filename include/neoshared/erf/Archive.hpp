@@ -89,7 +89,8 @@ enum class ArchiveDiskFormat {
     RimV1,
     ErfV2_0,
     ErfV2_2,
-    ErfV3_0
+    ErfV3_0,
+    ErfV1Lzma
 };
 
 

@@ -69,7 +69,7 @@ std::string sanitizeComponent(std::string value) {
 LooseArchiveKind kindFromExtension(const std::filesystem::path& path) {
     const std::string extension = lowerAscii(path.extension().string());
     if (extension == ".erf") return LooseArchiveKind::Erf;
-    if (extension == ".mod") return LooseArchiveKind::Mod;
+    if (extension == ".mod" || extension == ".mzd") return LooseArchiveKind::Mod;
     if (extension == ".sav") return LooseArchiveKind::Sav;
     if (extension == ".hak") return LooseArchiveKind::Hak;
     if (extension == ".nwm") return LooseArchiveKind::Nwm;
@@ -124,6 +124,7 @@ bool isNeoBifArchiveFormat(neoshared::erf::ArchiveDiskFormat format) {
     // NeoBIF is an Odyssey-family game archive browser. Keep the same
     // V1.0/V1.1 ERF-family and RIM scope used before parser centralization.
     return format == neoshared::erf::ArchiveDiskFormat::ErfV1 ||
+           format == neoshared::erf::ArchiveDiskFormat::ErfV1Lzma ||
            format == neoshared::erf::ArchiveDiskFormat::RimV1;
 }
 
@@ -188,6 +189,7 @@ void populateFromSharedArchive(
             resource.boundsValid = true; // Shared parser rejects invalid extents.
             resource.extractable = true;
             resource.directRangeExtractable =
+                reader.disk_format() != neoshared::erf::ArchiveDiskFormat::ErfV1Lzma &&
                 reader.compression_scheme() == 0u &&
                 resource.storedSize == resource.size;
             resource.status = "Ready (NeoShared ERF core)";

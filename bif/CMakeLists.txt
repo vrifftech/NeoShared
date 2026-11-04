@@ -3,7 +3,8 @@ add_library(neoshared_bif STATIC
     KeyBifArchive.cpp
     LooseArchiveCatalog.cpp
     ResourceQuery.cpp
-    ResourceDocument.cpp)
+    ResourceDocument.cpp
+    ModFolder.cpp)
 add_library(neoshared::bif ALIAS neoshared_bif)
 target_include_directories(neoshared_bif PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../include")
 target_link_libraries(neoshared_bif PUBLIC neoshared::erf)

@@ -165,16 +165,37 @@ option(NEOSHARED_ENABLE_ERF
 
 if(NEOSHARED_ENABLE_ERF)
     find_package(ZLIB REQUIRED)
+    enable_language(C)
+    include(FetchContent)
+    set(BUILD_SHARED_LIBS OFF)
+    set(XZ_NLS OFF)
+    set(XZ_THREADS no)
+    set(XZ_ENCODERS lzma1)
+    set(XZ_DECODERS lzma1)
+    set(XZ_MICROLZMA_ENCODER OFF)
+    set(XZ_MICROLZMA_DECODER OFF)
+    set(XZ_LZIP_DECODER OFF)
+    set(XZ_TOOL_XZ OFF)
+    set(XZ_TOOL_XZDEC OFF)
+    set(XZ_TOOL_LZMADEC OFF)
+    set(XZ_TOOL_LZMAINFO OFF)
+    set(XZ_DOC OFF)
+    FetchContent_Declare(neoshared_lzma
+        URL https://codeload.github.com/tukaani-project/xz/tar.gz/refs/tags/v5.8.1
+        URL_HASH SHA256=bdbc23fbf9098843357e71e49685724fda2c320c29cb1b25fd90505f14bb0b3d)
+    FetchContent_MakeAvailable(neoshared_lzma)
 
     add_library(neoshared_erf
         erf/Archive.cpp
+        erf/LzmaResource.cpp
         erf/Utils.cpp
     )
     add_library(neoshared::erf ALIAS neoshared_erf)
     target_include_directories(neoshared_erf PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
+        PRIVATE ${neoshared_lzma_SOURCE_DIR}/src/liblzma/api
     )
-    target_link_libraries(neoshared_erf PUBLIC neoshared::path ZLIB::ZLIB)
+    target_link_libraries(neoshared_erf PUBLIC neoshared::path ZLIB::ZLIB PRIVATE liblzma)
     target_compile_features(neoshared_erf PUBLIC cxx_std_17)
     if(EMSCRIPTEN)
         target_compile_options(neoshared_erf PRIVATE -fexceptions)

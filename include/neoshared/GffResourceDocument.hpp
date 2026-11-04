@@ -26,6 +26,11 @@ inline void loadGffResource(const ResourceDocument& source, neogff::GffFile& fil
     if (!requiredType.empty() && !sameGffResourceType(file.filetype(), requiredType))
         throw std::runtime_error("The selected resource has the wrong GFF file type for this editor.");
 }
+inline void loadGffResource(const ResourceDocument& source, neogff::GffModel& model,
+                            const std::string& requiredType = {}) {
+    loadGffResource(source, model.gff(), requiredType);
+    model.updateTextFormat();
+}
 inline void checkGffOutputType(const std::filesystem::path& path,
                                const std::string& requiredExtension = {}) {
     std::string extension = neoshared::pathToUtf8(path.extension());

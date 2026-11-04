@@ -38,6 +38,7 @@ struct BifInfo {
     std::filesystem::path resolvedPath;
     std::uintmax_t actualFileSize{};
     InputSnapshot snapshot;
+    bool compressed{};
     bool browserBacked{};
     std::uint32_t browserSessionId{};
     std::uint32_t browserFileId{};
@@ -62,6 +63,7 @@ struct ResourceInfo {
     std::uint32_t engineIndex{};
     std::uint32_t offset{};
     std::uint32_t size{};
+    std::uint32_t packedSize{};
     bool keyed{true};
     bool bifEntryFound{};
     bool idMatches{};
@@ -96,11 +98,12 @@ public:
     bool open(const std::filesystem::path& keyPath,
               const std::vector<std::filesystem::path>& supplementaryFiles = {},
               const std::map<std::size_t, std::filesystem::path>& explicitRelocations = {},
-              const JobControl& job = {});
+              const JobControl& job = {},
+              bool preferCompressed = true);
 
     // Opens a KEY/BIF set whose contents remain in browser-owned File objects.
-    // The supplied reader is used only while building the archive index; large
-    // resource payloads remain range-addressable through BifInfo browser IDs.
+    // The supplied reader is retained for compressed resource reads; large
+    // uncompressed payloads remain range-addressable through BifInfo browser IDs.
     bool openBrowser(const BrowserArchiveFile& keyFile,
                      const std::vector<BrowserArchiveFile>& files,
                      const BrowserRangeReader& reader,
@@ -145,6 +148,7 @@ private:
     std::vector<ArchiveIssue> issues_;
     std::string lastError_;
     bool open_{};
+    BrowserRangeReader browserReader_;
 };
 
 std::string gameProfileName(GameProfile profile);

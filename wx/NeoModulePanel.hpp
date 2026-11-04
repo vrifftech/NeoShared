@@ -14,16 +14,19 @@
 #include <utility>
 #include <vector>
 
+namespace neoshared::bif {class ModFolder;}
+
 // Small, compile-time hosting boundary. No plugin loader and no second wxApp.
 namespace neomodules {
-inline constexpr unsigned kPanelApiVersion = 4;
+inline constexpr unsigned kPanelApiVersion = 7;
 class Panel;
 struct Context {
     bool embedded = false;
     bool compact = false;
     std::function<void(const wxString&)> titleChanged;
     std::function<void()> closeRequested;
-    std::function<void(const std::filesystem::path&, const Panel*)> validateOutput;
+    std::function<void(const std::vector<std::filesystem::path>&, const Panel*,
+                       const std::vector<std::filesystem::path>&)> validateOutputs;
     // Resolves a game resource from the host session without retaining archive internals.
     // Embedded viewers use this for companion resources such as MDX and TPC.
     std::function<std::optional<neoshared::ResourceDocument>(const std::string&, std::uint16_t)> resolveResource;
@@ -31,6 +34,8 @@ struct Context {
     // returned native resolver owns its indexed session, without a wx object.
     // Emscripten hosts execute its browser range reads on the JS/UI thread.
     std::function<neoshared::ResourceResolver()> captureResourceResolver;
+    std::function<neoshared::ResourceResolver(const std::string&)> captureScopedResourceResolver;
+    std::function<std::shared_ptr<const neoshared::bif::ModFolder>()> captureModFolder;
 
 };
 class Panel : public wxPanel {
@@ -51,11 +56,17 @@ public:
     bool dispatch(wxEvent& event) { return GetEventHandler()->ProcessEventLocally(event); }
     virtual std::vector<std::filesystem::path> openPaths() const { return {}; }
     virtual bool canClose() = 0;
+    virtual void resourceContextChanged() {}
     virtual void setAppearance(bool dark, double fontScale) = 0;
 protected:
     Context context_;
-    void validateHostOutput(const std::filesystem::path& path) const {
-        if (context_.validateOutput) context_.validateOutput(path, this);
+    void validateHostOutput(const std::filesystem::path& path,
+                            const std::vector<std::filesystem::path>& inputs = {}) const {
+        validateHostOutputs({path}, inputs);
+    }
+    void validateHostOutputs(const std::vector<std::filesystem::path>& paths,
+                             const std::vector<std::filesystem::path>& inputs = {}) const {
+        if (context_.validateOutputs) context_.validateOutputs(paths, this, inputs);
     }
     void setModuleMenus(wxMenuBar* bar) {
         pendingMenus_.reset(bar);

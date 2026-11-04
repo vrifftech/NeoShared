@@ -283,6 +283,24 @@ void appendRowsForStruct(std::vector<GffFieldRow>& out, const GffStruct& structu
     }
 }
 
+bool usesUnicodeText(const GffStruct& structure) {
+    for (const auto& field : structure.allFields()) {
+        if (field->fieldtype == FIELD_TYPE_JADE_STRREF) return true;
+        if (field->fieldtype == FIELD_TYPE_STRUCT &&
+            usesUnicodeText(static_cast<const GffStruct&>(*field))) return true;
+        if (field->fieldtype == FIELD_TYPE_LIST)
+            for (const auto& child : static_cast<const GffList&>(*field).allStructs())
+                if (usesUnicodeText(*child)) return true;
+    }
+    return false;
+}
+
+int pathStringId(const std::string& path) {
+    const auto suffix = path.rfind("(lang");
+    return suffix == std::string::npos ? -1 :
+        ParseInt32Decimal(path.substr(suffix + 5, path.size() - suffix - 6));
+}
+
 } // namespace
 
 std::unique_ptr<GffField> createField(const std::string& label,
@@ -476,10 +494,12 @@ std::string preferredGffExtensionForType(std::string fileType) {
 
 void GffModel::newFile(const std::string& fileType) {
     file_.NewFile(normalizeGffFileType(fileType.empty() ? "UTC" : fileType));
+    updateTextFormat();
 }
 
 void GffModel::load(const std::filesystem::path& file) {
     file_.LoadFile(file);
+    updateTextFormat();
 }
 
 void GffModel::save(const std::filesystem::path& file) {
@@ -490,6 +510,17 @@ void GffModel::loadTlk(const std::filesystem::path& file) {
     tlk_.load(file);
 }
 
+void GffModel::updateTextFormat() {
+    unicodeText_ = file_.isGff4() || file_.filetype().rfind("QST", 0) == 0 ||
+                   usesUnicodeText(*file_.root());
+}
+
+neotlk::TextEncoding GffModel::textEncoding(int stringId) const {
+    if (unicodeText_ || file_.isGff4()) return neotlk::TextEncoding::Utf8;
+    if (stringId < 0 || std::uint32_t(stringId / 2) == tlk_.languageId()) return tlk_.textEncoding();
+    return gffTextEncoding(std::uint32_t(stringId / 2));
+}
+
 void GffModel::clearTlk() {
     tlk_.clear();
 }
@@ -498,6 +529,14 @@ std::vector<GffFieldRow> GffModel::rows() const {
     std::vector<GffFieldRow> out;
     if (!file_.loaded() || file_.root() == nullptr) return out;
     appendRowsForStruct(out, *file_.root(), "", tlk_.loaded() ? &tlk_ : nullptr);
+    for (auto& row : out) {
+        if (row.type == fieldTypeName(FIELD_TYPE_CEXOSTRING) ||
+            row.type == fieldTypeName(FIELD_TYPE_RESREF) ||
+            row.type == fieldTypeName(FIELD_TYPE_CHAR))
+            row.value = neotlk::decodeTextBytes(row.value, textEncoding());
+        else if (row.type == "CExoLocString Text")
+            row.value = neotlk::decodeTextBytes(row.value, textEncoding(pathStringId(row.path)));
+    }
     return out;
 }
 
@@ -516,10 +555,11 @@ std::string GffModel::toXml() const {
 
 void GffModel::importXml(const std::string& xmlText) {
     LoadGffXml(file_, xmlText);
+    updateTextFormat();
 }
 
 void GffModel::setValue(const std::string& path, const std::string& value) {
-    if (!file_.ChangeFieldValue(path, value)) {
+    if (!file_.ChangeFieldValue(path, neotlk::encodeTextBytes(value, textEncoding(pathStringId(path))))) {
         throw std::invalid_argument("Unable to edit GFF value at path: " + path);
     }
 }
@@ -531,7 +571,9 @@ void GffModel::addField(const std::string& parentPath,
                              std::uint32_t structTypeId) {
     std::string normalizedParent = parentPath;
     if (normalizedParent == "." || lowerAsciiLocal(normalizedParent) == "root") normalizedParent.clear();
-    file_.AddField(createField(label, type, value, structTypeId), normalizedParent);
+    const auto stored = neotlk::encodeTextBytes(value, textEncoding());
+    file_.AddField(createField(label, type, stored, structTypeId), normalizedParent);
+    updateTextFormat();
 }
 
 void GffModel::deleteField(const std::string& path) {

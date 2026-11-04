@@ -862,7 +862,7 @@ void TwoDAFile::validateShape() const {
             throw TwoDAError("Internal 2DA row width does not match the column count.");
         }
         for (const auto& value : entries_[r]) {
-            validateTokenSize(value, "Cell value");
+            if (nativeFormat_ != NativeFormat::Binary2DA) validateTokenSize(value, "Cell value");
         }
     }
 }
@@ -1393,9 +1393,6 @@ void TwoDAFile::loadStream(std::istream& in, const std::filesystem::path& filena
                     if (!in) {
                         break;
                     }
-                    if (value.size() > kBufferSize - 1) {
-                        throw TwoDAError("Buffer overflow while reading a 2DA cell entry.", 6);
-                    }
                     if (ch == '\0') {
                         sawNullTerminator = true;
                         break;
@@ -1540,7 +1537,7 @@ void TwoDAFile::saveBinary2DA(const std::filesystem::path& filename) const {
                     const std::uint64_t relative = absolute - dataOffset;
                     offsets[r][c] = relative;
                     stringOffsets.emplace(value, relative);
-                    writeBounded2DAString(out, value, "Cell value");
+                    detail::writeString(out, value);
                     ch = '\0';
                     detail::writeBytes(out, &ch, 1);
                 }
@@ -1842,7 +1839,7 @@ std::size_t TwoDAFile::columnIndexByLabel(const std::string& label) const {
 
 std::size_t TwoDAFile::addRow(std::string label, std::string defaultValue) {
     requireLoaded("No 2DA file has been loaded; unable to add row.", 31);
-    validateTokenSize(defaultValue, "Cell value");
+    if (nativeFormat_ != NativeFormat::Binary2DA) validateTokenSize(defaultValue, "Cell value");
     if (label.empty()) {
         label = defaultRowLabel(rowLabels_.size());
     }
@@ -1864,7 +1861,7 @@ std::size_t TwoDAFile::addColumn(std::string label, std::string defaultValue) {
         label = defaultColumnLabel(columnLabels_.size());
     }
     validateTokenSize(label, "Column label");
-    validateTokenSize(defaultValue, "Cell value");
+    if (nativeFormat_ != NativeFormat::Binary2DA) validateTokenSize(defaultValue, "Cell value");
     const std::size_t created = columnLabels_.size();
     columnLabels_.push_back(std::move(label));
     if (nativeFormat_ == NativeFormat::GDA) {
@@ -1980,7 +1977,7 @@ void TwoDAFile::setCell(std::size_t row, std::size_t column, std::string value) 
     if (column >= columnLabels_.size()) {
         throw TwoDAError("Invalid column index specified.", 26);
     }
-    validateTokenSize(value, "Cell value");
+    if (nativeFormat_ != NativeFormat::Binary2DA) validateTokenSize(value, "Cell value");
     entries_[row][column] = std::move(value);
     if (nativeFormat_ == NativeFormat::Binary2DA)
         binaryLiteralAsterisks_[row][column] = false;

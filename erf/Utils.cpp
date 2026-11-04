@@ -304,6 +304,26 @@ ScopedPosixFd open_regular_file_for_read_nonblocking(const std::filesystem::path
 }
 
 
+FileIdentity identity_from_posix_stat(const struct stat& st) {
+    FileIdentity identity{};
+    identity.valid = true;
+    identity.size = static_cast<std::uintmax_t>(st.st_size);
+    identity.device = static_cast<std::uint64_t>(st.st_dev);
+    identity.inode = static_cast<std::uint64_t>(st.st_ino);
+#if defined(__APPLE__)
+    identity.modified_seconds = st.st_mtimespec.tv_sec;
+    identity.modified_fraction = st.st_mtimespec.tv_nsec;
+    identity.changed_seconds = st.st_ctimespec.tv_sec;
+    identity.changed_fraction = st.st_ctimespec.tv_nsec;
+#else
+    identity.modified_seconds = st.st_mtim.tv_sec;
+    identity.modified_fraction = st.st_mtim.tv_nsec;
+    identity.changed_seconds = st.st_ctim.tv_sec;
+    identity.changed_fraction = st.st_ctim.tv_nsec;
+#endif
+    return identity;
+}
+
 FileIdentity capture_identity_from_posix_fd(int fd, std::uintmax_t size) {
     FileIdentity identity{};
     struct stat st {};
@@ -872,24 +892,50 @@ bool same_regular_file_identity(const std::filesystem::path& path, const FileIde
     }
 }
 
-bool same_regular_file_revision(const std::filesystem::path& path, const FileIdentity& expected) {
-    if (!expected.valid) return false;
-    try {
-        const auto current = capture_regular_file_identity(path);
-        const bool identityMatches =
 #if defined(_WIN32)
-            current.volume_serial == expected.volume_serial &&
-            current.file_index_high == expected.file_index_high &&
-            current.file_index_low == expected.file_index_low;
+FileIdentity capture_open_file_identity(void* handle) {
+    FileIdentity identity{};
+    BY_HANDLE_FILE_INFORMATION info{};
+    if (!GetFileInformationByHandle(handle, &info)) {
+        throw std::runtime_error("Unable to read opened regular file identity");
+    }
+    identity.valid = true;
+    identity.size = (static_cast<std::uintmax_t>(info.nFileSizeHigh) << 32u) | info.nFileSizeLow;
+    identity.modified_seconds = static_cast<std::int64_t>(
+        (static_cast<std::uint64_t>(info.ftLastWriteTime.dwHighDateTime) << 32u) |
+        info.ftLastWriteTime.dwLowDateTime);
+    FILE_BASIC_INFO basic{};
+    if (!GetFileInformationByHandleEx(handle, FileBasicInfo, &basic, sizeof(basic))) {
+        throw std::runtime_error("Unable to read opened file change revision");
+    }
+    identity.changed_seconds = basic.ChangeTime.QuadPart;
+    identity.volume_serial = static_cast<std::uint32_t>(info.dwVolumeSerialNumber);
+    identity.file_index_high = static_cast<std::uint32_t>(info.nFileIndexHigh);
+    identity.file_index_low = static_cast<std::uint32_t>(info.nFileIndexLow);
+    return identity;
+}
 #else
-            current.device == expected.device && current.inode == expected.inode;
+FileIdentity capture_open_file_identity(int fd) {
+    struct stat st {};
+    if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0) {
+        throw std::runtime_error("Unable to read opened regular file identity");
+    }
+    return identity_from_posix_stat(st);
+}
 #endif
-        return identityMatches && current.size == expected.size &&
+
+bool same_file_revision(const FileIdentity& current, const FileIdentity& expected) {
+    return same_identity_values(current, expected) && current.size == expected.size &&
             current.modified_seconds == expected.modified_seconds &&
             current.modified_fraction == expected.modified_fraction &&
             current.changed_seconds == expected.changed_seconds &&
             current.changed_fraction == expected.changed_fraction;
-    } catch (...) { return false; }
+}
+
+bool same_regular_file_revision(const std::filesystem::path& path, const FileIdentity& expected) {
+    if (!expected.valid) return false;
+    try { return same_file_revision(capture_regular_file_identity(path), expected); }
+    catch (...) { return false; }
 }
 
 void ensure_same_regular_file_identity(const std::filesystem::path& path, const FileIdentity& expected, const std::string& context) {

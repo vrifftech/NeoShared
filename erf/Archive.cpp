@@ -1,3 +1,4 @@
+#include <neoshared/erf/LzmaResource.hpp>
 #include "neoshared/erf/Archive.hpp"
 
 #include "neoshared/erf/Utils.hpp"
@@ -9,6 +10,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstring>
+#include <cstdio>
 #include <ctime>
 #include <fstream>
 #include <iomanip>
@@ -29,6 +31,8 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <io.h>
+#include <share.h>
 #else
 #include <fcntl.h>
 #include <unistd.h>
@@ -44,7 +48,12 @@ public:
     bool open_file(const std::filesystem::path& filename) {
         close();
         last_error_.clear();
-        if (file_.open(filename, std::ios::in | std::ios::binary) == nullptr) {
+#if defined(_WIN32)
+        file_ = _wfsopen(filename.c_str(), L"rb", _SH_DENYWR);
+#else
+        file_ = std::fopen(filename.c_str(), "rb");
+#endif
+        if (file_ == nullptr) {
             last_error_ = "Unable to open archive file";
             return false;
         }
@@ -76,12 +85,8 @@ public:
     bool is_open() const noexcept { return kind_ != Kind::Closed; }
 
     void close() noexcept {
-        if (file_.is_open()) {
-            try {
-                file_.close();
-            } catch (...) {
-            }
-        }
+        if (file_) std::fclose(file_);
+        file_ = nullptr;
         kind_ = Kind::Closed;
         reader_ = {};
         reader_size_ = 0;
@@ -100,9 +105,20 @@ public:
 
     const std::string& last_error() const noexcept { return last_error_; }
 
+    FileIdentity file_identity() const {
+#if defined(_WIN32)
+        return capture_open_file_identity(reinterpret_cast<void*>(_get_osfhandle(_fileno(file_))));
+#else
+        return capture_open_file_identity(::fileno(file_));
+#endif
+    }
+
 protected:
     int_type underflow() override {
-        if (kind_ == Kind::File) return file_.sgetc();
+        if (kind_ == Kind::File) {
+            const auto value = std::fgetc(file_);
+            return value == EOF ? traits_type::eof() : std::ungetc(value, file_);
+        }
         if (kind_ != Kind::Reader || reader_position_ >= reader_size_) {
             return traits_type::eof();
         }
@@ -112,7 +128,10 @@ protected:
     }
 
     int_type uflow() override {
-        if (kind_ == Kind::File) return file_.sbumpc();
+        if (kind_ == Kind::File) {
+            const auto value = std::fgetc(file_);
+            return value == EOF ? traits_type::eof() : value;
+        }
         const int_type value = underflow();
         if (!traits_type::eq_int_type(value, traits_type::eof())) ++reader_position_;
         return value;
@@ -120,7 +139,8 @@ protected:
 
     std::streamsize xsgetn(char* destination, std::streamsize count) override {
         if (count <= 0) return 0;
-        if (kind_ == Kind::File) return file_.sgetn(destination, count);
+        if (kind_ == Kind::File) return static_cast<std::streamsize>(
+            std::fread(destination, 1, static_cast<std::size_t>(count), file_));
         if (kind_ != Kind::Reader) return 0;
 
         std::streamsize total = 0;
@@ -140,9 +160,11 @@ protected:
 
     int_type pbackfail(int_type value) override {
         if (kind_ == Kind::File) {
-            return traits_type::eq_int_type(value, traits_type::eof())
-                ? file_.sungetc()
-                : file_.sputbackc(traits_type::to_char_type(value));
+            if (!traits_type::eq_int_type(value, traits_type::eof()))
+                return std::ungetc(static_cast<unsigned char>(traits_type::to_char_type(value)), file_);
+            if (seekoff(-1, std::ios_base::cur, std::ios_base::in) == pos_type(off_type(-1)))
+                return traits_type::eof();
+            return underflow();
         }
         if (kind_ != Kind::Reader || reader_position_ == 0) return traits_type::eof();
 
@@ -166,7 +188,17 @@ protected:
                      std::ios_base::seekdir direction,
                      std::ios_base::openmode which) override {
         if ((which & std::ios_base::in) == 0) return pos_type(off_type(-1));
-        if (kind_ == Kind::File) return file_.pubseekoff(offset, direction, which);
+        if (kind_ == Kind::File) {
+            const auto origin = direction == std::ios_base::beg ? SEEK_SET
+                : direction == std::ios_base::cur ? SEEK_CUR : SEEK_END;
+#if defined(_WIN32)
+            if (_fseeki64(file_, offset, origin) != 0) return pos_type(off_type(-1));
+            return pos_type(_ftelli64(file_));
+#else
+            if (::fseeko(file_, offset, origin) != 0) return pos_type(off_type(-1));
+            return pos_type(::ftello(file_));
+#endif
+        }
         if (kind_ != Kind::Reader) return pos_type(off_type(-1));
 
         std::uint64_t base = 0;
@@ -204,7 +236,7 @@ protected:
     }
 
     std::streamsize showmanyc() override {
-        if (kind_ == Kind::File) return file_.in_avail();
+        if (kind_ == Kind::File) return 0;
         if (kind_ != Kind::Reader || reader_position_ >= reader_size_) return 0;
         const std::uint64_t remaining = reader_size_ - reader_position_;
         const auto maximum = static_cast<std::uint64_t>(
@@ -257,7 +289,7 @@ private:
     }
 
     Kind kind_{Kind::Closed};
-    std::filebuf file_;
+    std::FILE* file_{};
     ArchiveRangeReader reader_;
     std::uint64_t reader_size_{};
     std::uint64_t reader_position_{};
@@ -307,6 +339,10 @@ bool detail::ArchiveInputStream::open_reader(std::uint64_t size,
 
 bool detail::ArchiveInputStream::is_open() const noexcept {
     return buffer_ != nullptr && buffer_->is_open();
+}
+
+FileIdentity detail::ArchiveInputStream::file_identity() const {
+    return buffer_->file_identity();
 }
 
 void detail::ArchiveInputStream::close() noexcept {
@@ -2445,6 +2481,12 @@ void copy_resource_payload_to_stream(std::istream& archive,
                                      const Resource& res,
                                      ArchiveDiskFormat disk_format,
                                      std::uint32_t archive_flags) {
+    if (disk_format == ArchiveDiskFormat::ErfV1Lzma) {
+        const auto packed = read_payload_bytes(archive, res.data_offset, res.packed_size);
+        const auto bytes = decode_lzma_resource(packed.data(), packed.size(), res.data_size);
+        out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+        return;
+    }
     const bool has_packed_toc = disk_format == ArchiveDiskFormat::ErfV2_2 ||
                                 disk_format == ArchiveDiskFormat::ErfV3_0;
     if (!has_packed_toc) {
@@ -2667,6 +2709,11 @@ void write_u32_to_byte_array(std::array<std::uint8_t, N>& bytes, std::size_t off
 
 
 } // namespace
+
+std::filesystem::path make_unique_temp_directory(const std::filesystem::path& root,
+                                                   const std::filesystem::path& label) {
+    return make_unique_save_temp_folder(root, label);
+}
 
 std::array<char, 16> Resource::raw_resref() const {
     if (raw_resref16_assigned) {
@@ -3207,7 +3254,9 @@ void ErfArchive::load_open_stream(const std::filesystem::path& filename) {
             }
 
             const bool is_rim = same_header(next_header.filetype, "RIM ");
-            disk_format_ = is_rim ? ArchiveDiskFormat::RimV1 : ArchiveDiskFormat::ErfV1;
+            disk_format_ = is_rim ? ArchiveDiskFormat::RimV1
+                : ascii_lower(extension_string(filename)) == ".mzd"
+                    ? ArchiveDiskFormat::ErfV1Lzma : ArchiveDiskFormat::ErfV1;
             if (resource_type_profile_ == ResourceNameProfile::KotOR) {
                 const std::string loaded_extension = ascii_lower(extension_string(filename));
                 if (resref32_) {
@@ -3380,9 +3429,13 @@ void ErfArchive::load_open_stream(const std::filesystem::path& filename) {
                     const auto& location = resourceLocations.at(res.resid);
                     res.data_offset = location.first;
                     res.data_size = location.second;
-                    if (res.data_size > 0) {
-                        ensure_archive_extent(res.data_offset, res.data_size, archive_size, "ERF resource payload");
-                        ensure_payload_does_not_overlap_metadata(res.data_offset, res.data_size,
+                    res.packed_size = disk_format_ == ArchiveDiskFormat::ErfV1Lzma
+                        ? checked_u32((res.resid + 1u < resourceLocations.size()
+                            ? resourceLocations[res.resid + 1u].first : archive_size) - res.data_offset,
+                            "Compressed resource size") : res.data_size;
+                    if (res.packed_size > 0) {
+                        ensure_archive_extent(res.data_offset, res.packed_size, archive_size, "ERF resource payload");
+                        ensure_payload_does_not_overlap_metadata(res.data_offset, res.packed_size,
                                                                  erf_metadata_ranges,
                                                                  "ERF resource payload");
                     }
@@ -3673,7 +3726,7 @@ void ErfArchive::save(std::filesystem::path filename, std::string filetype_overr
             if (direct_resources.at(index) != nullptr) return direct_resources.at(index)->data_size;
             return all_file_identities.at(index).size;
         };
-        auto write_payload = [&](std::ostream& destination, std::size_t index) -> std::uint64_t {
+        auto write_unpacked_payload = [&](std::ostream& destination, std::size_t index) -> std::uint64_t {
             if (const Resource* source = direct_resources.at(index)) {
                 ensure_archive_stream();
                 archive_stream_.clear();
@@ -3681,6 +3734,19 @@ void ErfArchive::save(std::filesystem::path filename, std::string filetype_overr
                 return source->data_size;
             }
             return write_file_payload(destination, all_files.at(index), &all_file_identities.at(index));
+        };
+
+        const bool lzma_output = !is_erf_v2 && !is_erf_v3 && !is_rim &&
+            ascii_lower(extension_string(filename)) == ".mzd";
+        auto write_payload = [&](std::ostream& destination, std::size_t index) -> std::uint64_t {
+            if (!lzma_output) return write_unpacked_payload(destination, index);
+            VectorOutputStreamBuf buffer(static_cast<std::size_t>(unpacked_payload_size(index)));
+            std::ostream raw(&buffer);
+            const auto size = write_unpacked_payload(raw, index);
+            const auto bytes = std::move(buffer).take();
+            const auto packed = encode_lzma_resource(bytes.data(), bytes.size());
+            destination.write(reinterpret_cast<const char*>(packed.data()), static_cast<std::streamsize>(packed.size()));
+            return size;
         };
 
         if (is_erf_v2) {
@@ -4617,7 +4683,7 @@ std::array<char, 4> archive_type_to_header(ArchiveType type) {
 
 ArchiveType archive_type_from_extension(const std::filesystem::path& filename) {
     const std::string ext = ascii_upper(extension_string(filename));
-    if (ext == ".MOD") return ArchiveType::MOD;
+    if (ext == ".MOD" || ext == ".MZD") return ArchiveType::MOD;
     if (ext == ".HAK") return ArchiveType::HAK;
     if (ext == ".SAV") return ArchiveType::SAV;
     if (ext == ".NWM") return ArchiveType::NWM;

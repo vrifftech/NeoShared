@@ -1,3 +1,4 @@
+#include <neoshared/erf/LzmaResource.hpp>
 #include <neoshared/bif/KeyBifArchive.hpp>
 
 #include <neoshared/erf/Archive.hpp>
@@ -48,6 +49,7 @@ struct BifVariableEntry {
     std::uint32_t id{};
     std::uint32_t offset{};
     std::uint32_t size{};
+    std::uint32_t packedSize{};
     std::uint32_t type{};
     bool boundsValid{};
 };
@@ -275,9 +277,16 @@ void appendDeclaredSizeCandidates(
 std::filesystem::path resolveBifPath(
     const std::filesystem::path& keyPath, const std::string& storedPath,
     std::uint32_t declaredFileSize,
-    const std::vector<std::filesystem::path>& supplementaryFiles) {
+    const std::vector<std::filesystem::path>& supplementaryFiles, bool preferCompressed) {
     const auto relative = portableRelativePath(storedPath);
     if (relative.empty()) return {};
+    auto compressed = relative;
+    compressed.replace_extension(".bzf");
+    if (preferCompressed) {
+        if (auto path = resolveCaseInsensitive(keyPath.parent_path(), compressed)) return *path;
+        for (const auto& file : supplementaryFiles)
+            if (pathKey(file.filename()) == pathKey(compressed.filename())) return file;
+    }
     if (auto direct = resolveCaseInsensitive(keyPath.parent_path(), relative)) return *direct;
 
     std::vector<std::filesystem::path> nameMatches;
@@ -420,6 +429,7 @@ bool buildResourceIndex(const std::vector<KeyEntry>& keyEntries,
                 resource.typeMatches = selected->type == key.type;
                 resource.offset = selected->offset;
                 resource.size = selected->size;
+                resource.packedSize = selected->packedSize;
                 resource.boundsValid = selected->boundsValid;
                 resource.extractable = bif.available && bif.valid &&
                                        resource.boundsValid && resource.typeMatches;
@@ -498,6 +508,7 @@ bool buildResourceIndex(const std::vector<KeyEntry>& keyEntries,
             resource.engineIndex = entry.id & 0x00003FFFu;
             resource.offset = entry.offset;
             resource.size = entry.size;
+            resource.packedSize = entry.packedSize;
             resource.keyed = false;
             resource.bifEntryFound = true;
             resource.idMatches = true;
@@ -598,12 +609,13 @@ void KeyBifArchive::clear() {
     issues_.clear();
     lastError_.clear();
     open_ = false;
+    browserReader_ = {};
 }
 
 bool KeyBifArchive::open(const std::filesystem::path& keyPath,
                          const std::vector<std::filesystem::path>& supplementaryFiles,
                          const std::map<std::size_t, std::filesystem::path>& explicitRelocations,
-                         const JobControl& job) {
+                         const JobControl& job, bool preferCompressed) {
     clear();
     keyPath_ = std::filesystem::absolute(keyPath).lexically_normal();
     job.check();
@@ -698,7 +710,8 @@ bool KeyBifArchive::open(const std::filesystem::path& keyPath,
         const auto chosen = explicitRelocations.find(i);
         bif.resolvedPath = chosen != explicitRelocations.end()
             ? std::filesystem::absolute(chosen->second).lexically_normal()
-            : resolveBifPath(keyPath_, bif.storedPath, bif.declaredFileSize, supplementaryFiles);
+            : resolveBifPath(keyPath_, bif.storedPath, bif.declaredFileSize, supplementaryFiles, preferCompressed);
+        bif.compressed = lowerAscii(bif.resolvedPath.extension().string()) == ".bzf";
         if (chosen != explicitRelocations.end()) {
             bif.messages.push_back("BIF explicitly mapped by the user: " + bif.resolvedPath.string());
             appendArchiveIssue(issues_, {IssueSeverity::Warning, bif.messages.back(), i, std::nullopt});
@@ -751,7 +764,7 @@ bool KeyBifArchive::open(const std::filesystem::path& keyPath,
         }
         bif.actualFileSize = static_cast<std::uintmax_t>(length);
         bif.available = true;
-        if (bif.declaredFileSize != 0u && bif.actualFileSize != bif.declaredFileSize) {
+        if (!bif.compressed && bif.declaredFileSize != 0u && bif.actualFileSize != bif.declaredFileSize) {
             std::ostringstream message;
             message << "KEY declares " << bif.declaredFileSize << " bytes, file contains "
                     << bif.actualFileSize;
@@ -817,17 +830,6 @@ bool KeyBifArchive::open(const std::filesystem::path& keyPath,
             entry.offset = readU32(raw.data() + 4);
             entry.size = readU32(raw.data() + 8);
             entry.type = readU32(raw.data() + 12);
-            const std::uint64_t payloadStart = bif.tableOffset +
-                static_cast<std::uint64_t>(bif.variableResourceCount) * kBifVariableEntrySize +
-                static_cast<std::uint64_t>(bif.fixedResourceCount) * 20u;
-            entry.boundsValid = checkedRange(entry.offset, entry.size, bif.actualFileSize) &&
-                (entry.size == 0u || entry.offset >= payloadStart);
-            if (!entry.boundsValid) {
-                appendArchiveIssue(issues_, {IssueSeverity::Error,
-                                   "BIF resource overlaps the header/tables or extends beyond the file",
-                                   bifIndex,
-                                   entry.id});
-            }
             if (!parsed.idToIndex.emplace(entry.id, parsed.entries.size()).second) {
                 appendArchiveIssue(issues_, {IssueSeverity::Warning,
                                    "Duplicate resource ID in BIF variable table",
@@ -835,6 +837,20 @@ bool KeyBifArchive::open(const std::filesystem::path& keyPath,
                                    entry.id});
             }
             parsed.entries.push_back(entry);
+        }
+        const auto payloadStart = bif.tableOffset +
+            static_cast<std::uint64_t>(bif.variableResourceCount) * kBifVariableEntrySize +
+            static_cast<std::uint64_t>(bif.fixedResourceCount) * 20u;
+        for (std::size_t i = 0; i < parsed.entries.size(); ++i) {
+            auto& entry = parsed.entries[i];
+            entry.packedSize = bif.compressed
+                ? static_cast<std::uint32_t>((i + 1 < parsed.entries.size()
+                    ? parsed.entries[i + 1].offset : bif.actualFileSize) - entry.offset) : entry.size;
+            entry.boundsValid = checkedRange(entry.offset, entry.packedSize, bif.actualFileSize) &&
+                (entry.packedSize == 0u || entry.offset >= payloadStart);
+            if (!entry.boundsValid)
+                appendArchiveIssue(issues_, {IssueSeverity::Error,
+                    "BIF resource overlaps the header/tables or extends beyond the file", bifIndex, entry.id});
         }
         bif.valid = parsed.entries.size() == bif.variableResourceCount;
     }
@@ -857,6 +873,7 @@ bool KeyBifArchive::openBrowser(const BrowserArchiveFile& keyFile,
                                 const BrowserRangeReader& reader,
                                 const BrowserYieldCallback& yield) {
     clear();
+    browserReader_ = reader;
     keyPath_ = std::filesystem::path(keyFile.relativePath);
     if (!reader) {
         lastError_ = "Browser archive range reader is unavailable";
@@ -1022,8 +1039,9 @@ bool KeyBifArchive::openBrowser(const BrowserArchiveFile& keyFile,
     std::vector<Candidate> candidates;
     std::uint64_t aggregateCandidateRecords = 0;
     for (const BrowserArchiveFile& file : files) {
+        const auto extension = lowerAscii(std::filesystem::path(file.relativePath).extension().string());
         if (file.sessionId == 0 || file.fileId == 0 || file.relativePath.empty() ||
-            lowerAscii(std::filesystem::path(file.relativePath).extension().string()) != ".bif") {
+            (extension != ".bif" && extension != ".bzf")) {
             continue;
         }
         Candidate candidate;
@@ -1118,13 +1136,6 @@ bool KeyBifArchive::openBrowser(const BrowserArchiveFile& keyFile,
                 entry.offset = readU32(raw + 4);
                 entry.size = readU32(raw + 8);
                 entry.type = readU32(raw + 12);
-                entry.boundsValid = checkedRange(entry.offset, entry.size, file.size) &&
-                    (entry.size == 0u || entry.offset >= candidate.tableOffset + tableLength + static_cast<std::uint64_t>(candidate.fixedCount) * 20u);
-                if (!entry.boundsValid) {
-                    payloadBoundsValid = false;
-                    appendCandidateIssue(candidate, {IssueSeverity::Error,
-                        "BIF resource overlaps the header/tables or extends beyond the file", entry.id});
-                }
                 if (!candidate.parsed.idToIndex.emplace(
                         entry.id, candidate.parsed.entries.size()).second) {
                     appendCandidateIssue(candidate, {IssueSeverity::Warning,
@@ -1134,6 +1145,20 @@ bool KeyBifArchive::openBrowser(const BrowserArchiveFile& keyFile,
                 if (!commonBifIndex) commonBifIndex = encodedBifIndex;
                 else if (*commonBifIndex != encodedBifIndex) commonIndex = false;
                 candidate.parsed.entries.push_back(entry);
+            }
+        }
+        const bool compressed = lowerAscii(std::filesystem::path(file.relativePath).extension().string()) == ".bzf";
+        for (std::size_t i = 0; i < candidate.parsed.entries.size(); ++i) {
+            auto& entry = candidate.parsed.entries[i];
+            entry.packedSize = compressed
+                ? static_cast<std::uint32_t>((i + 1 < candidate.parsed.entries.size()
+                    ? candidate.parsed.entries[i + 1].offset : file.size) - entry.offset) : entry.size;
+            entry.boundsValid = checkedRange(entry.offset, entry.packedSize, file.size) &&
+                (entry.packedSize == 0u || entry.offset >= candidate.tableOffset + tableLength + static_cast<std::uint64_t>(candidate.fixedCount) * 20u);
+            if (!entry.boundsValid) {
+                payloadBoundsValid = false;
+                appendCandidateIssue(candidate, {IssueSeverity::Error,
+                    "BIF resource overlaps the header/tables or extends beyond the file", entry.id});
             }
         }
         if (commonIndex) candidate.embeddedBifIndex = commonBifIndex;
@@ -1161,13 +1186,16 @@ bool KeyBifArchive::openBrowser(const BrowserArchiveFile& keyFile,
         for (std::size_t candidateIndex = 0; candidateIndex < candidates.size(); ++candidateIndex) {
             Candidate& candidate = candidates[candidateIndex];
             if (candidate.assigned) continue;
-            const std::filesystem::path candidatePath(candidate.file.relativePath);
+            std::filesystem::path candidatePath(candidate.file.relativePath);
+            const bool compressed = lowerAscii(candidatePath.extension().string()) == ".bzf";
+            if (compressed) candidatePath.replace_extension(".bif");
             const std::string candidateKey = pathKey(candidatePath);
             const std::string candidateLeaf = pathKey(candidatePath.filename());
             int identityScore = 0;
             if (!expectedKey.empty() && candidateKey == expectedKey) identityScore += 10000;
             if (!storedKey.empty() && candidateKey == storedKey) identityScore += 9000;
             if (!leafKey.empty() && candidateLeaf == leafKey) identityScore += 5000;
+            if (identityScore != 0 && compressed) ++identityScore;
             if (candidate.file.explicitBifIndex) {
                 identityScore = *candidate.file.explicitBifIndex == bifIndex ? 100000 : 0;
             }
@@ -1204,6 +1232,7 @@ bool KeyBifArchive::openBrowser(const BrowserArchiveFile& keyFile,
 
         Candidate& candidate = candidates[*bestCandidate];
         candidate.assigned = true;
+        bif.compressed = lowerAscii(std::filesystem::path(candidate.file.relativePath).extension().string()) == ".bzf";
         bif.browserBacked = true;
         bif.browserSessionId = candidate.file.sessionId;
         bif.browserFileId = candidate.file.fileId;
@@ -1215,7 +1244,7 @@ bool KeyBifArchive::openBrowser(const BrowserArchiveFile& keyFile,
         bif.fixedResourceCount = candidate.fixedCount;
         bif.tableOffset = candidate.tableOffset;
         bif.valid = candidate.valid;
-        if (bif.declaredFileSize != 0u && bif.actualFileSize != bif.declaredFileSize) {
+        if (!bif.compressed && bif.declaredFileSize != 0u && bif.actualFileSize != bif.declaredFileSize) {
             std::ostringstream message;
             message << "KEY declares " << bif.declaredFileSize << " bytes, file contains "
                     << bif.actualFileSize;
@@ -1259,10 +1288,25 @@ bool KeyBifArchive::streamResource(std::size_t index, const ByteSink& sink,
         error="Resource is not extractable: "+resource.status;return false;
     }
     const auto& bif=bifs_[resource.bifIndex];
-    if (bif.browserBacked) { error="Use retained browser range access";return false; }
-    return streamInputRange(
-        bif.resolvedPath, bif.snapshot, resource.offset, resource.size,
-        sink, error, job);
+    if (!bif.compressed && !bif.browserBacked)
+        return streamInputRange(bif.resolvedPath, bif.snapshot, resource.offset, resource.size, sink, error, job);
+    std::vector<std::uint8_t> bytes;
+    if (bif.browserBacked) {
+        BrowserArchiveFile file;
+        file.sessionId = bif.browserSessionId;
+        file.fileId = bif.browserFileId;
+        file.relativePath = bif.browserRelativePath;
+        file.size = bif.actualFileSize;
+        if (!browserReader_(file, resource.offset, resource.packedSize, bytes, error)) return false;
+    } else if (!streamInputRange(bif.resolvedPath, bif.snapshot, resource.offset, resource.packedSize,
+        [&](const std::uint8_t* data, std::size_t size, std::string&) {
+            bytes.insert(bytes.end(), data, data + size); return true;
+        }, error, job)) return false;
+    try {
+        if (bif.compressed) bytes = neoshared::erf::decode_lzma_resource(bytes.data(), bytes.size(), resource.size);
+    } catch (const std::exception& ex) { error = ex.what(); return false; }
+    job.check();
+    return sink(bytes.data(), bytes.size(), error);
 }
 bool KeyBifArchive::readResource(std::size_t index, std::vector<std::uint8_t>& bytes, std::string& error) const {
     bytes.clear();

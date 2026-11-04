@@ -1223,7 +1223,7 @@
     for (var index = 0; index < lines.length; ++index) {
       if (!lines[index]) continue;
       var fields = lines[index].split('\t');
-      if (fields.length !== 5) throw new Error('Invalid retained export manifest.');
+      if (fields.length !== 6) throw new Error('Invalid retained export manifest.');
       var entry = {
         sessionId: Number(fields[0]),
         fileId: Number(fields[1]),
@@ -1237,6 +1237,8 @@
           !Number.isSafeInteger(entry.size) || entry.size < 0) {
         throw new Error('Invalid retained export entry.');
       }
+      var pointer = Number(fields[5]);
+      if (pointer) entry.blob = new Blob([HEAPU8.slice(pointer, pointer + entry.size)]);
       var outputKey = entry.outputPath.toLowerCase();
       if (outputNames[outputKey]) throw new Error('Duplicate export path: ' + entry.outputPath);
       outputNames[outputKey] = true;
@@ -1389,6 +1391,7 @@
         var plan=plans[index], current=plan.item, handle=null,writable=null,owned=false,parent=null,name='';
         updateRetainedExportJob(result.filesWritten+result.filesSkipped,plan.path);
         var source=await getRetainedFile(current.sessionId,current.fileId);
+        if(current.blob)source.file=current.blob;
         if(current.offset>source.file.size || current.size>source.file.size-current.offset) throw new Error('Invalid archive range: '+source.entry.relativePath);
         try {
           var destination=await resolvePackageFile(root,plan.path,true);
@@ -1633,6 +1636,7 @@
         var item = entries[index];
         if (sink.position > 0xFFFFFFFF) throw new Error('ZIP output exceeds the classic ZIP size limit.');
         var source = await getRetainedFile(item.sessionId, item.fileId);
+        if (item.blob) source.file = item.blob;
         if (item.offset > source.file.size || item.size > source.file.size - item.offset) {
           throw new Error('Export range extends beyond ' + source.entry.relativePath + '.');
         }
@@ -1708,6 +1712,7 @@
     assertRetainedExportEntriesActive(entries);
     var item = entries[0];
     var source = await getRetainedFile(item.sessionId, item.fileId);
+    if (item.blob) source.file = item.blob;
     if (item.offset > source.file.size || item.size > source.file.size - item.offset) {
       throw new Error('Export range extends beyond ' + source.entry.relativePath + '.');
     }

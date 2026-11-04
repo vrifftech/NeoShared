@@ -22,7 +22,7 @@ std::string ModFolder::moduleName(const std::filesystem::path& path) {
         for(const auto* suffix:{"_adx","_a","_s"}) {const auto n=std::char_traits<char>::length(suffix);if(name.size()>n&&name.substr(name.size()-n)==suffix) {name.resize(name.size()-n);break;}}
         return name;
     }
-    if(ext==".mod") {if(name.size()>4&&name.substr(name.size()-4)=="_loc")name.resize(name.size()-4);return name;}
+    if(ext==".mod"||ext==".mzd") {if(name.size()>4&&name.substr(name.size()-4)=="_loc")name.resize(name.size()-4);return name;}
     if(ext==".erf"&&name.size()>4&&name.substr(name.size()-4)=="_dlg")return name.substr(0,name.size()-4);
     return {};
 }
@@ -40,9 +40,11 @@ ModFolder::ModFolder(const std::filesystem::path& root,const JobControl& job):ro
     std::map<std::string,std::map<std::string,const LooseArchiveInfo*>> groups;
     for(const auto& archive:packed_.archives()) {
         if(!archive.valid)throw std::runtime_error("Cannot index mod archive: "+genericPathToUtf8(archive.resolvedPath));
-        job.check();const auto name=lower(pathToUtf8(archive.resolvedPath.filename()));
-        archives_.emplace(name,archive.resolvedPath);const auto module=moduleName(archive.resolvedPath);
-        if(!module.empty())groups[module].emplace(name,&archive);
+        job.check();auto leaf=archive.resolvedPath.filename();const bool compressed=lower(pathToUtf8(leaf.extension()))==".mzd";
+        if(compressed)leaf.replace_extension(".mod");
+        const auto name=lower(pathToUtf8(leaf));
+        if(compressed)archives_[name]=archive.resolvedPath;else archives_.emplace(name,archive.resolvedPath);const auto module=moduleName(archive.resolvedPath);
+        if(!module.empty()) {if(compressed)groups[module][name]=&archive;else groups[module].emplace(name,&archive);}
         else {
             Index index;for(const auto n:archive.resourceIndices) {const auto& r=packed_.resources().at(n);index.emplace(Key{lower(r.resref),r.type},n);}
             globals_.push_back(std::move(index));

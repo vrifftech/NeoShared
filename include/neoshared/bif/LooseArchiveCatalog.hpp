@@ -86,6 +86,7 @@ struct LooseResourceInfo {
     // Direct loose file stored beneath an override alias rather than inside an archive.
     bool overrideFile{};
     std::filesystem::path directPath;
+    InputSnapshot directSnapshot;
     std::filesystem::path overrideRelativePath;
 };
 
