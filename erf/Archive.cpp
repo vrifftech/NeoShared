@@ -1537,25 +1537,6 @@ std::filesystem::path default_temp_root() {
 
 
 #if defined(_WIN32)
-void close_loaded_archive_lock(void*& handle) noexcept {
-    if (handle != nullptr) {
-        CloseHandle(static_cast<HANDLE>(handle));
-        handle = nullptr;
-    }
-}
-
-void* open_loaded_archive_lock(const std::filesystem::path& filename) {
-    // Create(..., fmOpenRead or fmShareDenyWrite) permits readers
-    // but denies writers while the archive remains loaded. Keep an explicit
-    // Win32 handle open beside the standard stream to preserve that behavior.
-    HANDLE handle = CreateFileW(filename.c_str(), GENERIC_READ, FILE_SHARE_READ,
-                                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (handle == INVALID_HANDLE_VALUE) {
-        return nullptr;
-    }
-    return handle;
-}
-
 class ScopedWin32ShareHandle {
 public:
     ScopedWin32ShareHandle() = default;
@@ -2889,9 +2870,6 @@ void ErfArchive::reset(bool destroying) {
     archive_stream_reference_dangling_ = false;
     loaded_file_identity_ = FileIdentity{};
     reader_backed_ = false;
-#if defined(_WIN32)
-    close_loaded_archive_lock(archive_lock_handle_);
-#endif
     locstrings_.clear();
     resources_.clear();
     new_files_.clear();
@@ -2991,17 +2969,8 @@ void ErfArchive::load(const std::filesystem::path& filename) {
         throw ErfError("Unable to load file \"" + path_to_string(filename) +
                        "\", the file identity could not be captured: " + ex.what());
     }
-#if defined(_WIN32)
-    archive_lock_handle_ = open_loaded_archive_lock(filename);
-    if (archive_lock_handle_ == nullptr) {
-        throw ErfError("Unable to load file \"" + path_to_string(filename) + "\", the file could not be opened!");
-    }
-#endif
     open_binary_input_stream(archive_stream_, filename);
     if (!archive_stream_.is_open()) {
-#if defined(_WIN32)
-        close_loaded_archive_lock(archive_lock_handle_);
-#endif
         const std::string detail = archive_stream_.last_error();
         throw ErfError("Unable to load file \"" + path_to_string(filename) +
                        "\", the file could not be opened" +
@@ -3009,9 +2978,6 @@ void ErfArchive::load(const std::filesystem::path& filename) {
     }
     if (!same_regular_file_revision(filename, identity)) {
         archive_stream_.close();
-#if defined(_WIN32)
-        close_loaded_archive_lock(archive_lock_handle_);
-#endif
         throw ErfError("Unable to load file \"" + path_to_string(filename) +
                        "\", the file changed while it was being opened!");
     }
@@ -3051,9 +3017,6 @@ void ErfArchive::release_input_handle() noexcept {
         return;
     }
     if (archive_stream_.is_open()) archive_stream_.close();
-#if defined(_WIN32)
-    close_loaded_archive_lock(archive_lock_handle_);
-#endif
 }
 
 void ErfArchive::load_open_stream(const std::filesystem::path& filename) {
@@ -3970,9 +3933,6 @@ void ErfArchive::save(std::filesystem::path filename, std::string filetype_overr
         if (archive_stream_.is_open()) {
             archive_stream_.close();
         }
-#if defined(_WIN32)
-        close_loaded_archive_lock(archive_lock_handle_);
-#endif
         archive_stream_reference_dangling_ = false;
         for (std::size_t i=0;i<new_files_.size();++i) {
             if (!same_regular_file_revision(new_files_[i],new_file_identities_.at(i)))
@@ -3993,9 +3953,6 @@ void ErfArchive::save(std::filesystem::path filename, std::string filetype_overr
         }
         archive_stream_reference_dangling_ = false;
         if (!newfile_ && !filename_.empty() && !archive_stream_.is_open() && file_exists(filename_)) {
-#if defined(_WIN32)
-            archive_lock_handle_ = open_loaded_archive_lock(filename_);
-#endif
             open_binary_input_stream(archive_stream_, filename_);
             if (!archive_stream_) {
                 archive_stream_.close();
@@ -4639,26 +4596,14 @@ void ErfArchive::ensure_archive_stream() {
     if (!same_regular_file_revision(filename_, loaded_file_identity_)) {
         throw ErfError("Archive changed after it was loaded; reopen the archive before extracting resources.");
     }
-#if defined(_WIN32)
-    archive_lock_handle_ = open_loaded_archive_lock(filename_);
-    if (archive_lock_handle_ == nullptr) {
-        throw ErfError("Unable to reopen archive file \"" + path_to_string(filename_) + "\".");
-    }
-#endif
     open_binary_input_stream(archive_stream_, filename_);
     if (!archive_stream_.is_open()) {
-#if defined(_WIN32)
-        close_loaded_archive_lock(archive_lock_handle_);
-#endif
         const std::string detail = archive_stream_.last_error();
         throw ErfError("Unable to reopen archive file \"" + path_to_string(filename_) +
                        "\"" + (detail.empty() ? std::string(".") : std::string(": ") + detail));
     }
     if (!same_regular_file_revision(filename_, loaded_file_identity_)) {
         archive_stream_.close();
-#if defined(_WIN32)
-        close_loaded_archive_lock(archive_lock_handle_);
-#endif
         throw ErfError("Archive changed while it was being reopened; reopen the archive before extracting resources.");
     }
 }
