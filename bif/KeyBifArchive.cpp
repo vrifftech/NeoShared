@@ -372,7 +372,8 @@ bool buildResourceIndex(const std::vector<KeyEntry>& keyEntries,
                         std::string& error,
                         GameProfile profile,
                         const BrowserYieldCallback& yield = {},
-                        std::size_t maximumResources = kMaximumIndexedResources) {
+                        std::size_t maximumResources = kMaximumIndexedResources,
+                        const std::vector<std::uint16_t>& resourceTypes = {}) {
     resources.clear();
     error.clear();
     if (keyEntries.size() > maximumResources) {
@@ -385,6 +386,7 @@ bool buildResourceIndex(const std::vector<KeyEntry>& keyEntries,
     for (std::size_t keyIndex = 0; keyIndex < keyEntries.size(); ++keyIndex) {
         cooperativeYield(yield, keyIndex);
         const KeyEntry& key = keyEntries[keyIndex];
+        if (!resourceTypes.empty() && std::find(resourceTypes.begin(), resourceTypes.end(), key.type) == resourceTypes.end()) continue;
         ResourceInfo resource;
         resource.index = resources.size();
         resource.resref = key.resref;
@@ -491,6 +493,7 @@ bool buildResourceIndex(const std::vector<KeyEntry>& keyEntries,
         for (std::size_t entryIndex = 0; entryIndex < parsed.entries.size(); ++entryIndex) {
             cooperativeYield(yield, ++scannedBifEntries);
             const BifVariableEntry& entry = parsed.entries[entryIndex];
+            if (!resourceTypes.empty() && std::find(resourceTypes.begin(), resourceTypes.end(), static_cast<std::uint16_t>(entry.type)) == resourceTypes.end()) continue;
             if (referencedEntries[bifIndex].count(entryIndex) != 0u) continue;
             if (resources.size() >= maximumResources) {
                 error = "Combined KEY and unindexed BIF resources exceed the aggregate index limit";
@@ -615,7 +618,8 @@ void KeyBifArchive::clear() {
 bool KeyBifArchive::open(const std::filesystem::path& keyPath,
                          const std::vector<std::filesystem::path>& supplementaryFiles,
                          const std::map<std::size_t, std::filesystem::path>& explicitRelocations,
-                         const JobControl& job, bool preferCompressed) {
+                         const JobControl& job, bool preferCompressed,
+                         const std::vector<std::uint16_t>& resourceTypes) {
     clear();
     keyPath_ = std::filesystem::absolute(keyPath).lexically_normal();
     job.check();
@@ -707,15 +711,6 @@ bool KeyBifArchive::open(const std::filesystem::path& keyPath,
             while (actualLength < nameLength && nameBytes[actualLength] != 0u) ++actualLength;
             bif.storedPath.assign(reinterpret_cast<const char*>(nameBytes), actualLength);
         }
-        const auto chosen = explicitRelocations.find(i);
-        bif.resolvedPath = chosen != explicitRelocations.end()
-            ? std::filesystem::absolute(chosen->second).lexically_normal()
-            : resolveBifPath(keyPath_, bif.storedPath, bif.declaredFileSize, supplementaryFiles, preferCompressed);
-        bif.compressed = lowerAscii(bif.resolvedPath.extension().string()) == ".bzf";
-        if (chosen != explicitRelocations.end()) {
-            bif.messages.push_back("BIF explicitly mapped by the user: " + bif.resolvedPath.string());
-            appendArchiveIssue(issues_, {IssueSeverity::Warning, bif.messages.back(), i, std::nullopt});
-        }
         bifs_.push_back(std::move(bif));
     }
 
@@ -734,11 +729,26 @@ bool KeyBifArchive::open(const std::filesystem::path& keyPath,
     }
     gameProfile_ = detectGameProfile(keyEntries);
 
+    std::unordered_set<std::size_t> selectedBifs;
+    if (!resourceTypes.empty())
+        for (const auto& key : keyEntries)
+            if (std::find(resourceTypes.begin(), resourceTypes.end(), key.type) != resourceTypes.end())
+                selectedBifs.insert(key.id >> 20u);
     std::vector<ParsedBif> parsedBifs(bifs_.size());
     std::uint64_t aggregateBifRecords = 0;
     for (std::size_t bifIndex = 0; bifIndex < bifs_.size(); ++bifIndex) {
         job.update(bifIndex, bifs_.size(), "Indexing BIF archives");
         BifInfo& bif = bifs_[bifIndex];
+        if (!resourceTypes.empty() && selectedBifs.count(bifIndex) == 0u) continue;
+        const auto chosen = explicitRelocations.find(bifIndex);
+        bif.resolvedPath = chosen != explicitRelocations.end()
+            ? std::filesystem::absolute(chosen->second).lexically_normal()
+            : resolveBifPath(keyPath_, bif.storedPath, bif.declaredFileSize, supplementaryFiles, preferCompressed);
+        bif.compressed = lowerAscii(bif.resolvedPath.extension().string()) == ".bzf";
+        if (chosen != explicitRelocations.end()) {
+            bif.messages.push_back("BIF explicitly mapped by the user: " + bif.resolvedPath.string());
+            appendArchiveIssue(issues_, {IssueSeverity::Warning, bif.messages.back(), bifIndex, std::nullopt});
+        }
         if (bif.resolvedPath.empty()) {
             bif.messages.push_back("Referenced BIF is missing or ambiguous; use Relocate BIF to select the exact KEY entry and file");
             appendArchiveIssue(issues_, {IssueSeverity::Error, bif.messages.back(), bifIndex, std::nullopt});
@@ -860,7 +870,7 @@ bool KeyBifArchive::open(const std::filesystem::path& keyPath,
         lastError_ = "BIF changed while indexing; rescan: " + bif.resolvedPath.string(); return false;
     }
     if (!buildResourceIndex(keyEntries, parsedBifs, bifs_, resources_, issues_, lastError_,
-                            gameProfile_, [&job] { job.check(); })) {
+                            gameProfile_, [&job] { job.check(); }, kMaximumIndexedResources, resourceTypes)) {
         return false;
     }
 

@@ -99,7 +99,8 @@ public:
               const std::vector<std::filesystem::path>& supplementaryFiles = {},
               const std::map<std::size_t, std::filesystem::path>& explicitRelocations = {},
               const JobControl& job = {},
-              bool preferCompressed = true);
+              bool preferCompressed = true,
+              const std::vector<std::uint16_t>& resourceTypes = {});
 
     // Opens a KEY/BIF set whose contents remain in browser-owned File objects.
     // The supplied reader is retained for compressed resource reads; large
