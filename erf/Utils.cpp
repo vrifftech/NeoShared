@@ -508,7 +508,7 @@ bool is_allowed_resref_char(unsigned char ch) {
     return (ch >= 'A' && ch <= 'Z') ||
            (ch >= 'a' && ch <= 'z') ||
            (ch >= '0' && ch <= '9') ||
-           ch == '_' || ch == '-' || ch == '+';
+           ch == '_' || ch == '-' || ch == '+' || ch == '!';
 }
 
 std::string extension_from_leaf(const std::string& value) {
