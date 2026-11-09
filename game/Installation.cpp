@@ -301,7 +301,7 @@ void addUniquePath(std::vector<std::filesystem::path>& paths,
 std::string storefrontLabel(const std::filesystem::path& root,
                             const std::vector<std::string>& sources = {}) {
     for (const auto& source : sources) {
-        if (containsCaseInsensitive(source, "steam")) return "Steam";
+        if (lowerAscii(source).rfind("steam ", 0u) == 0u) return "Steam";
         if (containsCaseInsensitive(source, "gog") || containsCaseInsensitive(source, "heroic")) return "GOG";
         if (containsCaseInsensitive(source, "lutris")) return "Lutris";
     }
@@ -1697,7 +1697,8 @@ bool sameInstallTarget(const GameInstall& lhs, const GameInstall& rhs) {
 
 void mergeInstall(GameInstall& existing, const GameInstall& incoming) {
     if (existing.installId.empty()) existing.installId = incoming.installId;
-    if (incoming.userOverride || existing.displayName.empty()) {
+    if (incoming.userOverride || existing.displayName.empty() ||
+        (!existing.userOverride && incoming.detected)) {
         if (!incoming.displayName.empty()) existing.displayName = incoming.displayName;
     }
     if (!incoming.installPath.empty()) existing.installPath = incoming.installPath;
