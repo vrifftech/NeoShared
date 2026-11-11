@@ -283,6 +283,16 @@ inline bool readDarkMode(const std::string& appName) {
     return neosettings::AppSettings(appName).darkMode();
 }
 
+// Native Windows controls choose their appearance when they are created.
+// Call from OnInit before constructing any windows.
+inline void initializeTheme(const std::string& appName) {
+    activeDarkMode() = readDarkMode(appName);
+#if defined(__WXMSW__)
+    wxTheApp->SetAppearance(currentDarkMode() ? wxApp::Appearance::Dark
+                                           : wxApp::Appearance::Light);
+#endif
+}
+
 inline void writeDarkMode(const std::string& appName, bool enabled) {
     neosettings::AppSettings(appName).setDarkMode(enabled);
 }
