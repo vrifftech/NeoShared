@@ -32,18 +32,20 @@ jobs:
           python3 - <<'PY'
           import os, re, subprocess
           path = os.environ['VERSION_FILE']
-          pattern = (r'^\s*#define\s+\w+_VERSION_STRING\s+"(\d+\.\d+\.\d+)"'
-                     if path.endswith('.hpp') else
-                     r'\bproject\s*\([^)]*?\bVERSION\s+(\d+\.\d+\.\d+)')
-          def version(commit):
-              text = subprocess.check_output(['git', 'show', f'{commit}:{path}'], text=True)
-              return re.search(pattern, text, re.I | re.M | re.S).group(1)
-          current = version(os.environ['GITHUB_SHA'])
-          previous = version(os.environ['BEFORE'])
+          pattern = r'\s*#define\s+\w+_VERSION_STRING\s+"(\d+\.\d+\.\d+)"'
+          current_text = subprocess.check_output(
+              ['git', 'show', f'{os.environ["GITHUB_SHA"]}:{path}'], text=True)
+          current = re.search('^' + pattern, current_text, re.M).group(1)
+          changes = subprocess.check_output(
+              ['git', 'diff', '--unified=0', os.environ['BEFORE'],
+               os.environ['GITHUB_SHA'], '--', path], text=True)
+          added = re.findall(r'^\+' + pattern, changes, re.M)
+          removed = re.findall(r'^-' + pattern, changes, re.M)
+          changed = added != removed
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
               print(f'number={current}', file=output)
-              print(f'changed={str(current != previous).lower()}', file=output)
-          print(f'Version: {previous} -> {current}')
+              print(f'changed={str(changed).lower()}', file=output)
+          print(f'Version: {current}; changed={changed}')
           PY
 
       - name: Publish packages

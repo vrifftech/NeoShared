@@ -24,7 +24,9 @@ $repos = Get-Content -LiteralPath $patchPath -Encoding UTF8 |
         }
     } |
     Group-Object Repo |
-    Sort-Object @{ Expression = { if ($_.Name -eq 'neoshared') { 0 } else { 1 } } }, Name
+    Sort-Object @{ Expression = {
+        if ($_.Name -eq 'neoshared') { 0 } elseif ($_.Name -eq 'NeoToolKit-Test') { 2 } else { 1 }
+    } }, Name
 
 foreach ($repo in $repos) {
     $repoPath = Join-Path $rootPath $repo.Name
@@ -34,44 +36,9 @@ foreach ($repo in $repos) {
 
 Invoke-NeoGit -C $rootPath apply --ignore-space-change $patchPath
 
-$versionFiles = @{
-    Neo2DA = 'src/core/Version.hpp'
-    NeoBIF = 'src/core/Version.hpp'
-    NeoDLG = 'src/core/Version.hpp'
-    NeoERF = 'src/core/Version.hpp'
-    NeoGFF = 'src/core/Version.hpp'
-    NeoGUI = 'CMakeLists.txt'
-    NeoJRL = 'src/core/Version.hpp'
-    NeoMDL = 'CMakeLists.txt'
-    NeoPatcher = 'CMakeLists.txt'
-    NeoQST = 'CMakeLists.txt'
-    NeoSSF = 'src/core/Version.hpp'
-    NeoTLK = 'src/core/Version.hpp'
-    NeoTPC = 'CMakeLists.txt'
-    'NeoToolKit-Test' = 'CMakeLists.txt'
-    NeoLIP = 'CMakeLists.txt'
-}
-$utf8 = New-Object System.Text.UTF8Encoding($false)
-foreach ($name in $versionFiles.Keys) {
-    $file = Join-Path (Join-Path $rootPath $name) $versionFiles[$name]
-    $text = [IO.File]::ReadAllText($file)
-    $pattern = if ($file.EndsWith('.hpp')) {
-        '(?m)^\s*#define\s+\w+_VERSION_STRING\s+"(\d+\.\d+\.\d+)"'
-    } else {
-        '(?is)\bproject\s*\([^)]*?\bVERSION\s+(\d+\.\d+\.\d+)'
-    }
-    $match = [regex]::Match($text, $pattern).Groups[1]
-    $version = [version]::Parse($match.Value)
-    $next = '{0}.{1}.{2}' -f $version.Major, $version.Minor, ($version.Build + 1)
-    $text = $text.Remove($match.Index, $match.Length).Insert($match.Index, $next)
-    [IO.File]::WriteAllText($file, $text, $utf8)
-    Write-Host "$name`: $version -> $next"
-}
-
 foreach ($repo in $repos) {
     $repoPath = Join-Path $rootPath $repo.Name
-    $paths = @(@($repo.Group.File) + @($versionFiles[$repo.Name]) |
-        Where-Object { $_ } | Sort-Object -Unique)
+    $paths = @($repo.Group.File | Sort-Object -Unique)
     Invoke-NeoGit -C $repoPath add -- @paths
     Invoke-NeoGit -C $repoPath commit --only -m 'new release method + version bump' -- @paths
     Invoke-NeoGit -C $repoPath push origin main
