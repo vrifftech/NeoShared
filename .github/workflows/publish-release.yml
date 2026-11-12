@@ -1,0 +1,63 @@
+name: Publish versioned release
+
+on:
+  workflow_call:
+    inputs:
+      version-file:
+        required: true
+        type: string
+      artifact-pattern:
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Read version change
+        id: version
+        env:
+          VERSION_FILE: ${{ inputs.version-file }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          python3 - <<'PY'
+          import os, re, subprocess
+          path = os.environ['VERSION_FILE']
+          pattern = (r'^\s*#define\s+\w+_VERSION_STRING\s+"(\d+\.\d+\.\d+)"'
+                     if path.endswith('.hpp') else
+                     r'\bproject\s*\([^)]*?\bVERSION\s+(\d+\.\d+\.\d+)')
+          def version(commit):
+              text = subprocess.check_output(['git', 'show', f'{commit}:{path}'], text=True)
+              return re.search(pattern, text, re.I | re.M | re.S).group(1)
+          current = version(os.environ['GITHUB_SHA'])
+          previous = version(os.environ['BEFORE'])
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              print(f'number={current}', file=output)
+              print(f'changed={str(current != previous).lower()}', file=output)
+          print(f'Version: {previous} -> {current}')
+          PY
+
+      - name: Publish packages
+        if: steps.version.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ steps.version.outputs.number }}
+          ARTIFACT_PATTERN: ${{ inputs.artifact-pattern }}
+        run: |
+          gh run download "$GITHUB_RUN_ID" --pattern "$ARTIFACT_PATTERN" --dir packages
+          shopt -s nullglob
+          gh release create "v$VERSION" \
+            packages/*/*.exe packages/*/*.zip packages/*/*.tar.gz packages/*/*.AppImage \
+            packages/*/*.deb packages/*/*.sha256 \
+            --target "$GITHUB_SHA" --title "${GH_REPO#*/} v$VERSION" \
+            --generate-notes
