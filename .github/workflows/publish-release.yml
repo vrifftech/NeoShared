@@ -57,9 +57,21 @@ jobs:
           ARTIFACT_PATTERN: ${{ inputs.artifact-pattern }}
         run: |
           gh run download "$GITHUB_RUN_ID" --pattern "$ARTIFACT_PATTERN" --dir packages
+          python3 - <<'PY_ZIP'
+          import hashlib, os
+          from pathlib import Path
+          from zipfile import ZipFile, ZIP_DEFLATED
+          tool = os.environ['GH_REPO'].rsplit('/', 1)[1]
+          for exe in Path('packages').glob('*/*.exe'):
+              package = exe.with_name(f'{tool}-{os.environ["VERSION"]}-windows-x86_64.zip')
+              with ZipFile(package, 'w', ZIP_DEFLATED) as archive:
+                  archive.write(exe, f'{tool}.exe')
+              package.with_name(package.name + '.sha256').write_text(
+                  f'{hashlib.sha256(package.read_bytes()).hexdigest()}  {package.name}\n')
+          PY_ZIP
           shopt -s nullglob
           gh release create "v$VERSION" \
-            packages/*/*.exe packages/*/*.zip packages/*/*.tar.gz packages/*/*.AppImage \
+            packages/*/*.zip packages/*/*.tar.gz packages/*/*.AppImage \
             packages/*/*.deb packages/*/*.sha256 \
             --target "$GITHUB_SHA" --title "${GH_REPO#*/} v$VERSION" \
             --generate-notes
