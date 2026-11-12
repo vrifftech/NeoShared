@@ -1,0 +1,134 @@
+diff --git a/include/wx/msw/app.h b/include/wx/msw/app.h
+--- a/include/wx/msw/app.h
++++ b/include/wx/msw/app.h
+@@ -46,7 +46,8 @@
+     enum
+     {
+         DarkMode_Auto   = 0,  // Use dark mode if the system is using it.
+-        DarkMode_Always = 1   // Force using dark mode.
++        DarkMode_Always = 1,  // Force using dark mode.
++        DarkMode_Never  = 2   // Force using light mode.
+     };
+     bool
+     MSWEnableDarkMode(int flags = 0, wxDarkModeSettings* settings = nullptr);
+diff --git a/src/msw/darkmode.cpp b/src/msw/darkmode.cpp
+--- a/src/msw/darkmode.cpp
++++ b/src/msw/darkmode.cpp
+@@ -34,6 +34,7 @@
+ #ifndef WX_PRECOMP
+     #include "wx/app.h"
+     #include "wx/settings.h"
++    #include "wx/window.h"
+ #endif
+ 
+ #include "wx/dynlib.h"
+@@ -184,9 +185,11 @@
+ // don't appear in the SDK headers at all.
+ //
+ // Note that, not being public, they use C++ bool type and not Win32 BOOL.
++void (WINAPI *gs_RefreshImmersiveColorPolicyState)() = nullptr;
+ bool (WINAPI *gs_ShouldAppsUseDarkMode)() = nullptr;
+ bool (WINAPI *gs_AllowDarkModeForWindow)(HWND hwnd, bool allow) = nullptr;
+ PreferredAppMode (WINAPI *gs_SetPreferredAppMode)(PreferredAppMode appMode) = nullptr;
++void (WINAPI *gs_FlushMenuThemes)() = nullptr;
+ 
+ // Wrappers for the undocumented functions, to make sure we never dereference
+ // a null function pointer.
+@@ -229,9 +232,11 @@
+ 
+     // These functions are not only undocumented but are not even exported by
+     // name, and have to be resolved using their ordinals.
+-    return TryLoadByOrd(gs_ShouldAppsUseDarkMode, dllUxTheme, 132) &&
++    return TryLoadByOrd(gs_RefreshImmersiveColorPolicyState, dllUxTheme, 104) &&
++           TryLoadByOrd(gs_ShouldAppsUseDarkMode, dllUxTheme, 132) &&
+            TryLoadByOrd(gs_AllowDarkModeForWindow, dllUxTheme, 133) &&
+-           TryLoadByOrd(gs_SetPreferredAppMode, dllUxTheme, 135);
++           TryLoadByOrd(gs_SetPreferredAppMode, dllUxTheme, 135) &&
++           TryLoadByOrd(gs_FlushMenuThemes, dllUxTheme, 136);
+ }
+ 
+ // This function is only used in this file as it's more clear than using
+@@ -273,7 +278,8 @@
+         return false;
+ 
+     const PreferredAppMode mode = flags & DarkMode_Always ? AppMode_ForceDark
+-                                                          : AppMode_AllowDark;
++                                : flags & DarkMode_Never ? AppMode_ForceLight
++                                                        : AppMode_AllowDark;
+     const DWORD rc = wxMSWImpl::SetPreferredAppMode(mode);
+ 
+     // It's supposed to return the old mode normally.
+@@ -284,8 +290,10 @@
+                    mode, rc);
+     }
+ 
++    wxMSWImpl::gs_RefreshImmersiveColorPolicyState();
+     gs_appMode = mode;
+-    gs_wasActiveOnStartup = wxMSWDarkMode::IsActive();
++    if ( wxTopLevelWindows.empty() )
++        gs_wasActiveOnStartup = wxMSWDarkMode::IsActive();
+ 
+     // Set up the settings to use, allocating a default one if none specified.
+     if ( !settings )
+@@ -293,18 +301,15 @@
+ 
+     wxDarkModeModule::SetSettings(settings);
+ 
++    wxMSWDarkMode::NotifySysColorChange();
++    for ( auto* window : wxTopLevelWindows )
++        ::SendMessage(window->GetHWND(), WM_SYSCOLORCHANGE, 0, 0);
++
+     return true;
+ }
+ 
+ wxApp::AppearanceResult wxApp::SetAppearance(Appearance appearance)
+ {
+-    // We currently can't change the appearance of the existing windows because
+-    // we initialize/create them differently depending on the mode value in a
+-    // lot of places, so don't even try as we risk finishing with a horrible
+-    // mix of light and dark mode elements.
+-    if ( !wxTopLevelWindows.empty() || gs_appMode != AppMode_Default )
+-        return AppearanceResult::CannotChange;
+-
+     int flags = 0;
+     switch ( appearance )
+     {
+@@ -313,8 +318,8 @@
+             break;
+ 
+         case Appearance::Light:
+-            // Nothing to do, this is the default.
+-            return AppearanceResult::Ok;
++            flags = DarkMode_Never;
++            break;
+ 
+         case Appearance::Dark:
+             flags = DarkMode_Always;
+@@ -476,6 +481,15 @@
+         wxLogApiError("DwmSetWindowAttribute(USE_IMMERSIVE_DARK_MODE)", hr);
+ 
+     wxMSWImpl::AllowDarkModeForWindow(hwnd, true);
++    wxMSWImpl::gs_FlushMenuThemes();
++
++    // Windows 10 needs an explicit title-bar redraw after switching.
++    if ( wxGetWinVersion() < wxWinVersion_11 )
++    {
++        const bool active = ::GetActiveWindow() == hwnd;
++        ::SendMessage(hwnd, WM_NCACTIVATE, !active, 0);
++        ::SendMessage(hwnd, WM_NCACTIVATE, active, 0);
++    }
+ }
+ 
+ void SetTheme(HWND hwnd, const wchar_t* themeName, const wchar_t* themeId)
+diff --git a/src/msw/choice.cpp b/src/msw/choice.cpp
+--- a/src/msw/choice.cpp
++++ b/src/msw/choice.cpp
+@@ -228,7 +228,7 @@
+         // The default theme does not look good on starting with Windows 11
+         // build 26300.8553. DarkMode_DarkTheme looks OK and was available
+         // starting with Windows 11 build 26200.
+-        if ( wxCheckOsVersion(10, 0, 26200) )
++        if ( wxMSWDarkMode::IsActive() && wxCheckOsVersion(10, 0, 26200) )
+             wxMSWDarkMode::AllowForWindow(info.hwndList, L"DarkMode_DarkTheme");
+         else
+             wxMSWDarkMode::AllowForWindow(info.hwndList);

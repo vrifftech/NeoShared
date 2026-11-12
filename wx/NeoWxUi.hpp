@@ -283,8 +283,7 @@ inline bool readDarkMode(const std::string& appName) {
     return neosettings::AppSettings(appName).darkMode();
 }
 
-// Native Windows controls choose their appearance when they are created.
-// Call from OnInit before constructing any windows.
+// Select the native appearance before constructing the first window.
 inline void initializeTheme(const std::string& appName) {
     activeDarkMode() = readDarkMode(appName);
 #if defined(__WXMSW__)
@@ -414,6 +413,9 @@ inline void applyThemeRecursive(wxWindow* window, bool darkMode) {
 }
 
 inline void applyTheme(wxWindow* window, bool darkMode) {
+#if defined(__WXMSW__)
+    const bool appearanceChanged = currentDarkMode() != darkMode;
+#endif
     activeDarkMode() = darkMode;
 #if defined(__EMSCRIPTEN__)
     neobrowser::setDarkMode(darkMode);
@@ -422,6 +424,11 @@ inline void applyTheme(wxWindow* window, bool darkMode) {
 
     {
         wxWindowUpdateLocker updateLocker(window);
+#if defined(__WXMSW__)
+        if (appearanceChanged)
+            wxTheApp->SetAppearance(darkMode ? wxApp::Appearance::Dark
+                                           : wxApp::Appearance::Light);
+#endif
         applyThemeRecursive(window, darkMode);
         if (window->GetSizer() != nullptr) window->Layout();
     }

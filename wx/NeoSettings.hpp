@@ -618,8 +618,8 @@ inline void populateRecentFilesMenu(wxMenu& menu, const AppSettings& settings,
             const std::string displayPath = pathToUtf8(files[i]);
 #endif
             const std::string label = "&" + std::to_string(i + 1) + " " +
-                                      ellipsizeMiddle(displayPath, 72);
-            wxMenuItem* item = menu.Append(firstRecentId + static_cast<int>(i), toWx(escapeMenuLabel(label)));
+                                      escapeMenuLabel(ellipsizeMiddle(displayPath, 72));
+            wxMenuItem* item = menu.Append(firstRecentId + static_cast<int>(i), toWx(label));
 #if defined(__EMSCRIPTEN__)
             item->SetHelp(toWx("Reopen this browser-session copy"));
 #else
