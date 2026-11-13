@@ -226,8 +226,8 @@ struct TgaTxiPairPaths {
     std::filesystem::path txi;
 };
 
-// Replaces only the embedded TXI footer of an existing TPC. The 128-byte
-// header and encoded pixel/mipmap payload are preserved byte-for-byte.
+// Replaces the embedded TXI footer, applying an alphablending comment to the
+// header when supplied. Encoded pixel/mipmap bytes are preserved.
 void replaceTpcEmbeddedTxi(const std::filesystem::path& tpcPath,
                            const std::string& txi);
 

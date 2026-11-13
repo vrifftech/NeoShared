@@ -2456,6 +2456,7 @@ TextureData textureFromRgba(TextureFileKind kind,
     texture.layers.push_back(std::move(layer));
     texture.txi = sanitizeTxiPayload(std::move(txi));
     texture.txiStorage=TxiStorage::Sidecar;
+    texture.alphaBlending = getTxiAlphaBlending(texture.txi).value_or(texture.alphaBlending);
     texture.sourceEncoding = std::move(sourceEncoding);
     refreshHasAlpha(texture);
     applyTxiLayout(texture);
@@ -2608,6 +2609,7 @@ TextureData readTgaTextureBytesInternal(const std::vector<std::uint8_t>& bytes,
     texture.canvasHeight = height;
     texture.layers.push_back(std::move(layer));
     texture.txi = std::move(txi);
+    texture.alphaBlending = getTxiAlphaBlending(texture.txi).value_or(texture.alphaBlending);
     texture.sourceEncoding = std::to_string(pixelSize) + "-bit TGA" + (rle ? " RLE" : "");
     texture.tgaSourceLayout=TgaSourceLayout{imageType,pixelSize,flags,colorMapSize};
     texture.txiStorage=TxiStorage::Sidecar;
@@ -3079,7 +3081,7 @@ static std::vector<std::uint8_t> encodeTpcTexture(const TextureData& input, cons
     requireCompatible(tpcGameLayoutIssues(inspectTpcContainer(out), parseTxiFeatures(texture.txi),
                                           animated, cube, first.width, first.height,
                                           static_cast<std::uint32_t>(layers.size()), mipMapCount, payloadBytes));
-    const std::string txi = normalizeTxiFooter(texture.txi);
+    const std::string txi = normalizeTxiFooter(setTxiAlphaBlending(texture.txi, {}));
     out.insert(out.end(), txi.begin(), txi.end());
     return out;
 }
@@ -3342,6 +3344,7 @@ TextureData readDdsTextureBytesInternal(const std::vector<std::uint8_t>& bytes,
     texture.sourcePath = path;
     texture.txi = sanitizeTxiPayload(std::move(txi));
     texture.txiStorage=TxiStorage::Sidecar;
+    texture.alphaBlending = getTxiAlphaBlending(texture.txi).value_or(texture.alphaBlending);
 
     if (bytes.size() >= 128 && bytes[0] == 'D' && bytes[1] == 'D' && bytes[2] == 'S' && bytes[3] == ' ') {
         if (readLE32(bytes, 4) != 124) throw TextureError("DDS header size is not 124");
@@ -3846,6 +3849,9 @@ EncodedTexture encodeTextureBytes(const TextureData& input, const std::filesyste
     if (ext == "dds" && effectiveDdsDialect(texture, applied) == DdsDialect::Game)
         prepareMipPolicy(texture, storesMipmaps(applied), false);
     EncodedTexture result;
+    if (flat || ext == "dds" ||
+        (ext == "txi" && texture.kind != TextureFileKind::Txi))
+        texture.txi = setTxiAlphaBlending(texture.txi, applied.alphaBlending.value_or(texture.alphaBlending));
     if (textureKindUsesTxiSidecar(ext) && !texture.txi.empty())
         result.sidecar.emplace(texture.txi.begin(), texture.txi.end());
     if (ext == "tga") result.image = encodeTgaTexture(texture);
@@ -3893,13 +3899,15 @@ std::vector<std::uint8_t> patchTpcTxiBytes(const std::vector<std::uint8_t>& orig
     const auto layout = inspectTpcContainer(original);
     const auto originalTexture = readTpcTextureBytesInternal(original, tpcPath);
     if (preserveFormatting && txi.find('\0') != std::string::npos) throw TextureError("TXI text cannot contain NUL bytes");
-    const std::string normalizedTxi = preserveFormatting ? txi : normalizeTxiFooter(txi);
+    const auto metadata = setTxiAlphaBlending(txi, {});
+    const std::string normalizedTxi = preserveFormatting ? metadata : normalizeTxiFooter(metadata);
 
     std::vector<std::uint8_t> replacement;
     replacement.reserve(layout.txiOffset + normalizedTxi.size());
     replacement.insert(replacement.end(), original.begin(),
                        original.begin() + static_cast<std::ptrdiff_t>(layout.txiOffset));
     replacement.insert(replacement.end(), normalizedTxi.begin(), normalizedTxi.end());
+    if (const auto alpha = getTxiAlphaBlending(txi)) writeLEFloat(replacement, 4, *alpha);
 
     // Validate the complete replacement before touching the original file.
     // This catches TXI animation layouts that are incompatible with the
@@ -3945,6 +3953,7 @@ TgaTxiPairPaths saveTgaTxiPair(const TextureData& texture,
     }
 
     auto converted = texture;
+    converted.txi = setTxiAlphaBlending(converted.txi, converted.alphaBlending);
     if (converted.cubeMap && !parseTxiFeatures(converted.txi).cube) {
         converted.txi = setTxiValue(converted.txi, "cube", "1");
     }

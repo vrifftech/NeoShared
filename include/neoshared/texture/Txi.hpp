@@ -87,6 +87,10 @@ TxiTextView txiTextView(std::string_view bytes);
 // Remove only terminator/padding NULs outside counted binary payloads.
 std::string trimTxiPadding(std::string bytes);
 
+// Converter metadata stored as "# alphablending <value>", not an engine directive.
+std::optional<float> getTxiAlphaBlending(const std::string& txi);
+std::string setTxiAlphaBlending(const std::string& txi, std::optional<float> value);
+
 std::string txiDirectiveValueKindToString(TxiDirectiveValueKind kind);
 std::string txiIssueSeverityToString(TxiIssueSeverity severity);
 const std::vector<TxiDirectiveInfo>& txiDirectiveCatalog();

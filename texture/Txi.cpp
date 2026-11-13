@@ -8,6 +8,9 @@
 #include <climits>
 #include <cstdlib>
 #include <exception>
+#include <iomanip>
+#include <limits>
+#include <locale>
 #include <map>
 #include <optional>
 #include <set>
@@ -29,6 +32,16 @@ std::string trimTxi(const std::string& input) {
         --last;
     }
     return input.substr(first, last - first);
+}
+
+std::optional<std::string> alphaBlendingComment(const TxiStreamLine& line) {
+    if (line.listData || line.binary || line.key.empty() || line.key.front() != '#') return {};
+    std::istringstream fields(line.key.substr(1) + " " + line.value);
+    std::string key, value;
+    fields >> key;
+    if (asciiLower(key) != "alphablending") return {};
+    std::getline(fields, value);
+    return value;
 }
 
 std::optional<long> parseDecimalInteger(const std::string& value) {
@@ -192,6 +205,37 @@ std::string enumValueDescription(const std::string& directive, const std::string
 }
 
 } // namespace
+
+std::optional<float> getTxiAlphaBlending(const std::string& txi) {
+    for (const auto& line : scanTxiStream(txi)) {
+        if (const auto value = alphaBlendingComment(line)) {
+            std::istringstream fields(*value);
+            fields.imbue(std::locale::classic());
+            float alpha;
+            if (fields >> alpha) return alpha;
+        }
+    }
+    return {};
+}
+
+std::string setTxiAlphaBlending(const std::string& txi, std::optional<float> value) {
+    std::string result;
+    if (value) {
+        std::ostringstream comment;
+        comment.imbue(std::locale::classic());
+        comment << "# alphablending " << std::setprecision(std::numeric_limits<float>::max_digits10)
+                << *value << '\n';
+        result = comment.str();
+    }
+    std::size_t copied = 0;
+    for (const auto& line : scanTxiStream(txi)) {
+        if (!alphaBlendingComment(line)) continue;
+        result.append(txi, copied, line.begin - copied);
+        copied = line.next;
+    }
+    result.append(txi, copied, txi.size() - copied);
+    return result;
+}
 
 std::string txiDirectiveValueKindToString(TxiDirectiveValueKind kind) {
     switch (kind) {
