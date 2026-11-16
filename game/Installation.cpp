@@ -1571,7 +1571,11 @@ bool hasGameIdentityFile(const GameDefinition& game,
 bool isValidGameInstallation(const GameDefinition& game,
                              const std::filesystem::path& root) {
     const auto normalized = normalizeConfiguredPath(root);
-    return isDirectoryPath(normalized) && rootHasRequiredFile(game, normalized);
+    if (!isDirectoryPath(normalized) || !rootHasRequiredFile(game, normalized)) return false;
+    if (game.game != GameId::Kotor1 && game.game != GameId::Kotor2) return true;
+    const auto otherGame = game.game == GameId::Kotor1 ? GameId::Kotor2 : GameId::Kotor1;
+    return rootHasIdentityFile(game, normalized) ||
+           !rootHasIdentityFile(*findGame(otherGame), normalized);
 }
 
 bool isUsableGameInstall(const GameDefinition& game,

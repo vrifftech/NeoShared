@@ -685,10 +685,7 @@ bool LooseArchiveCatalog::addOverrideDirectories(
             return value;
         };
         auto normalizedKey = [&](const std::filesystem::path& value) {
-            std::error_code ec;
-            auto path = std::filesystem::weakly_canonical(value, ec);
-            if (ec) path = value.lexically_normal();
-            std::string key = path.generic_string();
+            std::string key = value.lexically_normal().generic_string();
 #if defined(_WIN32) || defined(__APPLE__)
             key = folded(std::move(key));
 #endif
@@ -722,7 +719,14 @@ bool LooseArchiveCatalog::addOverrideDirectories(
                 continue;
             }
 
-            std::vector<std::filesystem::path> files;
+            const auto canonicalRoot = std::filesystem::canonical(root.path);
+            struct OverrideFile {
+                std::filesystem::path path;
+                std::filesystem::path relative;
+                std::string key;
+                std::string sortKey;
+            };
+            std::vector<OverrideFile> files;
             std::filesystem::recursive_directory_iterator it(
                 root.path, strict ? std::filesystem::directory_options::none :
                     std::filesystem::directory_options::skip_permission_denied, ec), end;
@@ -730,10 +734,16 @@ bool LooseArchiveCatalog::addOverrideDirectories(
                 job.check();
                 const auto entry = *it;
                 std::error_code typeError;
-                if (entry.is_symlink(typeError) && entry.is_directory(typeError)) {
+                const bool symlink = entry.is_symlink(typeError);
+                if (symlink && entry.is_directory(typeError)) {
                     it.disable_recursion_pending();
                 } else if (entry.is_regular_file(typeError) && !typeError) {
-                    files.push_back(entry.path());
+                    auto relative = entry.path().lexically_relative(root.path);
+                    auto key = normalizedKey(symlink ? std::filesystem::canonical(entry.path()) :
+                                                     canonicalRoot / relative);
+                    auto sortKey = folded(relative.generic_string());
+                    files.push_back({entry.path(), std::move(relative), std::move(key),
+                                     std::move(sortKey)});
                 }
                 if (strict && typeError) { ec = typeError; break; }
                 it.increment(ec);
@@ -745,22 +755,18 @@ bool LooseArchiveCatalog::addOverrideDirectories(
                     "Some override entries could not be enumerated: " + ec.message());
                 ec.clear();
             }
-            std::sort(files.begin(), files.end(), [&](const auto& left, const auto& right) {
-                job.check();
-                return folded(left.generic_string()) < folded(right.generic_string());
+            std::sort(files.begin(), files.end(), [](const auto& left, const auto& right) {
+                return left.sortKey < right.sortKey;
             });
 
-            for (const auto& path : files) {
+            for (const auto& file : files) {
                 job.check();
+                const auto& path = file.path;
                 if (resources_.size() >= kMaximumCatalogResources) {
                     throw std::runtime_error(
                         "Combined standalone-archive and override resources exceed the catalog safety limit");
                 }
-                if (!indexedFiles.insert(normalizedKey(path)).second) continue;
-
-                std::error_code relativeError;
-                auto relative = std::filesystem::relative(path, root.path, relativeError);
-                if (relativeError || relative.empty()) relative = path.filename();
+                if (!indexedFiles.insert(file.key).second) continue;
 
                 LooseResourceInfo resource{};
                 resource.index = resources_.size();
@@ -778,7 +784,7 @@ bool LooseArchiveCatalog::addOverrideDirectories(
                         std::numeric_limits<std::uint16_t>::max());
                 resource.overrideFile = true;
                 resource.directPath = path;
-                resource.overrideRelativePath = relative;
+                resource.overrideRelativePath = file.relative;
                 resource.offset = 0u;
 
                 try {
