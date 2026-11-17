@@ -78,7 +78,7 @@ inline bool streamInputRange(
         return false;
     }
 
-    std::array<std::uint8_t, 256u * 1024u> buffer{};
+    std::array<std::uint8_t, 256u * 1024u> buffer;
     for (std::uint64_t remaining = size; remaining != 0u;) {
         job.check();
         const std::size_t requested =

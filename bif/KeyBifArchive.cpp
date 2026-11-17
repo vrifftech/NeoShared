@@ -626,26 +626,23 @@ bool KeyBifArchive::open(const std::filesystem::path& keyPath,
     clear();
     keyPath_ = std::filesystem::absolute(keyPath).lexically_normal();
     job.check();
-    try { keySnapshot_ = neoshared::erf::capture_regular_file_identity(keyPath_); }
-    catch (const std::exception& ex) { lastError_ = ex.what(); return false; }
-
-    std::ifstream keyStream(keyPath, std::ios::binary | std::ios::ate);
-    if (!keyStream) {
+    neoshared::erf::detail::ArchiveInputStream keyStream;
+    if (!keyStream.open_file(keyPath_)) {
         lastError_ = "Unable to open KEY file: " + keyPath.string();
         return false;
     }
-    const std::streamoff keyLength = keyStream.tellg();
-    if (keyLength < static_cast<std::streamoff>(kKeyHeaderSize)) {
+    try { keySnapshot_ = keyStream.file_identity(); }
+    catch (const std::exception& ex) { lastError_ = ex.what(); return false; }
+    const auto keySize = keySnapshot_.size;
+    if (keySize < kKeyHeaderSize) {
         lastError_ = "KEY file is shorter than its 64-byte header";
         return false;
     }
-    const std::uintmax_t keySize = static_cast<std::uintmax_t>(keyLength);
     if (keySize > std::numeric_limits<std::size_t>::max() ||
         keySize > kMaximumNativeKeyBytes) {
         lastError_ = "KEY file exceeds the 128 MiB safety limit";
         return false;
     }
-    keyStream.seekg(0, std::ios::beg);
     std::vector<std::uint8_t> keyBytes(static_cast<std::size_t>(keySize));
     for(std::size_t offset=0;offset<keyBytes.size();) {
         job.check();
@@ -758,25 +755,24 @@ bool KeyBifArchive::open(const std::filesystem::path& keyPath,
             appendArchiveIssue(issues_, {IssueSeverity::Error, bif.messages.back(), bifIndex, std::nullopt});
             continue;
         }
-        try { bif.snapshot = neoshared::erf::capture_regular_file_identity(bif.resolvedPath); }
+        neoshared::erf::detail::ArchiveInputStream stream;
+        if (!stream.open_file(bif.resolvedPath)) {
+            bif.messages.push_back("Unable to open resolved BIF file");
+            appendArchiveIssue(issues_, {IssueSeverity::Error, bif.messages.back(), bifIndex, std::nullopt});
+            continue;
+        }
+        try { bif.snapshot = stream.file_identity(); }
         catch (const std::exception& ex) {
             bif.messages.push_back(ex.what());
             appendArchiveIssue(issues_, {IssueSeverity::Error, ex.what(), bifIndex, std::nullopt});
             continue;
         }
-        std::ifstream stream(bif.resolvedPath, std::ios::binary | std::ios::ate);
-        if (!stream) {
-            bif.messages.push_back("Unable to open resolved BIF file");
-            appendArchiveIssue(issues_, {IssueSeverity::Error, bif.messages.back(), bifIndex, std::nullopt});
-            continue;
-        }
-        const std::streamoff length = stream.tellg();
-        if (length < static_cast<std::streamoff>(kBifHeaderSize)) {
+        if (bif.snapshot.size < kBifHeaderSize) {
             bif.messages.push_back("BIF is shorter than its 20-byte header");
             appendArchiveIssue(issues_, {IssueSeverity::Error, bif.messages.back(), bifIndex, std::nullopt});
             continue;
         }
-        bif.actualFileSize = static_cast<std::uintmax_t>(length);
+        bif.actualFileSize = bif.snapshot.size;
         bif.available = true;
         if (!bif.compressed && bif.declaredFileSize != 0u && bif.actualFileSize != bif.declaredFileSize) {
             std::ostringstream message;
@@ -785,7 +781,6 @@ bool KeyBifArchive::open(const std::filesystem::path& keyPath,
             bif.messages.push_back(message.str());
             appendArchiveIssue(issues_, {IssueSeverity::Warning, message.str(), bifIndex, std::nullopt});
         }
-        stream.seekg(0, std::ios::beg);
         std::array<std::uint8_t, kBifHeaderSize> header{};
         stream.read(reinterpret_cast<char*>(header.data()), static_cast<std::streamsize>(header.size()));
         if (!stream || std::memcmp(header.data(), "BIFF", 4) != 0) {
