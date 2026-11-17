@@ -2101,18 +2101,6 @@ void ensure_unique_save_staging_leaves(const std::vector<Resource>& resources,
 }
 
 
-void ensure_staged_input_fits_archive_format(const std::filesystem::path& source) {
-    std::uintmax_t size = 0;
-    try {
-        size = regular_file_size_after_open(source);
-    } catch (const std::exception& ex) {
-        throw ErfError(std::string("Unable to size regular resource input file before staging: ") + path_to_string(source) + ": " + ex.what());
-    }
-    if (size > std::numeric_limits<std::uint32_t>::max()) {
-        throw ErfError("Resource input payload exceeds the 32-bit archive format limit: " + path_to_string(source));
-    }
-}
-
 std::filesystem::path stable_staged_input_path(const std::filesystem::path& source) {
     // Data-safe staging: bind relative add-resource inputs to their current
     // location at add time. Otherwise a later current-directory change could
@@ -2957,10 +2945,6 @@ bool ErfArchive::is_valid_archive(const std::filesystem::path& filename) {
 
 void ErfArchive::load(const std::filesystem::path& filename) {
     checkOperation();
-    if (!file_exists(filename)) {
-        throw ErfError("Unable to load file \"" + path_to_string(filename) + "\", file not found!");
-    }
-
     reset();
     FileIdentity identity{};
     try {
@@ -2976,7 +2960,7 @@ void ErfArchive::load(const std::filesystem::path& filename) {
                        "\", the file could not be opened" +
                        (detail.empty() ? std::string("!") : std::string(": ") + detail));
     }
-    if (!same_regular_file_revision(filename, identity)) {
+    if (!same_file_revision(archive_stream_.file_identity(), identity)) {
         archive_stream_.close();
         throw ErfError("Unable to load file \"" + path_to_string(filename) +
                        "\", the file changed while it was being opened!");
@@ -3563,15 +3547,6 @@ void ErfArchive::save(std::filesystem::path filename, std::string filetype_overr
         }
 
         for (std::size_t i = 0; i < new_files_.size(); ++i) {
-            try {
-                ensure_same_regular_file_identity(new_files_[i], new_file_identities_.at(i), "Staged resource input validation failed");
-            } catch (const std::exception& ex) {
-                throw ErfError(ex.what());
-            }
-            if (!file_exists(new_files_[i])) {
-                throw ErfError("Staged resource input file no longer exists: " + path_to_string(new_files_[i]));
-            }
-            ensure_staged_input_fits_archive_format(new_files_[i]);
             const std::string archive_name = filename_based_resources()
                 ? normalize_filename_resource_name(new_names_.at(i), disk_format_)
                 : filename_string(std::filesystem::path(new_names_.at(i)));
@@ -3939,9 +3914,6 @@ void ErfArchive::save(std::filesystem::path filename, std::string filetype_overr
                 throw ErfError("Staged resource changed; add it again before saving: " + path_to_string(new_files_[i]));
         }
         ensure_save_target_does_not_overwrite_staged_inputs(filename, new_files_);
-        if (!same_regular_file_identity(output_temp, output_identity)) {
-            throw ErfError("Temporary archive output was replaced before final archive replacement: " + path_to_string(output_temp));
-        }
         replace_file_atomically(output_temp, output_identity, filename, save_target_state);
         output_guard.release();
 
@@ -3969,18 +3941,15 @@ void ErfArchive::add_resource(const std::filesystem::path& filename, bool replac
         save_as = filename_string(filename);
     }
 
-    // Fail before mutating the in-memory archive model. The save path already
-    // fails closed if staged inputs disappear, but AddResource replacement could
-    // otherwise delete an existing resource from the loaded model before finding
-    // out that the replacement path is missing, non-regular, or too large for
-    // the 32-bit archive payload field.
-    ensure_staged_input_fits_archive_format(filename);
     const std::filesystem::path staged_source = stable_staged_input_path(filename);
     FileIdentity staged_identity{};
     try {
         staged_identity = capture_regular_file_identity(staged_source);
     } catch (const std::exception& ex) {
         throw ErfError(std::string("Unable to bind staged resource input file: ") + path_to_string(staged_source) + ": " + ex.what());
+    }
+    if (staged_identity.size > std::numeric_limits<std::uint32_t>::max()) {
+        throw ErfError("Resource input payload exceeds the 32-bit archive format limit: " + path_to_string(staged_source));
     }
 
     if (filename_based_resources()) {
@@ -4276,9 +4245,6 @@ void ErfArchive::get_resource(const std::string& resref, std::uint16_t res_type,
         out_file.close();
     }
     ensure_extract_target_does_not_overwrite_inputs(filename, filename_, new_files_);
-    if (!same_regular_file_identity(output_temp, output_identity)) {
-        throw ErfError("Temporary extraction output was replaced before final destination replacement: " + path_to_string(output_temp));
-    }
     replace_file_atomically(output_temp, output_identity, filename, extract_target_state);
     output_guard.release();
 }
@@ -4348,9 +4314,6 @@ void ErfArchive::get_resource_by_name(const std::string& resource_name, std::fil
         out_file.close();
     }
     ensure_extract_target_does_not_overwrite_inputs(filename, filename_, new_files_);
-    if (!same_regular_file_identity(output_temp, output_identity)) {
-        throw ErfError("Temporary extraction output was replaced before final destination replacement: " + path_to_string(output_temp));
-    }
     replace_file_atomically(output_temp, output_identity, filename, extract_target_state);
     output_guard.release();
 }
@@ -4579,11 +4542,13 @@ void ErfArchive::ensure_loaded_for_operation(const char* message) const {
 }
 
 void ErfArchive::ensure_archive_stream() {
-    if (!reader_backed_ && loaded_file_identity_.valid &&
-        !same_regular_file_revision(filename_, loaded_file_identity_)) {
-        throw ErfError("Archive changed after it was loaded; reopen the archive before extracting resources.");
+    if (archive_stream_.is_open()) {
+        if (!reader_backed_ && loaded_file_identity_.valid &&
+            !same_regular_file_revision(filename_, loaded_file_identity_)) {
+            throw ErfError("Archive changed after it was loaded; reopen the archive before extracting resources.");
+        }
+        return;
     }
-    if (archive_stream_.is_open()) return;
     if (reader_backed_) {
         throw ErfError("Unable to get resource from the range-backed archive, its reader is unavailable!");
     }
@@ -4593,16 +4558,13 @@ void ErfArchive::ensure_archive_stream() {
         // archive identity is available for a safe reopen.
         throw ErfError("Unable to get resource from file, the file could not be read!");
     }
-    if (!same_regular_file_revision(filename_, loaded_file_identity_)) {
-        throw ErfError("Archive changed after it was loaded; reopen the archive before extracting resources.");
-    }
     open_binary_input_stream(archive_stream_, filename_);
     if (!archive_stream_.is_open()) {
         const std::string detail = archive_stream_.last_error();
         throw ErfError("Unable to reopen archive file \"" + path_to_string(filename_) +
                        "\"" + (detail.empty() ? std::string(".") : std::string(": ") + detail));
     }
-    if (!same_regular_file_revision(filename_, loaded_file_identity_)) {
+    if (!same_file_revision(archive_stream_.file_identity(), loaded_file_identity_)) {
         archive_stream_.close();
         throw ErfError("Archive changed while it was being reopened; reopen the archive before extracting resources.");
     }

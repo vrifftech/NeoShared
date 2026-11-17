@@ -87,7 +87,9 @@ GameProfile detectGameProfile(const std::vector<KeyEntry>& entries) {
     // mere extension difference is not sufficient evidence. Detect Jade only
     // when the KEY contains a type defined by Jade's canonical map but absent
     // from KotOR's map (for example QST, FSM, BIP, or IDS).
+    std::unordered_set<std::uint16_t> types;
     for (const KeyEntry& entry : entries) {
+        if (!types.insert(entry.type).second) continue;
         const std::string jade = neoshared::erf::Resource::res_type_to_string(
             entry.type, neoshared::erf::ResourceNameProfile::JadeEmpire);
         const std::string kotor = neoshared::erf::Resource::res_type_to_string(
@@ -165,33 +167,38 @@ std::filesystem::path portableRelativePath(std::string stored) {
     return result;
 }
 
-std::optional<std::filesystem::path> resolveCaseInsensitive(
-    const std::filesystem::path& root,
-    const std::filesystem::path& relative) {
-    std::error_code ec;
-    std::filesystem::path current = root;
-    for (const auto& component : relative) {
-        const std::filesystem::path exact = current / component;
-        if (std::filesystem::exists(exact, ec) && !ec) {
-            current = exact;
-            continue;
-        }
-        ec.clear();
-        if (!std::filesystem::is_directory(current, ec) || ec) return std::nullopt;
-        const std::string wanted = lowerAscii(component.generic_string());
-        bool found = false;
-        std::filesystem::path matched;
+using DirectoryNames = std::map<std::string, std::vector<std::filesystem::path>>;
+using DirectoryCache = std::map<std::filesystem::path, DirectoryNames>;
+
+const DirectoryNames& directoryNames(const std::filesystem::path& path, DirectoryCache& cache) {
+    auto [known, inserted] = cache.try_emplace(path);
+    if (inserted) {
+        std::error_code ec;
         for (std::filesystem::directory_iterator it(
-                 current, std::filesystem::directory_options::skip_permission_denied, ec), end;
+                 path, std::filesystem::directory_options::skip_permission_denied, ec), end;
              !ec && it != end; it.increment(ec)) {
-            if (lowerAscii(it->path().filename().generic_string()) == wanted) {
-                if (found) return std::nullopt;
-                matched = it->path();
-                found = true;
-            }
+            known->second[lowerAscii(it->path().filename().generic_string())].push_back(it->path());
         }
-        if (!found) return std::nullopt;
-        current = matched;
+    }
+    return known->second;
+}
+
+std::optional<std::filesystem::path> resolveCaseInsensitive(
+    const std::filesystem::path& root, const std::filesystem::path& relative,
+    DirectoryCache& cache) {
+    std::error_code ec;
+    const auto direct = root / relative;
+    if (std::filesystem::is_regular_file(direct, ec) && !ec) return direct;
+    auto current = root;
+    for (const auto& component : relative) {
+        const auto& names = directoryNames(current, cache);
+        const auto found = names.find(lowerAscii(component.generic_string()));
+        if (found == names.end()) return std::nullopt;
+        const auto& candidates = found->second;
+        const auto exact = std::find(candidates.begin(), candidates.end(), current / component);
+        if (exact != candidates.end()) current = *exact;
+        else if (candidates.size() == 1u) current = candidates.front();
+        else return std::nullopt;
     }
     if (!std::filesystem::is_regular_file(current, ec) || ec) return std::nullopt;
     return current;
@@ -243,13 +250,9 @@ bool matchesDeclaredBif(const std::filesystem::path& path,
     if (declaredFileSize == 0u || !matchesDownloadedBifName(path, expectedLeaf)) {
         return false;
     }
-    std::error_code ec;
-    if (!std::filesystem::is_regular_file(path, ec) || ec) return false;
-    const auto size = std::filesystem::file_size(path, ec);
-    if (ec || size != declaredFileSize) return false;
-
-    std::ifstream stream(path, std::ios::binary);
-    if (!stream) return false;
+    std::ifstream stream(path, std::ios::binary | std::ios::ate);
+    if (!stream || stream.tellg() != static_cast<std::streamoff>(declaredFileSize)) return false;
+    stream.seekg(0, std::ios::beg);
     std::array<char, 8> header{};
     stream.read(header.data(), static_cast<std::streamsize>(header.size()));
     if (!stream) return false;
@@ -262,14 +265,10 @@ void appendDeclaredSizeCandidates(
     std::vector<std::filesystem::path>& matches,
     const std::filesystem::path& directory,
     const std::filesystem::path& expectedLeaf,
-    std::uint32_t declaredFileSize) {
-    std::error_code ec;
-    if (!std::filesystem::is_directory(directory, ec) || ec) return;
-    for (std::filesystem::directory_iterator it(
-             directory, std::filesystem::directory_options::skip_permission_denied, ec), end;
-         !ec && it != end; it.increment(ec)) {
-        if (matchesDeclaredBif(it->path(), expectedLeaf, declaredFileSize)) {
-            appendUniquePath(matches, it->path());
+    std::uint32_t declaredFileSize, DirectoryCache& cache) {
+    for (const auto& [name, paths] : directoryNames(directory, cache)) {
+        for (const auto& path : paths) {
+            if (matchesDeclaredBif(path, expectedLeaf, declaredFileSize)) appendUniquePath(matches, path);
         }
     }
 }
@@ -277,20 +276,21 @@ void appendDeclaredSizeCandidates(
 std::filesystem::path resolveBifPath(
     const std::filesystem::path& keyPath, const std::string& storedPath,
     std::uint32_t declaredFileSize,
-    const std::vector<std::filesystem::path>& supplementaryFiles, bool preferCompressed) {
+    const std::vector<std::filesystem::path>& supplementaryFiles, bool preferCompressed,
+    DirectoryCache& cache) {
     const auto relative = portableRelativePath(storedPath);
     if (relative.empty()) return {};
     auto compressed = relative;
     compressed.replace_extension(".bzf");
     if (preferCompressed) {
-        if (auto path = resolveCaseInsensitive(keyPath.parent_path(), compressed)) return *path;
+        if (auto path = resolveCaseInsensitive(keyPath.parent_path(), compressed, cache)) return *path;
         for (const auto& file : supplementaryFiles)
             if (pathKey(file.filename()) == pathKey(compressed.filename())) return file;
     }
-    if (auto direct = resolveCaseInsensitive(keyPath.parent_path(), relative)) return *direct;
+    if (auto direct = resolveCaseInsensitive(keyPath.parent_path(), relative, cache)) return *direct;
 
     std::vector<std::filesystem::path> nameMatches;
-    if (auto local = resolveCaseInsensitive(keyPath.parent_path(), relative.filename())) {
+    if (auto local = resolveCaseInsensitive(keyPath.parent_path(), relative.filename(), cache)) {
         appendUniquePath(nameMatches, *local);
     }
     for (const auto& file : supplementaryFiles) {
@@ -317,10 +317,10 @@ std::filesystem::path resolveBifPath(
 
     const auto storedDirectory = keyPath.parent_path() / relative.parent_path();
     appendDeclaredSizeCandidates(sizeMatches, storedDirectory, relative.filename(),
-                                 declaredFileSize);
+                                 declaredFileSize, cache);
     if (storedDirectory.lexically_normal() != keyPath.parent_path().lexically_normal()) {
         appendDeclaredSizeCandidates(sizeMatches, keyPath.parent_path(), relative.filename(),
-                                     declaredFileSize);
+                                     declaredFileSize, cache);
     }
     return sizeMatches.size() == 1u ? sizeMatches.front() : std::filesystem::path{};
 }
@@ -352,12 +352,12 @@ std::string sanitizeComponent(std::string value) {
 
 
 std::string joinStatus(const std::vector<std::string>& parts) {
-    std::ostringstream stream;
+    std::string text;
     for (std::size_t i = 0; i < parts.size(); ++i) {
-        if (i != 0) stream << "; ";
-        stream << parts[i];
+        if (i != 0) text += "; ";
+        text += parts[i];
     }
-    return stream.str();
+    return text;
 }
 
 void cooperativeYield(const BrowserYieldCallback& yield, std::size_t counter) {
@@ -473,8 +473,8 @@ bool buildResourceIndex(const std::vector<KeyEntry>& keyEntries,
             status.push_back("Resource index exceeds the 14-bit index used by the KotOR loader");
             appendArchiveIssue(issues, {IssueSeverity::Warning, status.back(), resource.bifIndex, key.id});
         }
-        if (status.empty()) status.push_back(resource.extractable ? "Ready" : "Unavailable");
-        resource.status = joinStatus(status);
+        resource.status = status.empty()
+            ? (resource.extractable ? "Ready" : "Unavailable") : joinStatus(status);
 
         const std::string duplicateKey = lowerAscii(resource.resref) + '#' +
                                          std::to_string(resource.type);
@@ -738,6 +738,7 @@ bool KeyBifArchive::open(const std::filesystem::path& keyPath,
             if (std::find(resourceTypes.begin(), resourceTypes.end(), key.type) != resourceTypes.end())
                 selectedBifs.insert(key.id >> 20u);
     std::vector<ParsedBif> parsedBifs(bifs_.size());
+    DirectoryCache directories;
     std::uint64_t aggregateBifRecords = 0;
     for (std::size_t bifIndex = 0; bifIndex < bifs_.size(); ++bifIndex) {
         job.update(bifIndex, bifs_.size(), "Indexing BIF archives");
@@ -746,7 +747,7 @@ bool KeyBifArchive::open(const std::filesystem::path& keyPath,
         const auto chosen = explicitRelocations.find(bifIndex);
         bif.resolvedPath = chosen != explicitRelocations.end()
             ? std::filesystem::absolute(chosen->second).lexically_normal()
-            : resolveBifPath(keyPath_, bif.storedPath, bif.declaredFileSize, supplementaryFiles, preferCompressed);
+            : resolveBifPath(keyPath_, bif.storedPath, bif.declaredFileSize, supplementaryFiles, preferCompressed, directories);
         bif.compressed = lowerAscii(bif.resolvedPath.extension().string()) == ".bzf";
         if (chosen != explicitRelocations.end()) {
             bif.messages.push_back("BIF explicitly mapped by the user: " + bif.resolvedPath.string());

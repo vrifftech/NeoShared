@@ -67,7 +67,8 @@ private:
 };
 
 ScopedWin32Handle open_regular_file_for_read_win32(const std::filesystem::path& path,
-                                                   std::uintmax_t* size_out = nullptr) {
+                                                   std::uintmax_t* size_out = nullptr,
+                                                   BY_HANDLE_FILE_INFORMATION* info_out = nullptr) {
     ScopedWin32Handle handle(CreateFileW(path.c_str(),
                                          GENERIC_READ,
                                          FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -81,13 +82,16 @@ ScopedWin32Handle open_regular_file_for_read_win32(const std::filesystem::path& 
     if (GetFileType(handle.get()) != FILE_TYPE_DISK) {
         return ScopedWin32Handle();
     }
-    LARGE_INTEGER size{};
-    if (!GetFileSizeEx(handle.get(), &size) || size.QuadPart < 0) {
+    BY_HANDLE_FILE_INFORMATION info{};
+    if (!GetFileInformationByHandle(handle.get(), &info)) {
         return ScopedWin32Handle();
     }
-    if (size_out != nullptr) {
-        *size_out = static_cast<std::uintmax_t>(size.QuadPart);
+    const auto size = (static_cast<std::uintmax_t>(info.nFileSizeHigh) << 32u) | info.nFileSizeLow;
+    if (size > static_cast<std::uintmax_t>(std::numeric_limits<std::int64_t>::max())) {
+        return ScopedWin32Handle();
     }
+    if (size_out != nullptr) *size_out = size;
+    if (info_out != nullptr) *info_out = info;
     return handle;
 }
 
@@ -288,7 +292,8 @@ int safe_open_read_flags() {
 }
 
 ScopedPosixFd open_regular_file_for_read_nonblocking(const std::filesystem::path& path,
-                                                     std::uintmax_t* size_out = nullptr) {
+                                                     std::uintmax_t* size_out = nullptr,
+                                                     struct stat* info_out = nullptr) {
     ScopedPosixFd fd(::open(path_to_string(path).c_str(), safe_open_read_flags()));
     if (!fd.valid()) {
         return ScopedPosixFd();
@@ -300,6 +305,7 @@ ScopedPosixFd open_regular_file_for_read_nonblocking(const std::filesystem::path
     if (size_out != nullptr) {
         *size_out = static_cast<std::uintmax_t>(st.st_size);
     }
+    if (info_out != nullptr) *info_out = st;
     return fd;
 }
 
@@ -369,77 +375,24 @@ bool same_identity_values(const FileIdentity& a, const FileIdentity& b) {
 #endif
 }
 
+bool same_identity_values(const PathIdentity& a, const PathIdentity& b) {
+    if (!a.valid || !b.valid || a.is_directory != b.is_directory || a.is_regular != b.is_regular) {
+        return false;
+    }
+#if defined(_WIN32)
+    return a.volume_serial == b.volume_serial &&
+           a.file_index_high == b.file_index_high && a.file_index_low == b.file_index_low;
+#else
+    return a.device == b.device && a.inode == b.inode;
+#endif
+}
+
 void ensure_opened_source_matches_expected(const FileIdentity* expected,
                                            const FileIdentity& opened,
                                            const std::filesystem::path& source) {
     if (expected != nullptr && !same_identity_values(opened, *expected)) {
         throw std::runtime_error("Staged input file was replaced before copy could bind it: " + path_to_string(source));
     }
-}
-
-bool files_match_after_copy(const std::filesystem::path& source,
-                            const std::filesystem::path& copied,
-                            std::uintmax_t max_bytes) {
-    // Data-safe copy verification. The copy path snapshots the source size
-    // before copying to avoid unbounded reads, but a user-controlled staged
-    // file can grow or change while the copy is in progress. Verify that the
-    // completed temporary copy still matches the source before replacing the
-    // requested destination or treating the staged copy as archive input.
-#if defined(_WIN32)
-    std::uintmax_t source_size = 0;
-    std::uintmax_t copied_size = 0;
-    auto source_handle = open_regular_file_for_read_win32(source, &source_size);
-    auto copied_handle = open_regular_file_for_read_win32(copied, &copied_size);
-    if (!source_handle.valid() || !copied_handle.valid()) {
-        return false;
-    }
-    if (source_size != copied_size || source_size > max_bytes) {
-        return false;
-    }
-
-    std::array<char, kDataSafeIoBufferSize> abuf{};
-    std::array<char, kDataSafeIoBufferSize> bbuf{};
-    std::uintmax_t remaining = source_size;
-    while (remaining > 0) {
-        const DWORD want = static_cast<DWORD>(std::min<std::uintmax_t>(abuf.size(), remaining));
-        if (!read_exact_from_win32_handle(source_handle.get(), abuf.data(), want) ||
-            !read_exact_from_win32_handle(copied_handle.get(), bbuf.data(), want)) {
-            return false;
-        }
-        if (std::memcmp(abuf.data(), bbuf.data(), want) != 0) {
-            return false;
-        }
-        remaining -= static_cast<std::uintmax_t>(want);
-    }
-    return true;
-#else
-    std::uintmax_t source_size = 0;
-    std::uintmax_t copied_size = 0;
-    auto source_fd = open_regular_file_for_read_nonblocking(source, &source_size);
-    auto copied_fd = open_regular_file_for_read_nonblocking(copied, &copied_size);
-    if (!source_fd.valid() || !copied_fd.valid()) {
-        return false;
-    }
-    if (source_size != copied_size || source_size > max_bytes) {
-        return false;
-    }
-
-    std::array<char, kDataSafeIoBufferSize> abuf{};
-    std::array<char, kDataSafeIoBufferSize> bbuf{};
-    std::uintmax_t remaining = source_size;
-    while (remaining > 0) {
-        const std::size_t want = static_cast<std::size_t>(std::min<std::uintmax_t>(abuf.size(), remaining));
-        if (!read_exact_from_fd(source_fd.get(), abuf.data(), want) ||
-            !read_exact_from_fd(copied_fd.get(), bbuf.data(), want)) {
-            return false;
-        }
-        if (std::memcmp(abuf.data(), bbuf.data(), want) != 0) {
-            return false;
-        }
-        remaining -= static_cast<std::uintmax_t>(want);
-    }
-    return true;
-#endif
 }
 
 void replace_file_after_successful_copy(const std::filesystem::path& source,
@@ -613,14 +566,6 @@ bool paths_refer_to_same_existing_file(const std::filesystem::path& a, const std
     // detected.  Failure to prove equivalence is treated as non-equivalent; the
     // later open/replace path still fails closed if the filesystem rejects it.
     std::error_code ec;
-    if (!std::filesystem::exists(a, ec) || ec) {
-        return false;
-    }
-    ec.clear();
-    if (!std::filesystem::exists(b, ec) || ec) {
-        return false;
-    }
-    ec.clear();
     return std::filesystem::equivalent(a, b, ec) && !ec;
 }
 
@@ -639,9 +584,6 @@ bool paths_refer_to_same_existing_file_or_location(const std::filesystem::path& 
 }
 
 FileIdentity copy_file_limited_impl(const std::filesystem::path& source, const std::filesystem::path& destination, std::uintmax_t max_bytes, const FileIdentity* expected_source_identity, bool replace_existing) {
-    if (!file_exists(source)) {
-        throw std::runtime_error("Source file for copying is not a regular file: " + path_to_string(source));
-    }
     if (paths_refer_to_same_existing_file_or_location(source, destination)) {
         throw std::runtime_error("Refusing to copy a file over itself: " + path_to_string(source));
     }
@@ -663,17 +605,16 @@ FileIdentity copy_file_limited_impl(const std::filesystem::path& source, const s
     // CopyNewFile/BackupFile read from fmOpenRead or fmShareDenyNone.
     // Keep the file-sharing guard, but write to a CREATE_NEW temp file
     // and replace the destination only after the full copy succeeds.
-    std::uintmax_t source_size = 0;
-    auto in = open_regular_file_for_read_win32(source, &source_size);
+    auto in = open_regular_file_for_read_win32(source);
     if (!in.valid()) {
         throw std::runtime_error("Unable to open regular source file for copying: " + path_to_string(source));
     }
+    const auto source_identity = capture_open_file_identity(in.get());
+    const auto source_size = source_identity.size;
     if (source_size > max_bytes) {
         throw std::runtime_error("Refusing to copy source file because it exceeds the permitted size: " + path_to_string(source));
     }
-    ensure_opened_source_matches_expected(expected_source_identity,
-                                          capture_identity_from_win32_handle(in.get(), source_size),
-                                          source);
+    ensure_opened_source_matches_expected(expected_source_identity, source_identity, source);
 
     ScopedWin32Handle out(CreateFileW(temp_destination.c_str(),
                                      GENERIC_READ | GENERIC_WRITE,
@@ -712,17 +653,16 @@ FileIdentity copy_file_limited_impl(const std::filesystem::path& source, const s
         throw std::runtime_error("Unable to close copied file " + path_to_string(temp_destination));
     }
 #else
-    std::uintmax_t source_size = 0;
-    auto in = open_regular_file_for_read_nonblocking(source, &source_size);
+    auto in = open_regular_file_for_read_nonblocking(source);
     if (!in.valid()) {
         throw std::runtime_error("Unable to open regular source file for copying: " + path_to_string(source));
     }
+    const auto source_identity = capture_open_file_identity(in.get());
+    const auto source_size = source_identity.size;
     if (source_size > max_bytes) {
         throw std::runtime_error("Refusing to copy source file because it exceeds the permitted size: " + path_to_string(source));
     }
-    ensure_opened_source_matches_expected(expected_source_identity,
-                                          capture_identity_from_posix_fd(in.get(), source_size),
-                                          source);
+    ensure_opened_source_matches_expected(expected_source_identity, source_identity, source);
 
     ScopedPosixFd out(::open(path_to_string(temp_destination).c_str(), O_WRONLY | O_CREAT | O_EXCL | close_on_exec_flag(), 0600));
     if (!out.valid()) {
@@ -764,20 +704,12 @@ FileIdentity copy_file_limited_impl(const std::filesystem::path& source, const s
     }
 #endif
 
-    if (!files_match_after_copy(source, temp_destination, max_bytes)) {
+    if (!same_regular_file_revision(source, source_identity)) {
         throw std::runtime_error("Source file changed while copying; refusing to replace destination: " + path_to_string(source));
-    }
-    if (expected_source_identity != nullptr && !same_regular_file_identity(source, *expected_source_identity)) {
-        throw std::runtime_error("Staged input file was replaced while copying; refusing to use staged payload: " + path_to_string(source));
     }
     if (paths_refer_to_same_existing_file_or_location(source, destination)) {
         throw std::runtime_error("Refusing to copy a file over itself after copy verification: " + path_to_string(source));
     }
-    if (!same_regular_file_identity(temp_destination, temp_identity)) {
-        throw std::runtime_error("Temporary copy output was replaced before final destination update: " + path_to_string(temp_destination));
-    }
-
-    ensure_replacement_target_unchanged(destination, destination_state, "Copy destination safety check failed");
     replace_file_after_successful_copy(temp_destination, temp_identity, destination, destination_state, replace_existing);
     temp_guard.release();
     FileIdentity destination_identity = capture_regular_file_identity(destination);
@@ -821,13 +753,10 @@ FileIdentity capture_regular_file_identity(const std::filesystem::path& path) {
     FileIdentity identity{};
 #if defined(_WIN32)
     std::uintmax_t size = 0;
-    auto handle = open_regular_file_for_read_win32(path, &size);
+    BY_HANDLE_FILE_INFORMATION info{};
+    auto handle = open_regular_file_for_read_win32(path, &size, &info);
     if (!handle.valid()) {
         throw std::runtime_error("Unable to open regular file for identity capture: " + path_to_string(path));
-    }
-    BY_HANDLE_FILE_INFORMATION info{};
-    if (!GetFileInformationByHandle(handle.get(), &info)) {
-        throw std::runtime_error("Unable to read regular file identity: " + path_to_string(path));
     }
     identity.valid = true;
     identity.size = size;
@@ -843,30 +772,12 @@ FileIdentity capture_regular_file_identity(const std::filesystem::path& path) {
     identity.file_index_high = static_cast<std::uint32_t>(info.nFileIndexHigh);
     identity.file_index_low = static_cast<std::uint32_t>(info.nFileIndexLow);
 #else
-    std::uintmax_t size = 0;
-    auto fd = open_regular_file_for_read_nonblocking(path, &size);
+    struct stat st {};
+    auto fd = open_regular_file_for_read_nonblocking(path, nullptr, &st);
     if (!fd.valid()) {
         throw std::runtime_error("Unable to open regular file for identity capture: " + path_to_string(path));
     }
-    struct stat st {};
-    if (::fstat(fd.get(), &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0) {
-        throw std::runtime_error("Unable to read regular file identity: " + path_to_string(path));
-    }
-    identity.valid = true;
-    identity.size = static_cast<std::uintmax_t>(st.st_size);
-    identity.device = static_cast<std::uint64_t>(st.st_dev);
-    identity.inode = static_cast<std::uint64_t>(st.st_ino);
-#if defined(__APPLE__)
-    identity.modified_seconds = st.st_mtimespec.tv_sec;
-    identity.modified_fraction = st.st_mtimespec.tv_nsec;
-    identity.changed_seconds = st.st_ctimespec.tv_sec;
-    identity.changed_fraction = st.st_ctimespec.tv_nsec;
-#else
-    identity.modified_seconds = st.st_mtim.tv_sec;
-    identity.modified_fraction = st.st_mtim.tv_nsec;
-    identity.changed_seconds = st.st_ctim.tv_sec;
-    identity.changed_fraction = st.st_ctim.tv_nsec;
-#endif
+    identity = identity_from_posix_stat(st);
 #endif
     return identity;
 }
@@ -947,10 +858,6 @@ void ensure_same_regular_file_identity(const std::filesystem::path& path, const 
 PathIdentity capture_path_identity(const std::filesystem::path& path) {
     PathIdentity identity{};
 #if defined(_WIN32)
-    const DWORD attrs = GetFileAttributesW(path.c_str());
-    if (attrs == INVALID_FILE_ATTRIBUTES) {
-        return identity;
-    }
     ScopedWin32Handle handle(CreateFileW(path.c_str(),
                                          0,
                                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
@@ -966,8 +873,8 @@ PathIdentity capture_path_identity(const std::filesystem::path& path) {
         return identity;
     }
     identity.valid = true;
-    identity.is_directory = (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
-    identity.is_regular = !identity.is_directory && (attrs & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
+    identity.is_directory = (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    identity.is_regular = !identity.is_directory && (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
     identity.volume_serial = static_cast<std::uint32_t>(info.dwVolumeSerialNumber);
     identity.file_index_high = static_cast<std::uint32_t>(info.nFileIndexHigh);
     identity.file_index_low = static_cast<std::uint32_t>(info.nFileIndexLow);
@@ -986,20 +893,7 @@ PathIdentity capture_path_identity(const std::filesystem::path& path) {
 }
 
 bool same_path_identity(const std::filesystem::path& path, const PathIdentity& expected) {
-    if (!expected.valid) {
-        return false;
-    }
-    const PathIdentity current = capture_path_identity(path);
-    if (!current.valid || current.is_directory != expected.is_directory || current.is_regular != expected.is_regular) {
-        return false;
-    }
-#if defined(_WIN32)
-    return current.volume_serial == expected.volume_serial &&
-           current.file_index_high == expected.file_index_high &&
-           current.file_index_low == expected.file_index_low;
-#else
-    return current.device == expected.device && current.inode == expected.inode;
-#endif
+    return expected.valid && same_identity_values(capture_path_identity(path), expected);
 }
 
 ReplacementTargetState capture_replacement_target_state(const std::filesystem::path& path) {
@@ -1021,7 +915,7 @@ void ensure_replacement_target_unchanged(const std::filesystem::path& path,
         }
         return;
     }
-    if (!current.valid || !same_path_identity(path, expected.identity)) {
+    if (!same_identity_values(current, expected.identity)) {
         throw std::runtime_error(context + ": destination path was replaced before final update: " + path_to_string(path));
     }
 }

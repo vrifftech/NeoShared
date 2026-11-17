@@ -90,10 +90,7 @@ LooseArchiveKind kindFromFileType(const std::string& fileType) {
 std::filesystem::path relativeToRoot(const std::filesystem::path& path,
                                      const std::filesystem::path& root) {
     if (root.empty()) return path.lexically_normal();
-    std::error_code ec;
-    std::filesystem::path relative = std::filesystem::relative(path, root, ec);
-    if (!ec && !relative.empty()) return relative.lexically_normal();
-    relative = path.lexically_relative(root);
+    auto relative = path.lexically_relative(root);
     if (!relative.empty()) return relative.lexically_normal();
     return path.filename();
 }
@@ -556,14 +553,14 @@ bool LooseArchiveCatalog::readResource(
             return false;
         }
         try {
-            if (!unchangedInput(resource.directPath, resource.directSnapshot)) {
-                error = "Override resource changed while indexed; rescan the session";
-                return false;
-            }
-            std::ifstream input(resource.directPath, std::ios::binary);
-            if (!input) {
+            neoshared::erf::detail::ArchiveInputStream input;
+            if (!input.open_file(resource.directPath)) {
                 error = "Unable to open override resource: " +
                         neoshared::pathToUtf8(resource.directPath);
+                return false;
+            }
+            if (!neoshared::erf::same_file_revision(input.file_identity(), resource.directSnapshot)) {
+                error = "Override resource changed while indexed; rescan the session";
                 return false;
             }
             bytes.resize(resource.size);

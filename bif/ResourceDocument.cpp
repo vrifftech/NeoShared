@@ -50,8 +50,7 @@ neoshared::ResourceDocument readResourceDocument(const KeyBifArchive& key,
     // another tuple. Include the archive, not just ResRef or global row index.
     const auto component=[](const std::string& value){return std::to_string(value.size())+":"+value;};
     const auto normalized=[](const std::filesystem::path& p){
-        std::error_code ec;auto result=std::filesystem::weakly_canonical(p,ec);
-        return neoshared::genericPathToUtf8(ec?p.lexically_normal():result);
+        return neoshared::genericPathToUtf8(p.lexically_normal());
     };
     result.identity="neobif:"+component(normalized(key.keyPath()))+
         component(normalized(source))+component(std::to_string(int(selected.source)))+
