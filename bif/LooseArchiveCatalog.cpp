@@ -1,4 +1,3 @@
-#include <set>
 #include <iterator>
 #include <fstream>
 #include <neoshared/bif/LooseArchiveCatalog.hpp>
@@ -97,6 +96,26 @@ std::filesystem::path relativeToRoot(const std::filesystem::path& path,
     relative = path.lexically_relative(root);
     if (!relative.empty()) return relative.lexically_normal();
     return path.filename();
+}
+
+struct ArchivePath {
+    std::filesystem::path path;
+    std::string sortKey;
+};
+
+std::vector<ArchivePath> sortedArchivePaths(
+    const std::vector<std::filesystem::path>& files,
+    const std::filesystem::path& root, const JobControl& job) {
+    std::vector<ArchivePath> paths;
+    paths.reserve(files.size());
+    for (const auto& path : files) {
+        job.check();
+        paths.push_back({path, lowerAscii(relativeToRoot(path, root).generic_string())});
+    }
+    std::sort(paths.begin(), paths.end(), [](const auto& left, const auto& right) {
+        return left.sortKey < right.sortKey;
+    });
+    return paths;
 }
 
 bool startsWithParentTraversal(const std::filesystem::path& path) {
@@ -298,10 +317,9 @@ std::vector<std::filesystem::path> LooseArchiveCatalog::scanForArchiveFiles(
         }
         if (hasSupportedExtension(it->path())) results.push_back(it->path());
     }
-    std::sort(results.begin(), results.end(), [&](const auto& left, const auto& right) {
-        return lowerAscii(relativeToRoot(left, root).generic_string()) <
-               lowerAscii(relativeToRoot(right, root).generic_string());
-    });
+    auto sorted = sortedArchivePaths(results, root, job);
+    for (std::size_t i = 0; i < results.size(); ++i)
+        results[i] = std::move(sorted[i].path);
     return results;
 }
 
@@ -346,15 +364,10 @@ bool LooseArchiveCatalog::openFiles(
         job.check();
         if (hasSupportedExtension(candidate)) candidates.push_back(candidate);
     }
-    std::sort(candidates.begin(), candidates.end(), [&](const auto& left, const auto& right) {
-        job.check();
-        return lowerAscii(relativeToRoot(left, root).generic_string()) <
-               lowerAscii(relativeToRoot(right, root).generic_string());
-    });
-
-    for (const auto& candidate : candidates) {
-        job.update(archives_.size(), candidates.size(), "Indexing game-directory archives");
-        std::filesystem::path path = candidate;
+    const auto sorted = sortedArchivePaths(candidates, root, job);
+    for (const auto& candidate : sorted) {
+        job.update(archives_.size(), sorted.size(), "Indexing game-directory archives");
+        std::filesystem::path path = candidate.path;
         if (path.is_relative()) path = rootPath_ / path;
 
         LooseArchiveInfo archive;
@@ -368,23 +381,13 @@ bool LooseArchiveCatalog::openFiles(
 
         std::unique_ptr<neoshared::erf::ErfArchive> sharedArchive;
         try {
-            std::error_code ec;
-            if (!std::filesystem::is_regular_file(path, ec) || ec) {
-                throw std::runtime_error("Archive file is missing or unreadable");
-            }
-            archive.actualFileSize = std::filesystem::file_size(path, ec);
-            if (ec) {
-                throw std::runtime_error(
-                    "Unable to determine archive file size: " + ec.message());
-            }
-
-            archive.snapshot = neoshared::erf::capture_regular_file_identity(path);
             sharedArchive = std::make_unique<neoshared::erf::ErfArchive>();
             sharedArchive->set_resource_type_profile(
                 sharedResourceProfile(gameProfile_));
             sharedArchive->load(path);
+            archive.snapshot = sharedArchive->input_identity();
+            archive.actualFileSize = archive.snapshot.size;
             populateFromSharedArchive(archive, resources_, *sharedArchive, gameProfile_);
-            if (!unchangedInput(path, archive.snapshot)) throw std::runtime_error("Archive changed while indexing; rescan");
             // Retain the parsed canonical archive metadata, but release its
             // native descriptor/Windows lock. Resource reads reopen the same
             // file with an identity check and do not reparse the tables.
@@ -685,14 +688,14 @@ bool LooseArchiveCatalog::addOverrideDirectories(
             return value;
         };
         auto normalizedKey = [&](const std::filesystem::path& value) {
-            std::string key = value.lexically_normal().generic_string();
+            std::string key = value.generic_string();
 #if defined(_WIN32) || defined(__APPLE__)
             key = folded(std::move(key));
 #endif
             return key;
         };
 
-        std::set<std::string> indexedFiles;
+        std::unordered_set<std::string> indexedFiles;
         for (const auto& root : roots) {
             job.update(root.precedence, roots.size(), "Indexing " + root.alias + ": " + neoshared::pathToUtf8(root.path));
             LooseArchiveInfo archive{};
@@ -732,7 +735,7 @@ bool LooseArchiveCatalog::addOverrideDirectories(
                     std::filesystem::directory_options::skip_permission_denied, ec), end;
             while (!ec && it != end) {
                 job.check();
-                const auto entry = *it;
+                const auto& entry = *it;
                 std::error_code typeError;
                 const bool symlink = entry.is_symlink(typeError);
                 if (symlink && entry.is_directory(typeError)) {
@@ -759,14 +762,16 @@ bool LooseArchiveCatalog::addOverrideDirectories(
                 return left.sortKey < right.sortKey;
             });
 
-            for (const auto& file : files) {
+            indexedFiles.reserve(indexedFiles.size() + files.size());
+            archives_[archiveIndex].resourceIndices.reserve(files.size());
+            for (auto& file : files) {
                 job.check();
                 const auto& path = file.path;
                 if (resources_.size() >= kMaximumCatalogResources) {
                     throw std::runtime_error(
                         "Combined standalone-archive and override resources exceed the catalog safety limit");
                 }
-                if (!indexedFiles.insert(file.key).second) continue;
+                if (!indexedFiles.insert(std::move(file.key)).second) continue;
 
                 LooseResourceInfo resource{};
                 resource.index = resources_.size();

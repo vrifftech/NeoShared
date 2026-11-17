@@ -381,8 +381,11 @@ bool buildResourceIndex(const std::vector<KeyEntry>& keyEntries,
         return false;
     }
     resources.reserve(keyEntries.size());
-    std::vector<std::unordered_set<std::size_t>> referencedEntries(bifs.size());
+    std::vector<std::vector<bool>> referencedEntries;
+    referencedEntries.reserve(parsedBifs.size());
+    for (const auto& bif : parsedBifs) referencedEntries.emplace_back(bif.entries.size(), false);
     std::unordered_map<std::string, std::uint32_t> nameTypeCounts;
+    nameTypeCounts.reserve(keyEntries.size());
     for (std::size_t keyIndex = 0; keyIndex < keyEntries.size(); ++keyIndex) {
         cooperativeYield(yield, keyIndex);
         const KeyEntry& key = keyEntries[keyIndex];
@@ -435,7 +438,7 @@ bool buildResourceIndex(const std::vector<KeyEntry>& keyEntries,
                 resource.boundsValid = selected->boundsValid;
                 resource.extractable = bif.available && bif.valid &&
                                        resource.boundsValid && resource.typeMatches;
-                referencedEntries[resource.bifIndex].insert(*selectedIndex);
+                referencedEntries[resource.bifIndex][*selectedIndex] = true;
                 if (*selectedIndex != resource.tableIndex) {
                     status.push_back("Resource ID was recovered at BIF table index " +
                                      std::to_string(*selectedIndex) +
@@ -494,7 +497,7 @@ bool buildResourceIndex(const std::vector<KeyEntry>& keyEntries,
             cooperativeYield(yield, ++scannedBifEntries);
             const BifVariableEntry& entry = parsed.entries[entryIndex];
             if (!resourceTypes.empty() && std::find(resourceTypes.begin(), resourceTypes.end(), static_cast<std::uint16_t>(entry.type)) == resourceTypes.end()) continue;
-            if (referencedEntries[bifIndex].count(entryIndex) != 0u) continue;
+            if (referencedEntries[bifIndex][entryIndex]) continue;
             if (resources.size() >= maximumResources) {
                 error = "Combined KEY and unindexed BIF resources exceed the aggregate index limit";
                 resources.clear();
@@ -824,6 +827,7 @@ bool KeyBifArchive::open(const std::filesystem::path& keyPath,
 
         ParsedBif& parsed = parsedBifs[bifIndex];
         parsed.entries.reserve(bif.variableResourceCount);
+        parsed.idToIndex.reserve(bif.variableResourceCount);
         stream.seekg(static_cast<std::streamoff>(bif.tableOffset), std::ios::beg);
         for (std::uint32_t entryIndex = 0; entryIndex < bif.variableResourceCount; ++entryIndex) {
             if (entryIndex % kYieldInterval == 0u) job.check();
@@ -1114,6 +1118,7 @@ bool KeyBifArchive::openBrowser(const BrowserArchiveFile& keyFile,
         }
 
         candidate.parsed.entries.reserve(candidate.variableCount);
+        candidate.parsed.idToIndex.reserve(candidate.variableCount);
         std::optional<std::uint32_t> commonBifIndex;
         bool commonIndex = true;
         bool tableComplete = true;
@@ -1345,7 +1350,7 @@ std::vector<std::filesystem::path> KeyBifArchive::scanForKeyFiles(
     if (!std::filesystem::is_directory(root, ec) || ec) return results;
 
     const std::filesystem::path direct = root / "chitin.key";
-    if (std::filesystem::is_regular_file(direct, ec) && !ec) results.push_back(direct);
+    if (std::filesystem::is_regular_file(direct, ec) && !ec) return {direct};
     ec.clear();
     for (std::filesystem::recursive_directory_iterator it(
              root, std::filesystem::directory_options::skip_permission_denied, ec), end;
