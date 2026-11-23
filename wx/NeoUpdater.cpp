@@ -173,10 +173,11 @@ fs::path prepareUpdate(const fs::path& archive, const fs::path& stage,
 
 class Updater final : public wxDialog {
 public:
-    Updater(wxFrame& frame, wxString application, wxString version)
+    Updater(wxFrame& frame, wxString application, wxString version, PrepareRestart prepareRestart)
         : wxDialog(&frame, wxID_ANY, application + " Updates", wxDefaultPosition, wxDefaultSize,
                    wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER),
           frame_(frame), application_(std::move(application)), version_(std::move(version)),
+          prepareRestart_(std::move(prepareRestart)),
           session_(wxWebSession::New()), timer_(this) {
         auto* root = new wxBoxSizer(wxVERTICAL);
         root->Add(new wxStaticText(this, wxID_ANY, application_ + " " + version_), 0, wxALL, FromDIP(12));
@@ -203,7 +204,18 @@ public:
             wxLaunchDefaultBrowser("https://github.com/vrifftech/" + application_ + "/releases");
         });
         action_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
-            try { if (phase_ == Phase::Ready) restart(); else download(); }
+            try {
+                if (phase_ != Phase::Ready) { download(); return; }
+                action_->Disable();
+                auto decision = [this](bool proceed) {
+                    action_->Enable();
+                    if (!proceed) return;
+                    try { restart(); }
+                    catch (const std::exception& error) { failed(wxui::toWx(error.what())); }
+                };
+                if (prepareRestart_) prepareRestart_(std::move(decision));
+                else decision(true);
+            }
             catch (const std::exception& error) { failed(error.what()); }
         });
         close->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { dismiss(); });
@@ -373,7 +385,14 @@ private:
 #endif
         const auto temporary = wxFileName::CreateTempFileName(
             neosettings::pathToWx(target_.parent_path() / ".neo-update-"));
-        if (temporary.empty()) throw std::runtime_error("Cannot prepare an update in the application's folder.");
+        if (temporary.empty())
+#if defined(__APPLE__)
+            throw std::runtime_error("Cannot prepare an update beside this application.\n\n"
+                "If you opened it from Downloads or a disk image, use Finder to move the .app to a writable "
+                "folder such as Applications in your home folder, then relaunch it and try again.");
+#else
+            throw std::runtime_error("Cannot prepare an update in the application's folder.");
+#endif
         stage_ = neosettings::pathFromWx(temporary);
         fs::remove(stage_); fs::create_directory(stage_);
         session_.SetTempDir(neosettings::pathToWx(stage_));
@@ -490,7 +509,14 @@ error=$(rm -rf -- "$work" 2>&1) || report_error 'remove the update files' "$erro
             auto executable = target_.string();
             char* const argv[] = {executable.data(), nullptr};
             pid_t process;
-            const int error = posix_spawn(&process, executable.c_str(), nullptr, nullptr, argv, environ);
+            posix_spawn_file_actions_t actions;
+            int error = posix_spawn_file_actions_init(&actions);
+            if (error != 0)
+                throw std::system_error(error, std::generic_category(), "Could not prepare the application restart");
+            error = posix_spawn_file_actions_addclosefrom_np(&actions, 3);
+            if (error == 0)
+                error = posix_spawn(&process, executable.c_str(), &actions, nullptr, argv, environ);
+            posix_spawn_file_actions_destroy(&actions);
             if (error != 0)
                 throw std::system_error(error, std::generic_category(),
                     "The update was installed, but the application could not be restarted. Open it manually");
@@ -522,6 +548,7 @@ error=$(rm -rf -- "$work" 2>&1) || report_error 'remove the update files' "$erro
 
     wxFrame& frame_;
     wxString application_, version_, downloadUrl_, checksumUrl_, expectedHash_;
+    PrepareRestart prepareRestart_;
     wxWebSession session_;
     wxWebRequest request_;
     wxTimer timer_;
@@ -536,7 +563,8 @@ error=$(rm -rf -- "$work" 2>&1) || report_error 'remove the update files' "$erro
 };
 } // namespace
 
-void install(wxFrame& frame, const char* application, const char* version) {
+void install(wxFrame& frame, const char* application, const char* version,
+             PrepareRestart prepareRestart) {
 #if !defined(_WIN32) && !defined(__APPLE__)
     wxString appimage;
     if (!wxGetEnv("APPIMAGE", &appimage)) return;
@@ -551,7 +579,8 @@ void install(wxFrame& frame, const char* application, const char* version) {
     auto* startup = help->AppendCheckItem(wxID_ANY, "Check for updates on startup");
     const neosettings::ConfigStore settings(application);
     startup->Check(settings.readBool("Updates/CheckOnStartup", true));
-    auto* updater = new Updater(frame, wxString::FromUTF8(application), wxString::FromUTF8(version));
+    auto* updater = new Updater(frame, wxString::FromUTF8(application), wxString::FromUTF8(version),
+                                std::move(prepareRestart));
     frame.Bind(wxEVT_MENU, [updater](wxCommandEvent&) { updater->check(false); }, checkId);
     frame.Bind(wxEVT_MENU, [settings](wxCommandEvent& event) {
         settings.writeBool("Updates/CheckOnStartup", event.IsChecked());
