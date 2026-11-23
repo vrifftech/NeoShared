@@ -1,0 +1,16 @@
+function(neo_enable_updates target application version)
+    if(EMSCRIPTEN)
+        return()
+    endif()
+    target_sources(${target} PRIVATE "${NEOSHARED_ROOT}/wx/NeoUpdater.cpp")
+    target_link_libraries(${target} PRIVATE neoshared::wx neoshared::json)
+    target_compile_definitions(${target} PRIVATE
+        NEO_UPDATE_APPLICATION="${application}"
+        NEO_UPDATE_VERSION="${version}")
+    if(TARGET wx::core)
+        target_link_libraries(${target} PRIVATE wx::net)
+    else()
+        find_package(wxWidgets REQUIRED MODULE COMPONENTS net)
+        target_link_libraries(${target} PRIVATE ${wxWidgets_LIBRARIES})
+    endif()
+endfunction()

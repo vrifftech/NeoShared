@@ -227,4 +227,6 @@ target_include_directories(neoshared_wx INTERFACE
 target_link_libraries(neoshared_wx INTERFACE neoshared::path neoshared::game)
 target_compile_features(neoshared_wx INTERFACE cxx_std_17)
 
+include(${CMAKE_CURRENT_LIST_DIR}/cmake/NeoUpdater.cmake)
+
 neo_apply_minimal_release_to_directory_targets()
