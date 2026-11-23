@@ -203,13 +203,22 @@ public:
         releases->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
             wxLaunchDefaultBrowser("https://github.com/vrifftech/" + application_ + "/releases");
         });
-        action_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+        action_->Bind(wxEVT_BUTTON, [this, close](wxCommandEvent&) {
             try {
                 if (phase_ != Phase::Ready) { download(); return; }
+                const auto readyStatus = status_->GetLabel();
+                status_->SetLabel("Waiting for the current operation to finish before restarting...");
+                status_->Wrap(FromDIP(490));
+                close->SetLabel("Hide");
                 action_->Disable();
-                auto decision = [this](bool proceed) {
+                Layout();
+                auto decision = [this, close, readyStatus](bool proceed) {
+                    status_->SetLabel(readyStatus);
+                    close->SetLabel("Close");
                     action_->Enable();
+                    Layout();
                     if (!proceed) return;
+                    startup_ = false;
                     try { restart(); }
                     catch (const std::exception& error) { failed(wxui::toWx(error.what())); }
                 };
