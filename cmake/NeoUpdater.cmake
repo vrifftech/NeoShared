@@ -4,6 +4,9 @@ function(neo_enable_updates target application version)
     endif()
     target_sources(${target} PRIVATE "${NEOSHARED_ROOT}/wx/NeoUpdater.cpp")
     target_link_libraries(${target} PRIVATE neoshared::wx neoshared::json)
+    if(WIN32)
+        target_link_libraries(${target} PRIVATE bcrypt)
+    endif()
     target_compile_definitions(${target} PRIVATE
         NEO_UPDATE_APPLICATION="${application}"
         NEO_UPDATE_VERSION="${version}")

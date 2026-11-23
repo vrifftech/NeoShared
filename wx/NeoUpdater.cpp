@@ -16,11 +16,17 @@
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <future>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <vector>
+
+#if defined(_WIN32)
+#include <windows.h>
+#include <bcrypt.h>
+#endif
 
 namespace neoupdate {
 namespace {
@@ -70,32 +76,53 @@ std::string powershellCommand(const wxString& script) {
     return "powershell.exe -NoProfile -NonInteractive -EncodedCommand " +
         wxui::toStd(wxBase64Encode(utf16.data(), utf16.size() * sizeof(wchar_t)));
 }
-#endif
 
-std::string runCommand(const std::string& command) {
-#if defined(_WIN32)
-    FILE* pipe = _wpopen(wxString::FromUTF8(command).wc_str(), L"r");
+std::string archiveHash(const fs::path& archive) {
+    BCRYPT_ALG_HANDLE provider{};
+    if (BCryptOpenAlgorithmProvider(&provider, BCRYPT_SHA256_ALGORITHM, nullptr, 0) < 0)
+        throw std::runtime_error("Could not initialize SHA-256 verification.");
+    auto closeProvider = [](void* handle) { BCryptCloseAlgorithmProvider(handle, 0); };
+    std::unique_ptr<void, decltype(closeProvider)> providerOwner(provider, closeProvider);
+    BCRYPT_HASH_HANDLE hash{};
+    if (BCryptCreateHash(provider, &hash, nullptr, 0, nullptr, 0, 0) < 0)
+        throw std::runtime_error("Could not initialize SHA-256 verification.");
+    std::unique_ptr<void, decltype(&BCryptDestroyHash)> hashOwner(hash, BCryptDestroyHash);
+    std::ifstream file(archive, std::ios::binary);
+    std::array<unsigned char, 64 * 1024> buffer;
+    while (file.read(reinterpret_cast<char*>(buffer.data()), buffer.size()), file.gcount()) {
+        if (BCryptHashData(hash, buffer.data(), static_cast<ULONG>(file.gcount()), 0) < 0)
+            throw std::runtime_error("Could not verify the update download.");
+    }
+    if (!file.eof()) throw std::runtime_error("Could not read the update download.");
+    std::array<unsigned char, 32> digest;
+    if (BCryptFinishHash(hash, digest.data(), static_cast<ULONG>(digest.size()), 0) < 0)
+        throw std::runtime_error("Could not verify the update download.");
+    constexpr char hex[] = "0123456789abcdef";
+    std::string result;
+    result.reserve(digest.size() * 2);
+    for (const auto byte : digest) {
+        result += hex[byte >> 4];
+        result += hex[byte & 15];
+    }
+    return result;
+}
 #else
+std::string runCommand(const std::string& command) {
     FILE* pipe = popen(command.c_str(), "r");
-#endif
     if (!pipe) throw std::runtime_error("Could not start update preparation.");
     std::string output;
     std::array<char, 4096> buffer;
     while (std::fgets(buffer.data(), static_cast<int>(buffer.size()), pipe)) output += buffer.data();
-#if defined(_WIN32)
-    const auto result = _pclose(pipe);
-#else
     const auto result = pclose(pipe);
-#endif
     if (result != 0) throw std::runtime_error("Update preparation failed: " + output);
     return output;
 }
+#endif
 
 fs::path prepareUpdate(const fs::path& archive, const fs::path& stage,
                        const wxString& application, const wxString& expectedHash) {
 #if defined(_WIN32)
-    const auto hash = runCommand(powershellCommand(
-        "(Get-FileHash -Algorithm SHA256 -LiteralPath " + powershellQuote(archive) + ").Hash"));
+    const auto hash = archiveHash(archive);
 #elif defined(__APPLE__)
     const auto hash = runCommand("/usr/bin/shasum -a 256 -- " + shellQuote(archive) + " 2>&1");
 #else
@@ -176,9 +203,12 @@ public:
         Bind(wxEVT_WEBREQUEST_STATE, &Updater::onRequest, this);
         Bind(wxEVT_TIMER, &Updater::onTimer, this);
         frame_.Bind(wxEVT_CLOSE_WINDOW, [this](wxCloseEvent& event) {
-            if (busy() && phase_ != Phase::Preparing && event.CanVeto()) {
+            if (busy() && event.CanVeto()) {
                 closing_ = true;
-                request_.Cancel();
+                if (phase_ == Phase::Preparing) {
+                    status_->SetLabel("Finishing update preparation before closing...");
+                    present();
+                } else request_.Cancel();
                 event.Veto();
             } else event.Skip();
         });
@@ -355,6 +385,10 @@ private:
                 status_->Wrap(FromDIP(490));
                 action_->SetLabel("Restart && Install"); action_->Enable(); Layout();
             } catch (const std::exception& error) { failed(wxui::toWx(error.what())); }
+            if (closing_) {
+                closing_ = false;
+                frame_.CallAfter([frame = &frame_] { frame->Close(); });
+            }
         } else if (phase_ == Phase::Downloading) {
             const auto total = request_.GetBytesExpectedToReceive();
             if (total > 0) progress_->SetValue(static_cast<int>(1000 * request_.GetBytesReceived() / total));
@@ -385,8 +419,10 @@ private:
         wxString text = "#!/bin/sh\nset -eu\nparent=$1\nsource=$2\ntarget=$3\nwork=$4\n"
                         "while kill -0 \"$parent\" 2>/dev/null; do sleep 0.2; done\n";
 #if defined(__APPLE__)
-        text += "mv \"$target\" \"$work/previous.app\"\n"
-                "mv \"$source\" \"$target\"\n/usr/bin/open -n \"$target\"\n";
+        // RENAME_SWAP exchanges both bundles atomically on the staging volume.
+        text += "/usr/bin/osascript -l JavaScript -e 'function run(args) { ObjC.import(\"stdio\"); "
+                "if ($.renamex_np(args[0], args[1], 2) !== 0) throw new Error(\"Could not replace the application bundle.\"); }' "
+                "\"$source\" \"$target\"\n/usr/bin/open -n \"$target\"\n";
 #else
         text += "mv -f -- \"$source\" \"$target\"\n"
                 "unset APPIMAGE APPDIR ARGV0 OWD LD_LIBRARY_PATH LD_PRELOAD\n\"$target\" &\n";
