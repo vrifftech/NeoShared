@@ -36,8 +36,13 @@ jobs:
           current_text = subprocess.check_output(
               ['git', 'show', f'{os.environ["GITHUB_SHA"]}:{path}'], text=True)
           current = re.search('^' + pattern, current_text, re.M).group(1)
+          before = os.environ['BEFORE']
+          if before == '0' * 40:
+              before = subprocess.check_output(
+                  ['git', 'hash-object', '-w', '-t', 'tree', '--stdin'],
+                  input='', text=True).strip()
           changes = subprocess.check_output(
-              ['git', 'diff', '--unified=0', os.environ['BEFORE'],
+              ['git', 'diff', '--unified=0', before,
                os.environ['GITHUB_SHA'], '--', path], text=True)
           added = re.findall(r'^\+' + pattern, changes, re.M)
           removed = re.findall(r'^-' + pattern, changes, re.M)

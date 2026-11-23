@@ -191,9 +191,9 @@ public:
     }
 
     void check(bool startup) {
-        if (busy()) { present(); return; }
-        cleanup();
         startup_ = startup;
+        if (busy() || phase_ == Phase::Ready) { present(); return; }
+        cleanup();
         phase_ = Phase::Checking;
         action_->Disable();
         action_->SetLabel("Download Update");
@@ -378,8 +378,8 @@ private:
             std::to_string(wxGetProcessId()) + " -Source " + powershellQuote(prepared_) +
             " -Target " + powershellQuote(target_) + " -Work " + powershellQuote(stage_);
         const auto encoded = wxui::toWx(powershellCommand(command));
-        std::vector<std::wstring> args = {L"powershell.exe", L"-NoProfile", L"-NonInteractive", L"-EncodedCommand",
-                                          encoded.AfterLast(' ').ToStdWstring()};
+        std::vector<std::wstring> args = {L"powershell.exe", L"-NoProfile", L"-NonInteractive",
+            L"-ExecutionPolicy", L"Bypass", L"-EncodedCommand", encoded.AfterLast(' ').ToStdWstring()};
 #else
         const auto script = stage_ / "install.sh";
         wxString text = "#!/bin/sh\nset -eu\nparent=$1\nsource=$2\ntarget=$3\nwork=$4\n"
@@ -401,15 +401,18 @@ private:
         std::vector<const wchar_t*> argv;
         for (const auto& arg : args) argv.push_back(arg.c_str());
         argv.push_back(nullptr);
-        Hide();
-        if (!frame_.Close()) { present(); return; }
-        installing_ = true;
         wxExecuteEnv environment;
         environment.cwd = neosettings::pathToWx(target_.parent_path());
-        if (wxExecute(argv.data(), wxEXEC_ASYNC | wxEXEC_HIDE_CONSOLE | wxEXEC_MAKE_GROUP_LEADER,
-                      nullptr, &environment) <= 0) {
+        const auto installer = wxExecute(argv.data(),
+            wxEXEC_ASYNC | wxEXEC_HIDE_CONSOLE | wxEXEC_MAKE_GROUP_LEADER, nullptr, &environment);
+        if (installer <= 0)
+            throw std::runtime_error("Could not start the update installer. The installed application was not changed.");
+        Hide();
+        installing_ = true;
+        if (!frame_.Close()) {
+            wxKill(installer, wxSIGKILL, nullptr, wxKILL_CHILDREN);
             installing_ = false;
-            wxLogError("Could not start the update installer. The installed application was not changed.");
+            present();
         }
     }
 
