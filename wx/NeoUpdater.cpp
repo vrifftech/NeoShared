@@ -2,6 +2,7 @@
 #include "NeoWxUi.hpp"
 #include "SimpleJson.hpp"
 
+#include <wx/app.h>
 #include <wx/base64.h>
 #include <wx/ffile.h>
 #include <wx/filename.h>
@@ -15,17 +16,22 @@
 #include <array>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <future>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
+#include <system_error>
 #include <vector>
 
 #if defined(_WIN32)
 #include <windows.h>
 #include <bcrypt.h>
+#elif !defined(__APPLE__)
+#include <spawn.h>
+#include <unistd.h>
 #endif
 
 namespace neoupdate {
@@ -151,7 +157,9 @@ fs::path prepareUpdate(const fs::path& archive, const fs::path& stage,
         const auto binary = stage / "replacement";
         wxFFileOutputStream output(neosettings::pathToWx(binary));
         zip.Read(output);
-        if (!output.IsOk() || !zip.Eof()) throw std::runtime_error("Could not extract the update.");
+        const bool written = output.IsOk();
+        if (!output.Close() || !written || !zip.Eof())
+            throw std::runtime_error("Could not extract the update.");
 #if !defined(_WIN32)
         fs::permissions(binary, fs::perms::owner_read | fs::perms::owner_write | fs::perms::owner_exec |
                                 fs::perms::group_read | fs::perms::group_exec |
@@ -399,13 +407,31 @@ private:
     void restart() {
 #if defined(_WIN32)
         const auto script = stage_ / "install.ps1";
-        const wxString text =
-            "param([int]$ParentId, [string]$Source, [string]$Target, [string]$Work)\r\n"
-            "$ErrorActionPreference = 'Stop'\r\n"
-            "Wait-Process -Id $ParentId -ErrorAction SilentlyContinue\r\n"
-            "[System.IO.File]::Replace($Source, $Target, $null)\r\n"
-            "Start-Process -FilePath $Target -WorkingDirectory ([System.IO.Path]::GetDirectoryName($Target))\r\n"
-            "Remove-Item -LiteralPath $Work -Recurse -Force\r\n";
+        const wxString text = R"(param([int]$ParentId, [string]$Source, [string]$Target, [string]$Work)
+$ErrorActionPreference = 'Stop'
+try {
+    Add-Type @'
+using System.Runtime.InteropServices;
+public static class NeoUpdateNative {
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+    public static extern bool MoveFileExW(string source, string target, uint flags);
+}
+'@
+    Wait-Process -Id $ParentId -ErrorAction SilentlyContinue
+    # Same-volume replacement, with MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH.
+    if (![NeoUpdateNative]::MoveFileExW($Source, $Target, 9)) {
+        throw [System.ComponentModel.Win32Exception]::new([System.Runtime.InteropServices.Marshal]::GetLastWin32Error())
+    }
+    Start-Process -FilePath $Target -WorkingDirectory ([System.IO.Path]::GetDirectoryName($Target))
+    Remove-Item -LiteralPath $Work -Recurse -Force
+} catch {
+    $message = "The update could not be completed.`r`n`r`n" + $_.Exception.Message + "`r`n`r`nInstaller folder: " + $Work
+    $message | Set-Content -LiteralPath (Join-Path $Work 'install-error.txt') -Encoding UTF8 -ErrorAction Continue
+    Add-Type -AssemblyName System.Windows.Forms
+    [void][System.Windows.Forms.MessageBox]::Show($message, 'NeoTools Update', 'OK', 'Error')
+    exit 1
+}
+)";
         wxFFile file(neosettings::pathToWx(script), "wb");
         if (!file.Write(text) || !file.Close()) throw std::runtime_error("Could not write the update installer.");
         const wxString command = "& " + powershellQuote(script) + " -ParentId " +
@@ -414,26 +440,67 @@ private:
         const auto encoded = wxui::toWx(powershellCommand(command));
         std::vector<std::wstring> args = {L"powershell.exe", L"-NoProfile", L"-NonInteractive",
             L"-ExecutionPolicy", L"Bypass", L"-EncodedCommand", encoded.AfterLast(' ').ToStdWstring()};
-#else
+#elif defined(__APPLE__)
         const auto script = stage_ / "install.sh";
-        wxString text = "#!/bin/sh\nset -eu\nparent=$1\nsource=$2\ntarget=$3\nwork=$4\n"
-                        "while kill -0 \"$parent\" 2>/dev/null; do sleep 0.2; done\n";
-#if defined(__APPLE__)
-        // RENAME_SWAP exchanges both bundles atomically on the staging volume.
-        text += "/usr/bin/osascript -l JavaScript -e 'function run(args) { ObjC.import(\"stdio\"); "
-                "if ($.renamex_np(args[0], args[1], 2) !== 0) throw new Error(\"Could not replace the application bundle.\"); }' "
-                "\"$source\" \"$target\"\n/usr/bin/open -n \"$target\"\n";
-#else
-        text += "mv -f -- \"$source\" \"$target\"\n"
-                "unset APPIMAGE APPDIR ARGV0 OWD LD_LIBRARY_PATH LD_PRELOAD\n\"$target\" &\n";
-#endif
-        text += "rm -rf -- \"$work\"\n";
+        const wxString text = R"(#!/bin/sh
+set -u
+parent=$1
+source=$2
+target=$3
+work=$4
+report_error() {
+    printf 'Could not %s.\n%s\n' "$1" "$2" > "$work/install-error.txt"
+    /usr/bin/osascript -l JavaScript -e 'function run(args) {
+        var app = Application.currentApplication();
+        app.includeStandardAdditions = true;
+        app.displayDialog("Could not " + args[0] + ".\n\n" + args[1] + "\n\nInstaller folder: " + args[2],
+            {withTitle: "NeoTools Update", withIcon: "stop", buttons: ["OK"], defaultButton: "OK"});
+    }' "$1" "$2" "$work"
+    exit 1
+}
+while kill -0 "$parent" 2>/dev/null; do sleep 0.2; done
+# RENAME_SWAP exchanges both bundles atomically on the staging volume.
+error=$(/usr/bin/osascript -l JavaScript -e 'function run(args) { ObjC.import("stdio");
+    if ($.renamex_np(args[0], args[1], 2) !== 0) throw new Error("Could not replace the application bundle.");
+}' "$source" "$target" 2>&1) || report_error 'replace the application bundle' "$error"
+error=$(/usr/bin/open -n "$target" 2>&1) || report_error 'restart the application' "$error"
+error=$(rm -rf -- "$work" 2>&1) || report_error 'remove the update files' "$error"
+)";
         wxFFile file(neosettings::pathToWx(script), "wb");
         if (!file.Write(text) || !file.Close()) throw std::runtime_error("Could not write the update installer.");
         std::vector<std::wstring> args = {L"/bin/sh", neosettings::pathToWx(script).ToStdWstring(),
             std::to_wstring(wxGetProcessId()), neosettings::pathToWx(prepared_).ToStdWstring(),
             neosettings::pathToWx(target_).ToStdWstring(), neosettings::pathToWx(stage_).ToStdWstring()};
+#else
+        // Keep the GUI alive to report errors while replacing the running AppImage.
+        const bool exitOnClose = wxTheApp->GetExitOnFrameDelete();
+        frame_.RemoveChild(this);
+        wxTheApp->SetExitOnFrameDelete(false);
+        if (!frame_.Close()) {
+            frame_.AddChild(this);
+            wxTheApp->SetExitOnFrameDelete(exitOnClose);
+            return;
+        }
+        Hide();
+        try {
+            fs::rename(prepared_, target_);
+            fs::current_path(target_.parent_path());
+            for (const auto* name : {"APPIMAGE", "APPDIR", "ARGV0", "OWD", "LD_LIBRARY_PATH", "LD_PRELOAD"})
+                unsetenv(name);
+            auto executable = target_.string();
+            char* const argv[] = {executable.data(), nullptr};
+            pid_t process;
+            const int error = posix_spawn(&process, executable.c_str(), nullptr, nullptr, argv, environ);
+            if (error != 0)
+                throw std::system_error(error, std::generic_category(),
+                    "The update was installed, but the application could not be restarted. Open it manually");
+        } catch (const std::exception& error) {
+            wxMessageBox(wxui::toWx(error.what()), application_ + " Update", wxOK | wxICON_ERROR, this);
+        }
+        Destroy();
+        wxTheApp->ExitMainLoop();
 #endif
+#if defined(_WIN32) || defined(__APPLE__)
         std::vector<const wchar_t*> argv;
         for (const auto& arg : args) argv.push_back(arg.c_str());
         argv.push_back(nullptr);
@@ -450,6 +517,7 @@ private:
             installing_ = false;
             present();
         }
+#endif
     }
 
     wxFrame& frame_;
