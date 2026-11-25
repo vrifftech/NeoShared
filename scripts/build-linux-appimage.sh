@@ -26,6 +26,8 @@ usage: build-linux-appimage.sh --source-root DIR --app-name NAME --neoshared-roo
 Builds one x86-64 Linux AppImage from a NeoTools wxWidgets application.
 The application repository must provide scripts/build.sh and install its GUI,
 .desktop file, and icon through CMake.
+Builds pinned wxWidgets with HTTPS support; requires GTK 3 and libcurl headers
+(Debian/Ubuntu: libgtk-3-dev libcurl4-openssl-dev) and CMake 3.24 or newer.
 
 Options:
   --build-type TYPE          CMake build type [default: Release]
@@ -118,11 +120,6 @@ for command_name in cmake ninja curl file sha256sum ldd awk sed find; do
     exit 2
   }
 done
-command -v wx-config >/dev/null 2>&1 || {
-  echo "wx-config was not found. Install the Linux wxWidgets development package first." >&2
-  echo "Debian/Ubuntu: sudo apt install libwxgtk3.2-dev" >&2
-  exit 2
-}
 
 if [[ -n "$VCPKG_ROOT_VALUE" ]]; then
   case "$VCPKG_ROOT_VALUE" in /*) ;; *) VCPKG_ROOT_VALUE="$SOURCE_ROOT/$VCPKG_ROOT_VALUE";; esac
@@ -138,6 +135,14 @@ if [[ "$CLEAN" == 1 ]]; then
   rm -rf -- "$BUILD_DIR" "$APPDIR"
 fi
 mkdir -p "$DIST_DIR"
+
+WX_BUILD="$SOURCE_ROOT/.cache/wxwidgets-linux"
+WX_PREFIX="$WX_BUILD/install"
+cmake -S "$NEOSHARED_ROOT_VALUE/cmake/linux-wx" -B "$WX_BUILD" -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$WX_PREFIX"
+cmake --build "$WX_BUILD" --parallel "$JOBS"
+cmake --install "$WX_BUILD"
+export LD_LIBRARY_PATH="$WX_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 build_args=(
   --build-dir "$BUILD_DIR"
@@ -160,7 +165,7 @@ fi
 bash "$SOURCE_ROOT/scripts/build.sh" \
   "${build_args[@]}" \
   -- \
-  "-DwxWidgets_CONFIG_EXECUTABLE=$(command -v wx-config)" \
+  "-DwxWidgets_CONFIG_EXECUTABLE=$WX_PREFIX/bin/wx-config" \
   "${EXTRA_CMAKE_ARGS[@]+"${EXTRA_CMAKE_ARGS[@]}"}"
 
 rm -rf -- "$APPDIR"
