@@ -937,9 +937,20 @@ ReusedTokenTargets reuseExistingHelperSections(PatchProject& project,
     std::unordered_map<std::string, std::string> renames;
     std::unordered_set<std::string> usedExistingSections;
     const auto mergeable = mergeableSectionNames(project);
+    std::unordered_set<std::string> resolved;
+    std::function<void(const IniSection&)> resolve = [&](const IniSection& section) {
+        const auto name = lowerKey(section.name);
+        if (mergeable.count(name) || !resolved.insert(name).second) return;
 
-    for (const auto& section : project.sections) {
-        if (mergeable.count(lowerKey(section.name)) != 0u) continue;
+        // Resolve children before comparing their parent. A matching reference
+        // name does not imply a matching child definition.
+        IniSection incoming = section;
+        for (auto& entry : incoming.entries) {
+            if (!entryValueReferencesHelperSection(entry.key)) continue;
+            if (const auto* child = project.findSection(entry.value)) resolve(*child);
+            const auto renamed = renames.find(lowerKey(entry.value));
+            if (renamed != renames.end()) entry.value = renamed->second;
+        }
 
         std::vector<const ParsedIniSection*> candidates;
         for (const auto& existingSection : existing.sections) {
@@ -951,18 +962,24 @@ ReusedTokenTargets reuseExistingHelperSections(PatchProject& project,
             return iequals(lhs->name, section.name) && !iequals(rhs->name, section.name);
         });
 
+        bool reused = false;
         for (const auto* candidateSection : candidates) {
             if (usedExistingSections.count(lowerKey(candidateSection->name)) != 0u) continue;
+            if (!iequals(candidateSection->name, section.name) && project.findSection(candidateSection->name)) continue;
             TokenReuseMaps candidateMappings;
-            if (!tokenEquivalentSections(*candidateSection, section, mappings, candidateMappings)) continue;
+            if (!tokenEquivalentSections(*candidateSection, incoming, mappings, candidateMappings)) continue;
             mappings = std::move(candidateMappings);
             usedExistingSections.insert(lowerKey(candidateSection->name));
             if (!iequals(candidateSection->name, section.name)) {
                 renames[lowerKey(section.name)] = candidateSection->name;
             }
+            reused = true;
             break;
         }
-    }
+        if (!reused && sectionNameExists(existing, section.name))
+            renames[name] = uniqueMergedSectionName(existing, project, section.name);
+    };
+    for (const auto& section : project.sections) resolve(section);
 
     applyProjectTokenMap(project, "2DAMEMORY", mappings.twoDa);
     applyProjectTokenMap(project, "StrRef", mappings.strRef);
