@@ -1,5 +1,11 @@
+option(NEO_BUILD_APPIMAGE "Build a Linux AppImage with in-app updates" OFF)
+
 function(neo_enable_updates target application version)
     if(EMSCRIPTEN)
+        return()
+    endif()
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT NEO_BUILD_APPIMAGE)
+        message(STATUS "${application}: native Linux build; in-app updates are available in AppImage builds")
         return()
     endif()
     target_sources(${target} PRIVATE "${NEOSHARED_ROOT}/wx/NeoUpdater.cpp")

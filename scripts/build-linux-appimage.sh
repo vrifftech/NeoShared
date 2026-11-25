@@ -165,6 +165,7 @@ fi
 bash "$SOURCE_ROOT/scripts/build.sh" \
   "${build_args[@]}" \
   -- \
+  -DNEO_BUILD_APPIMAGE=ON \
   "-DwxWidgets_CONFIG_EXECUTABLE=$WX_PREFIX/bin/wx-config" \
   "${EXTRA_CMAKE_ARGS[@]+"${EXTRA_CMAKE_ARGS[@]}"}"
 
