@@ -304,14 +304,10 @@ std::vector<std::filesystem::path> LooseArchiveCatalog::scanForArchiveFiles(
     ec.clear();
     if (!std::filesystem::is_directory(root, ec) || ec) return results;
 
-    for (std::filesystem::recursive_directory_iterator it(
-             root, std::filesystem::directory_options::skip_permission_denied, ec), end;
-         !ec && it != end && results.size() < maximumResults; it.increment(ec)) {
+    for (std::filesystem::recursive_directory_iterator it(root), end;
+         it != end && results.size() < maximumResults; ++it) {
         job.check();
-        if (!it->is_regular_file(ec) || ec) {
-            ec.clear();
-            continue;
-        }
+        if (!it->is_regular_file()) continue;
         if (hasSupportedExtension(it->path())) results.push_back(it->path());
     }
     auto sorted = sortedArchivePaths(results, root, job);
@@ -559,7 +555,7 @@ bool LooseArchiveCatalog::readResource(
                         neoshared::pathToUtf8(resource.directPath);
                 return false;
             }
-            if (!neoshared::erf::same_file_revision(input.file_identity(), resource.directSnapshot)) {
+            if (input.file_identity().size != resource.size) {
                 error = "Override resource changed while indexed; rescan the session";
                 return false;
             }
@@ -650,8 +646,21 @@ bool LooseArchiveCatalog::streamResource(std::size_t index, const ByteSink& sink
     const auto& resource=resources_[index];
     if (!resource.extractable || resource.archiveIndex>=archives_.size()) { error="Resource is unavailable";return false; }
     if (resource.overrideFile && resource.directRangeExtractable) {
-        return streamInputRange(resource.directPath, resource.directSnapshot, 0u,
-                                resource.size, sink, error, job);
+        try {
+            // Loose files need a snapshot only when they are actually copied.
+            const auto snapshot = neoshared::erf::capture_regular_file_identity(resource.directPath);
+            if (snapshot.size != resource.size) {
+                error = "Override resource changed while indexed; rescan the session";
+                return false;
+            }
+            return streamInputRange(resource.directPath, snapshot, 0u,
+                                    resource.size, sink, error, job);
+        } catch (const JobCancelled&) {
+            throw;
+        } catch (const std::exception& exception) {
+            error = exception.what();
+            return false;
+        }
     }
     const auto& archive=archives_[resource.archiveIndex];
     if (!archive.browserBacked && resource.directRangeExtractable) {
@@ -721,7 +730,7 @@ bool LooseArchiveCatalog::addOverrideDirectories(
 
             const auto canonicalRoot = std::filesystem::canonical(root.path);
             struct OverrideFile {
-                std::filesystem::path path;
+                std::filesystem::directory_entry entry;
                 std::filesystem::path relative;
                 std::string key;
                 std::string sortKey;
@@ -742,7 +751,7 @@ bool LooseArchiveCatalog::addOverrideDirectories(
                     auto key = normalizedKey(symlink ? std::filesystem::canonical(entry.path()) :
                                                      canonicalRoot / relative);
                     auto sortKey = folded(relative.generic_string());
-                    files.push_back({entry.path(), std::move(relative), std::move(key),
+                    files.push_back({entry, std::move(relative), std::move(key),
                                      std::move(sortKey)});
                 }
                 if (strict && typeError) { ec = typeError; break; }
@@ -760,10 +769,11 @@ bool LooseArchiveCatalog::addOverrideDirectories(
             });
 
             indexedFiles.reserve(indexedFiles.size() + files.size());
+            resources_.reserve(std::min(kMaximumCatalogResources, resources_.size() + files.size()));
             archives_[archiveIndex].resourceIndices.reserve(files.size());
             for (auto& file : files) {
                 job.check();
-                const auto& path = file.path;
+                const auto& path = file.entry.path();
                 if (resources_.size() >= kMaximumCatalogResources) {
                     throw std::runtime_error(
                         "Combined standalone-archive and override resources exceed the catalog safety limit");
@@ -790,22 +800,20 @@ bool LooseArchiveCatalog::addOverrideDirectories(
                 resource.offset = 0u;
 
                 try {
-                    resource.directSnapshot =
-                        neoshared::erf::capture_regular_file_identity(path);
-                    if (resource.directSnapshot.size >
+                    // Use directory metadata; do not open each loose file while indexing.
+                    const auto size = file.entry.file_size();
+                    if (size >
                         static_cast<std::uintmax_t>(
                             std::numeric_limits<std::uint32_t>::max())) {
                         resource.status = "Unavailable: override file exceeds 4 GiB";
                     } else {
-                        resource.size = static_cast<std::uint32_t>(
-                            resource.directSnapshot.size);
+                        resource.size = static_cast<std::uint32_t>(size);
                         resource.storedSize = resource.size;
                         resource.boundsValid = true;
                         resource.extractable = true;
                         resource.directRangeExtractable = true;
                         resource.status = "Ready (override file)";
-                        archives_[archiveIndex].actualFileSize +=
-                            resource.directSnapshot.size;
+                        archives_[archiveIndex].actualFileSize += size;
                     }
                 } catch (const std::exception& exception) {
                     resource.status = std::string("Unavailable: ") + exception.what();

@@ -1348,14 +1348,10 @@ std::vector<std::filesystem::path> KeyBifArchive::scanForKeyFiles(
     const std::filesystem::path direct = root / "chitin.key";
     if (std::filesystem::is_regular_file(direct, ec) && !ec) return {direct};
     ec.clear();
-    for (std::filesystem::recursive_directory_iterator it(
-             root, std::filesystem::directory_options::skip_permission_denied, ec), end;
-         !ec && it != end && results.size() < maximumResults; it.increment(ec)) {
+    for (std::filesystem::recursive_directory_iterator it(root), end;
+         it != end && results.size() < maximumResults; ++it) {
         job.check();
-        if (!it->is_regular_file(ec) || ec) {
-            ec.clear();
-            continue;
-        }
+        if (!it->is_regular_file()) continue;
         if (lowerAscii(it->path().filename().string()) == "chitin.key") {
             if (std::find(results.begin(), results.end(), it->path()) == results.end()) {
                 results.push_back(it->path());
