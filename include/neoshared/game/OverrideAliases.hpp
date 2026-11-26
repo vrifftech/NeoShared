@@ -23,6 +23,11 @@ enum class Game {
     JadeEmpire,
 };
 
+// Both games share the search rules; only Override recursion differs.
+inline int overrideDepth(Game game) {
+    return game == Game::Kotor ? 0 : game == Game::Kotor2 ? 1 : -1;
+}
+
 struct OverrideRoot {
     std::string alias;
     std::filesystem::path path;
@@ -321,6 +326,7 @@ inline std::vector<std::filesystem::path> findIniFiles(
 
 inline std::vector<OverrideRoot> discover(
     const std::filesystem::path& installRoot, Game game = Game::Auto) {
+    if (game == Game::Auto) game = detail::detectGame(installRoot);
     std::vector<OverrideRoot> result;
     std::set<std::string> seenPaths;
     std::size_t precedence = 0u;
@@ -347,6 +353,7 @@ inline std::vector<OverrideRoot> discover(
         if (seenPaths.insert(detail::pathKey(*fallback)).second)
             result.push_back(OverrideRoot{"OVERRIDE", *fallback, {}, precedence++, false});
     }
+    for (auto& root : result) root.maximumDepth = overrideDepth(game);
     return result;
 }
 

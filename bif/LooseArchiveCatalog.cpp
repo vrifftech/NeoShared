@@ -742,6 +742,8 @@ bool LooseArchiveCatalog::addOverrideDirectories(
             while (!ec && it != end) {
                 job.check();
                 const auto& entry = *it;
+                if (root.maximumDepth >= 0 && it.depth() >= root.maximumDepth)
+                    it.disable_recursion_pending();
                 std::error_code typeError;
                 const bool symlink = entry.is_symlink(typeError);
                 if (symlink && entry.is_directory(typeError)) {
@@ -764,9 +766,17 @@ bool LooseArchiveCatalog::addOverrideDirectories(
                     "Some override entries could not be enumerated: " + ec.message());
                 ec.clear();
             }
-            std::sort(files.begin(), files.end(), [](const auto& left, const auto& right) {
-                return left.sortKey < right.sortKey;
-            });
+            if (root.maximumDepth >= 0) {
+                // The engine inserts root files first, then immediate subfolders
+                // in filesystem enumeration order. Its first duplicate wins.
+                std::stable_partition(files.begin(), files.end(), [](const auto& file) {
+                    return file.relative.parent_path().empty();
+                });
+            } else {
+                std::sort(files.begin(), files.end(), [](const auto& left, const auto& right) {
+                    return left.sortKey < right.sortKey;
+                });
+            }
 
             indexedFiles.reserve(indexedFiles.size() + files.size());
             resources_.reserve(std::min(kMaximumCatalogResources, resources_.size() + files.size()));

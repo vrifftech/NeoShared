@@ -55,9 +55,10 @@ std::vector<ResourceSelection> selectResourceType(
     const KeyBifArchive& archive, const LooseArchiveCatalog& loose,
     std::uint16_t type);
 
-// Resolve one resource from the current game session. Loose game archives
-// take precedence over KEY/BIF resources; callers may layer Override files
-// above this lookup when reproducing an installed-game search path.
+// Catalogue lookup: Override roots, reverse archive catalogue order, KEY/BIF.
+// The first matching entry within an archive wins, including unavailable entries.
+// A catalogue can include unrelated modules and alternate texture packs; game
+// dependencies require a resolver with the appropriate installation/module mounts.
 std::optional<ResourceSelection> findResource(
     const KeyBifArchive& archive, const LooseArchiveCatalog& loose,
     std::string_view resref, std::uint16_t type);

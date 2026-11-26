@@ -128,22 +128,6 @@ std::vector<ResourceSelection> selectResourceType(
 std::optional<ResourceSelection> findResource(
     const KeyBifArchive& archive, const LooseArchiveCatalog& loose,
     std::string_view resref, std::uint16_t type) {
-    // Engine override aliases have lookup precedence over KEY/BIF and mounted archives.
-    const auto sameOverrideName = [](std::string_view left, std::string_view right) {
-        if (left.size() != right.size()) return false;
-        for (std::size_t i = 0; i < left.size(); ++i) {
-            if (std::tolower(static_cast<unsigned char>(left[i])) !=
-                std::tolower(static_cast<unsigned char>(right[i]))) return false;
-        }
-        return true;
-    };
-    for (std::size_t index = 0; index < loose.resources().size(); ++index) {
-        const auto& resource = loose.resources()[index];
-        if (!resource.overrideFile || resource.type != type) continue;
-        if (sameOverrideName(resource.resref, resref))
-            return ResourceSelection{ResourceSource::LooseArchive, index};
-    }
-
     std::string wanted = lower(resref);
     const auto slash = wanted.find_last_of("/\\");
     if (slash != std::string::npos) wanted.erase(0, slash + 1u);
@@ -151,13 +135,23 @@ std::optional<ResourceSelection> findResource(
     if (dot != std::string::npos) wanted.erase(dot);
     if (wanted.empty()) return std::nullopt;
 
-    for (auto iterator = loose.resources().rbegin(); iterator != loose.resources().rend(); ++iterator) {
-        if (iterator->type == type && iterator->extractable && lower(iterator->resref) == wanted)
-            return ResourceSelection{ResourceSource::LooseArchive, iterator->index};
+    for (const auto& resource : loose.resources()) {
+        if (resource.overrideFile && resource.type == type && lower(resource.resref) == wanted)
+            return ResourceSelection{ResourceSource::LooseArchive, resource.index};
     }
-    for (auto iterator = archive.resources().rbegin(); iterator != archive.resources().rend(); ++iterator) {
-        if (iterator->type == type && iterator->extractable && lower(iterator->resref) == wanted)
-            return ResourceSelection{ResourceSource::KeyBif, iterator->index};
+    // Catalogue order selects the archive; first matching table entry wins.
+    // Do not replace an unreadable match with a lower-priority resource.
+    for (auto owner = loose.archives().rbegin(); owner != loose.archives().rend(); ++owner) {
+        if (owner->overrideDirectory) continue;
+        for (const auto index : owner->resourceIndices) {
+            const auto& resource = loose.resources()[index];
+            if (resource.type == type && lower(resource.resref) == wanted)
+                return ResourceSelection{ResourceSource::LooseArchive, index};
+        }
+    }
+    for (const auto& resource : archive.resources()) {
+        if (resource.type == type && lower(resource.resref) == wanted)
+            return ResourceSelection{ResourceSource::KeyBif, resource.index};
     }
     return std::nullopt;
 }

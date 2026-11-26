@@ -7,7 +7,8 @@
 #include <system_error>
 #include <stdexcept>
 namespace neoshared {
-// Source order when choosing between texture formats.
+// Texture table categories, not the mount order for an exact resource type.
+// Priority ERFs precede RIMs in typed lookup but remain Archive for textures.
 enum class ResourcePriority { Working, Mod, Directory, Image, Archive, Key };
 // Owned snapshot. No pointer back into a tree, retained file session, or archive.
 struct ResourceDocument {

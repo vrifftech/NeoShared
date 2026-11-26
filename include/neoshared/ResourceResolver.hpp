@@ -13,17 +13,27 @@ namespace neoshared {
 // browser-backed resolvers must execute on the JavaScript/UI thread.
 using ResourceResolver = std::function<std::optional<ResourceDocument>(
     const std::string&, std::uint16_t, const bif::JobControl&)>;
-inline constexpr std::uint16_t textureTypes[] = {3007,3006,2033,3};
+// PC game candidates; TXB remains available for explicitly edited Xbox assets.
+inline constexpr std::uint16_t kotorTextureTypes[] = {3007,2033,2059,3};
+inline constexpr std::uint16_t textureTypes[] = {3007,3006,2033,2059,3};
 inline bool isTextureType(std::uint16_t type) {
     return std::find(std::begin(textureTypes),std::end(textureTypes),type)!=std::end(textureTypes);
+}
+// K1 and K2 compare table category before texture format. All ERFs belong
+// to Archive here, including priority ERFs; their priority affects typed lookup.
+inline auto texturePreference(ResourcePriority source, std::uint16_t type) {
+    return std::pair{source, std::find(std::begin(textureTypes), std::end(textureTypes), type) - std::begin(textureTypes)};
 }
 template<class Resolve> std::optional<ResourceDocument> resolveTexture(const std::string& name,const Resolve& resolve) {
     std::optional<ResourceDocument> selected;
     for(const auto type:textureTypes) {
         auto resource=resolve(name,type);
-        if(resource&&(!selected||resource->priority<selected->priority))selected=std::move(resource);
+        if(resource&&(!selected||texturePreference(resource->priority,resource->type)<
+            texturePreference(selected->priority,selected->type)))selected=std::move(resource);
         if(selected&&selected->priority==ResourcePriority::Working)break;
     }
+    if(selected&&selected->type==2059)
+        throw std::runtime_error("The selected texture uses unsupported 4PC format: "+selected->sourceDescription);
     return selected;
 }
 }
