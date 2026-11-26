@@ -1318,15 +1318,20 @@ void TwoDAFile::loadStream(std::istream& in, const std::filesystem::path& filena
         if (!in) {
             throw TwoDAError("Malformed data encountered while reading 2DA column labels.", 3);
         }
-        if (ch == '\t') {
+        // Packed tables can already have their label separators changed to NUL.
+        // A NUL after a completed label terminates the column list.
+        if (ch == '\0' && buffer.empty()) {
+            break;
+        }
+        if (ch == '\t' || ch == '\0') {
             validateTokenSize(buffer, "Column label");
             parsed.columnLabels_.push_back(buffer);
             buffer.clear();
-        } else if (ch != '\0') {
+        } else {
             buffer.push_back(ch);
         }
         ++charCount;
-        if (ch == '\0' || charCount >= static_cast<int>(kBufferSize)) {
+        if (charCount >= static_cast<int>(kBufferSize)) {
             break;
         }
     }
@@ -1349,7 +1354,7 @@ void TwoDAFile::loadStream(std::istream& in, const std::filesystem::path& filena
         if (!in) {
             throw TwoDAError("Malformed data encountered while reading 2DA row labels.", 3);
         }
-        if (ch == '\t') {
+        if (ch == '\t' || ch == '\0') {
             validateTokenSize(buffer, "Row label");
             parsed.rowLabels_[static_cast<std::size_t>(row)] = buffer;
             buffer.clear();
