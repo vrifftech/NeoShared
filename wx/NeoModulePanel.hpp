@@ -35,6 +35,7 @@ struct Context {
     // Emscripten hosts execute its browser range reads on the JS/UI thread.
     std::function<neoshared::ResourceResolver()> captureResourceResolver;
     std::function<neoshared::ResourceResolver(const std::string&)> captureScopedResourceResolver;
+    std::function<neoshared::ResourceResolverFactory(const neoshared::ResourceDocument&)> captureSourceResources;
     std::function<std::shared_ptr<const neoshared::bif::ModFolder>()> captureModFolder;
 
 };

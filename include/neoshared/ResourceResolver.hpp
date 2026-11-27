@@ -13,6 +13,8 @@ namespace neoshared {
 // browser-backed resolvers must execute on the JavaScript/UI thread.
 using ResourceResolver = std::function<std::optional<ResourceDocument>(
     const std::string&, std::uint16_t, const bif::JobControl&)>;
+// Captured on the UI thread; each call obtains current resources for the same source.
+using ResourceResolverFactory = std::function<ResourceResolver()>;
 // PC game candidates; TXB remains available for explicitly edited Xbox assets.
 inline constexpr std::uint16_t kotorTextureTypes[] = {3007,2033,2059,3};
 inline constexpr std::uint16_t textureTypes[] = {3007,3006,2033,2059,3};
