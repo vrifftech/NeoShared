@@ -179,8 +179,19 @@ public:
           frame_(frame), application_(std::move(application)), version_(std::move(version)),
           prepareRestart_(std::move(prepareRestart)),
           session_(wxWebSession::New()), timer_(this) {
+#if !defined(_WIN32) && !defined(__APPLE__)
+        wxString appimage;
+        installable_ = wxGetEnv("APPIMAGE", &appimage) && !appimage.empty();
+#endif
         auto* root = new wxBoxSizer(wxVERTICAL);
         root->Add(new wxStaticText(this, wxID_ANY, application_ + " " + version_), 0, wxALL, FromDIP(12));
+        if (!installable_) {
+            auto* native = new wxStaticText(this, wxID_ANY,
+                "Native Linux build: updates are installed manually. Open the release page, "
+                "download the source and rebuild, or update through your package manager.");
+            native->Wrap(FromDIP(490));
+            root->Add(native, 0, wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(12));
+        }
         status_ = new wxStaticText(this, wxID_ANY, "Check for a newer release.");
         root->Add(status_, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(12));
         notes_ = new wxTextCtrl(this, wxID_ANY, {}, wxDefaultPosition, FromDIP(wxSize(480, 230)),
@@ -192,6 +203,7 @@ public:
         auto* releases = new wxButton(this, wxID_ANY, "Release Page");
         action_ = new wxButton(this, wxID_ANY, "Download Update");
         action_->Disable();
+        action_->Show(installable_);
         auto* close = new wxButton(this, wxID_CLOSE, "Close");
         buttons->Add(releases, 0, wxRIGHT, FromDIP(8));
         buttons->AddStretchSpacer();
@@ -346,6 +358,12 @@ private:
                 timer_.Stop(); progress_->SetValue(0);
                 if (versionNumbers(remote) <= versionNumbers(version_)) {
                     phase_ = Phase::Idle; status_->SetLabel("You have the latest release."); return;
+                }
+                if (!installable_) {
+                    phase_ = Phase::Available;
+                    status_->SetLabel(remote + " is available. Open Release Page for the source and release notes.");
+                    status_->Wrap(FromDIP(490)); Layout(); present();
+                    return;
                 }
                 downloadUrl_.clear(); checksumUrl_.clear();
                 wxString package;
@@ -566,7 +584,7 @@ error=$(rm -rf -- "$work" 2>&1) || report_error 'remove the update files' "$erro
     wxGauge* progress_{};
     wxButton* action_{};
     Phase phase_{Phase::Idle};
-    bool startup_{}, installing_{}, closing_{};
+    bool startup_{}, installing_{}, closing_{}, installable_{true};
     fs::path stage_, target_, prepared_;
     std::future<fs::path> preparing_;
 };
@@ -574,10 +592,6 @@ error=$(rm -rf -- "$work" 2>&1) || report_error 'remove the update files' "$erro
 
 void install(wxFrame& frame, const char* application, const char* version,
              PrepareRestart prepareRestart) {
-#if !defined(_WIN32) && !defined(__APPLE__)
-    wxString appimage;
-    if (!wxGetEnv("APPIMAGE", &appimage)) return;
-#endif
     auto* bar = frame.GetMenuBar();
     if (!bar) { bar = new wxMenuBar; frame.SetMenuBar(bar); }
     const auto index = bar->FindMenu("Help");
